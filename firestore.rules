@@ -1,0 +1,210 @@
+rules_version = '2';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLIENT-SIDE ONLY MODEL (no Cloud Functions, no custom claims)
+//
+// Identity/role is derived entirely from Firestore documents:
+//   • admins/{uid}   with role == 'admin'       → platform admin
+//   • customers/{uid}                           → customer (auto-approved)
+//   • vendors/{uid}   with status == 'Approved' → active vendor
+//   • drivers/{uid}   with status == 'Approved' → active driver
+// A user's profile doc id always equals their auth uid.
+//
+// Self-service rules force a new profile to a safe state (Pending / customer);
+// only an admin can change `status` or `role` afterwards. Financial ledgers
+// are admin-write-only. There is no server, so anything a signed-in user is
+// allowed to write here they can write directly — keep the allow-lists tight.
+// ─────────────────────────────────────────────────────────────────────────────
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function uid() {
+      return request.auth.uid;
+    }
+
+    function adminRole() {
+      return get(/databases/$(database)/documents/admins/$(uid())).data.role;
+    }
+    function isAdmin() {
+      return isSignedIn()
+             && exists(/databases/$(database)/documents/admins/$(uid()))
+             && adminRole() == 'admin';
+    }
+    function isOwner(id) {
+      return isSignedIn() && uid() == id;
+    }
+
+    function isCustomer() {
+      return isSignedIn()
+             && exists(/databases/$(database)/documents/customers/$(uid()));
+    }
+    function isVendor() {
+      return isSignedIn()
+             && exists(/databases/$(database)/documents/vendors/$(uid()));
+    }
+    function isDriver() {
+      return isSignedIn()
+             && exists(/databases/$(database)/documents/drivers/$(uid()));
+    }
+    function isApprovedVendor() {
+      return isVendor()
+             && get(/databases/$(database)/documents/vendors/$(uid())).data.status == 'Approved';
+    }
+    function isApprovedDriver() {
+      return isDriver()
+             && get(/databases/$(database)/documents/drivers/$(uid())).data.status == 'Approved';
+    }
+
+    // An owner may edit their own profile but may NOT move their own
+    // status/role — those are admin-controlled.
+    function ownerKeepsStatusAndRole() {
+      return request.resource.data.status == resource.data.status
+             && request.resource.data.role == resource.data.role;
+    }
+
+    // ── Profiles ────────────────────────────────────────────────────────────
+    match /admins/{id} {
+      allow create: if isOwner(id)
+                     && request.resource.data.role == 'pending'
+                     && request.resource.data.status == 'pending';
+      allow read: if isOwner(id) || isAdmin();
+      allow update, delete: if isAdmin();
+    }
+
+    match /customers/{id} {
+      allow create: if isOwner(id)
+                     && request.resource.data.role == 'customer'
+                     && request.resource.data.status == 'Approved';
+      allow read: if isOwner(id) || isAdmin();
+      allow update: if isAdmin() || (isOwner(id) && ownerKeepsStatusAndRole());
+      allow delete: if isAdmin();
+    }
+
+    match /vendors/{id} {
+      allow create: if isOwner(id)
+                     && request.resource.data.role == 'vendor'
+                     && request.resource.data.status == 'Pending';
+      allow read: if isOwner(id) || isAdmin() || isVendor() || isDriver();
+      allow update: if isAdmin() || (isOwner(id) && ownerKeepsStatusAndRole());
+      allow delete: if isAdmin();
+    }
+
+    match /drivers/{id} {
+      allow create: if isOwner(id)
+                     && request.resource.data.role == 'driver'
+                     && request.resource.data.status == 'Pending';
+      allow read: if isOwner(id) || isAdmin()
+                    || (isVendor() && resource.data.vendorId == uid());
+      allow update: if isAdmin()
+                     || (isOwner(id) && ownerKeepsStatusAndRole())
+                     || (isVendor() && resource.data.vendorId == uid());
+      allow delete: if isAdmin();
+    }
+
+    // ── Fleet ───────────────────────────────────────────────────────────────
+    match /vehicles/{vehicleId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin()
+                     || (isApprovedVendor() && request.resource.data.vendorId == uid());
+      allow update, delete: if isAdmin()
+                             || (isApprovedVendor() && resource.data.vendorId == uid());
+    }
+
+    // ── Bookings ────────────────────────────────────────────────────────────
+    match /bookings/{bookingId} {
+      allow create: if isCustomer()
+                     && request.resource.data.customerId == uid();
+      allow read: if isAdmin()
+                  || (isSignedIn() && resource.data.customerId == uid())
+                  || (isVendor() && resource.data.assignedVendorId == uid())
+                  || (isDriver() && resource.data.assignedDriverId == uid());
+      allow update: if isAdmin()
+                    || (isSignedIn() && resource.data.customerId == uid())
+                    || (isApprovedVendor() && resource.data.assignedVendorId == uid())
+                    || (isApprovedDriver() && resource.data.assignedDriverId == uid());
+      allow delete: if isAdmin();
+    }
+
+    // ── Marketplace ─────────────────────────────────────────────────────────
+    match /marketplace_trips/{tripId} {
+      allow read: if isAdmin() || isVendor() || isDriver();
+      allow write: if isAdmin() || isApprovedVendor() || isApprovedDriver();
+
+      match /bids/{bidId} {
+        allow create: if isApprovedVendor()
+                       && request.resource.data.vendorId == uid();
+        allow read: if isAdmin() || (isVendor() && resource.data.vendorId == uid());
+        allow update, delete: if isAdmin()
+                               || (isApprovedVendor() && resource.data.vendorId == uid());
+      }
+    }
+
+    // ── Payouts ─────────────────────────────────────────────────────────────
+    match /payout_requests/{requestId} {
+      allow create: if (isApprovedVendor() && request.resource.data.vendorId == uid())
+                     || (isApprovedDriver() && request.resource.data.driverId == uid());
+      allow read: if isAdmin()
+                  || (isVendor() && resource.data.vendorId == uid())
+                  || (isDriver() && resource.data.driverId == uid());
+      allow update, delete: if isAdmin();
+    }
+
+    // ── Wallet ledger (admin-managed; no server to write it) ────────────────
+    match /wallet_ledger/{entryId} {
+      allow read: if isAdmin()
+                  || (isVendor() && resource.data.vendorId == uid())
+                  || (isDriver() && resource.data.driverId == uid());
+      allow write: if isAdmin();
+    }
+
+    // ── Customer extras ─────────────────────────────────────────────────────
+    match /saved_places/{placeId} {
+      allow create: if isSignedIn() && request.resource.data.ownerId == uid();
+      allow read, update, delete: if isAdmin()
+                                   || (isSignedIn() && resource.data.ownerId == uid());
+    }
+
+    match /support_tickets/{ticketId} {
+      allow create: if isSignedIn() && request.resource.data.customerId == uid();
+      allow read: if isAdmin() || (isSignedIn() && resource.data.customerId == uid());
+      allow update: if isAdmin();
+    }
+
+    match /notifications/{notifId} {
+      allow create: if isAdmin();
+      allow read, update: if isAdmin()
+                           || (isSignedIn() && resource.data.recipientId == uid());
+      allow delete: if isAdmin();
+    }
+
+    // ── Admin-managed collections ───────────────────────────────────────────
+    match /staff/{staffId} {
+      allow read, write: if isAdmin();
+    }
+    match /penalties/{penaltyId} {
+      allow read: if isAdmin()
+                  || (isVendor() && resource.data.vendorId == uid())
+                  || (isDriver() && resource.data.driverId == uid());
+      allow write: if isAdmin();
+    }
+    match /payments/{paymentId} {
+      allow read: if isAdmin()
+                  || (isSignedIn() && resource.data.customerId == uid());
+      allow write: if isAdmin();
+    }
+
+    match /settings/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Default deny.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

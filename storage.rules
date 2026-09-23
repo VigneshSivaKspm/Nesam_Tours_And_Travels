@@ -1,0 +1,46 @@
+rules_version = '2';
+
+// Client-side-only model — see firestore.rules. Storage rules cross-check the
+// caller's role against their Firestore profile doc (id == uid).
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function uid() {
+      return request.auth.uid;
+    }
+    function isAdmin() {
+      return isSignedIn()
+             && firestore.exists(/databases/(default)/documents/admins/$(uid()))
+             && firestore.get(/databases/(default)/documents/admins/$(uid())).data.role == 'admin';
+    }
+    function isVendorUser() {
+      return isSignedIn()
+             && firestore.exists(/databases/(default)/documents/vendors/$(uid()));
+    }
+
+    // Vendor fleet/business documents: RC, insurance, fitness certificate, permit.
+    match /vendors/{vendorId}/{allPaths=**} {
+      allow read, write: if isAdmin() || (isSignedIn() && uid() == vendorId);
+    }
+
+    // Driver KYC + pre-trip verification photos. Vendors can view (not write)
+    // driver documents; the fleet-ownership check happens in Firestore.
+    match /drivers/{driverId}/{allPaths=**} {
+      allow read: if isAdmin() || (isSignedIn() && uid() == driverId) || isVendorUser();
+      allow write: if isAdmin() || (isSignedIn() && uid() == driverId);
+    }
+
+    // Toll receipts uploaded mid-trip by the assigned driver, audited by admin.
+    match /bookings/{bookingId}/{allPaths=**} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

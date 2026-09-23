@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "NESAM Driver",
+    "slug": "nesam-driver-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#111111"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.nesamtours.driver"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#E21E26"
+      },
+      "package": "com.nesamtours.driver"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}
