@@ -1,117 +1,130 @@
-import React from 'react';
-import { DriverInfo } from '../types';
+import React, { useState } from 'react';
+import { LatLng, TripRecord, UserProfile } from '../types';
+import { raiseSos } from '../services/rideService';
+import { getCurrentPosition } from '../services/geoService';
+import { EMERGENCY_NUMBER, SUPPORT_PHONE, SUPPORT_PHONE_DISPLAY } from '../config/constants';
+import { googleMapsLink, isValidLatLng } from '../utils/geo';
+import { formatPhone, localMobile } from '../utils/format';
+import { describeError } from '../utils/retry';
+import { Modal, Spinner } from './ui';
 
-interface SafetyCenterModalProps {
-  isOpen: boolean;
-  onClose: () => void;
-  driver?: DriverInfo;
-  bookingId?: string;
+export function buildTripShareText(trip: TripRecord, where: LatLng | null): string {
+  const d = trip.driver;
+  const lines = [
+    `I'm on a NESAM Tours & Travels ride (booking ${trip.bookingId}).`,
+    `From: ${trip.pickup.name}`,
+    `To: ${trip.drop.name}`,
+  ];
+  if (d) lines.push(`Driver: ${d.name}${d.phone ? ` (${formatPhone(d.phone)})` : ''}`, `Vehicle: ${[d.vehicleModel, d.vehicleNumber].filter(Boolean).join(' · ') || trip.categoryName}`);
+  if (where && isValidLatLng(where)) lines.push(`Current location: ${googleMapsLink(where)}`);
+  return lines.join('\n');
 }
 
-export const SafetyCenterModal: React.FC<SafetyCenterModalProps> = ({
-  isOpen,
-  onClose,
-  driver,
-  bookingId = 'NST10245',
-}) => {
-  if (!isOpen) return null;
+export async function shareTrip(trip: TripRecord, where: LatLng | null): Promise<'shared' | 'whatsapp' | 'cancelled'> {
+  const text = buildTripShareText(trip, where);
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: `NESAM ride ${trip.bookingId}`, text });
+      return 'shared';
+    } catch (e) {
+      if ((e as DOMException)?.name === 'AbortError') return 'cancelled';
+    }
+  }
+  window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
+  return 'whatsapp';
+}
+
+interface SafetyCenterModalProps {
+  open: boolean;
+  onClose: () => void;
+  trip: TripRecord;
+  profile: UserProfile;
+  /** Best known position of the rider (driver position during a trip). */
+  location: LatLng | null;
+}
+
+export const SafetyCenterModal: React.FC<SafetyCenterModalProps> = ({ open, onClose, trip, profile, location }) => {
+  const [alerting, setAlerting] = useState(false);
+  const [alertState, setAlertState] = useState<'idle' | 'sent' | 'failed'>('idle');
+  const [alertError, setAlertError] = useState('');
+
+  const emergencyLocal = localMobile(profile.emergencyContact);
+
+  const sendAlert = async () => {
+    setAlerting(true);
+    setAlertError('');
+    try {
+      let where = location;
+      if (!where) where = await getCurrentPosition(8000).catch(() => null);
+      await raiseSos(trip, profile, where);
+      setAlertState('sent');
+    } catch (e) {
+      setAlertState('failed');
+      setAlertError(describeError(e, 'The alert could not be sent.'));
+    } finally {
+      setAlerting(false);
+    }
+  };
+
+  const smsBody = encodeURIComponent(`EMERGENCY — I need help.\n${buildTripShareText(trip, location)}`);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl animate-in zoom-in-95 border border-gray-200">
-        {/* Header */}
-        <div className="bg-white text-gray-900 p-5 flex items-center justify-between border-b border-gray-200">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-[#E31E24] flex items-center justify-center text-white font-bold">
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-              </svg>
-            </div>
-            <div>
-              <h3 className="text-sm font-black tracking-wider text-gray-900 uppercase">SAFETY CENTER</h3>
-              <p className="text-[10px] text-gray-500 font-medium">Ride Protection & Emergency Assistance</p>
-            </div>
-          </div>
-          <button
-            onClick={onClose}
-            className="w-8 h-8 rounded-full bg-gray-100 text-gray-500 hover:text-gray-900 flex items-center justify-center text-xs font-bold"
-          >
-            ✕
-          </button>
-        </div>
+    <Modal open={open} onClose={onClose} title="Safety centre">
+      <div className="space-y-3">
+        <a
+          href="tel:112"
+          className="flex items-center justify-center gap-2 w-full py-3 bg-red-600 text-white font-bold rounded-xl text-[14px]"
+        >
+          🆘 Call Emergency (112)
+        </a>
 
-        {/* Safety Options */}
-        <div className="p-5 space-y-3">
-          {/* Option 1: Call 24/7 Helpline */}
+        <a href="tel:+919840012345" className="flex items-center justify-center gap-2 w-full py-3 border-2 border-[#E21B23] text-[#E21B23] font-bold rounded-xl text-[13px]">
+          📞 Call NESAM Support
+        </a>
+
+        {emergencyLocal && (
           <a
-            href="tel:8531970197"
-            className="flex items-center gap-3 p-3.5 rounded-2xl border border-gray-200 hover:border-[#E31E24] bg-gray-50 transition-colors"
+            href={`sms:+91${emergencyLocal}?body=${smsBody}`}
+            className="flex items-center gap-3 p-3.5 rounded-2xl border border-gray-200 bg-gray-50 hover:border-gray-300"
           >
-            <div className="w-10 h-10 rounded-xl bg-red-100 text-[#E31E24] flex items-center justify-center shrink-0 font-bold">
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-              </svg>
-            </div>
-            <div className="flex-1">
-              <div className="text-xs font-black text-[#111111]">Call NESAM Safety Support</div>
-              <div className="text-[10px] text-gray-500 font-medium">24/7 Helpline: 8531970197</div>
-            </div>
-            <span className="text-[10px] font-black text-[#E31E24] uppercase">CALL NOW</span>
+            <span className="w-10 h-10 rounded-xl bg-white border border-gray-200 flex items-center justify-center">💬</span>
+            <span className="flex-1">
+              <span className="block text-xs font-black text-gray-900">Text my emergency contact</span>
+              <span className="block text-[11px] text-gray-500">{formatPhone(emergencyLocal)} · includes trip & location</span>
+            </span>
           </a>
+        )}
 
-          {/* Option 2: Share Live Trip */}
-          <button
-            onClick={() => {
-              alert(`Live Trip Details for Booking ${bookingId} shared with Emergency Contacts.`);
-              onClose();
-            }}
-            className="w-full flex items-center gap-3 p-3.5 rounded-2xl border border-gray-200 hover:border-[#E31E24] bg-gray-50 transition-colors text-left"
-          >
-            <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center shrink-0 font-bold">
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
-              </svg>
-            </div>
-            <div className="flex-1">
-              <div className="text-xs font-black text-[#111111]">Share Trip with Family</div>
-              <div className="text-[10px] text-gray-500 font-medium">Send live tracking link to trusted contacts</div>
-            </div>
-            <span className="text-[10px] font-black text-blue-600 uppercase">SHARE</span>
-          </button>
+        <button
+          onClick={() => {
+            const shareText = `I'm traveling with NESAM Tours & Travels. Track my trip or contact support: +919840012345`;
+            if (navigator.share) {
+              try { navigator.share({ title: 'NESAM Trip Share', text: shareText }); } catch {}
+            } else {
+              const waLink = `https://wa.me/?text=${encodeURIComponent(shareText)}`;
+              window.open(waLink, '_blank');
+            }
+          }}
+          className="w-full flex items-center gap-3 p-3.5 rounded-2xl border border-gray-200 bg-gray-50 hover:border-gray-300 text-left"
+        >
+          <span className="w-10 h-10 rounded-xl bg-white border border-gray-200 flex items-center justify-center">↗</span>
+          <span className="flex-1">
+            <span className="block text-xs font-black text-gray-900">Share trip details</span>
+            <span className="block text-[11px] text-gray-500">Send driver, vehicle and current location to anyone</span>
+          </span>
+        </button>
 
-          {/* Option 3: SOS Emergency */}
-          <button
-            onClick={() => {
-              if (confirm('Are you sure you want to trigger SOS Emergency Alert to local authorities & NESAM Command Center?')) {
-                alert('SOS Alert Triggered! Local dispatch and emergency contacts have been notified.');
-                onClose();
-              }
-            }}
-            className="w-full flex items-center gap-3 p-3.5 rounded-2xl border border-red-200 bg-red-50 hover:bg-red-100 transition-colors text-left"
-          >
-            <div className="w-10 h-10 rounded-xl bg-[#E31E24] text-white flex items-center justify-center shrink-0 font-black">
-              SOS
+        {trip.driver && (
+          <div className="p-3 bg-gray-100 rounded-2xl text-[11px] text-gray-700">
+            <div className="font-bold text-gray-900 mb-0.5">Your ride</div>
+            <div className="flex justify-between gap-2">
+              <span>{trip.driver.name}</span>
+              <span className="font-bold">{trip.driver.vehicleNumber || trip.categoryName}</span>
             </div>
-            <div className="flex-1">
-              <div className="text-xs font-black text-[#D92D20]">POLICE / EMERGENCY SOS</div>
-              <div className="text-[10px] text-red-700 font-medium">Immediate location broadcast to Police (112)</div>
-            </div>
-            <span className="text-[10px] font-black text-[#D92D20] bg-white px-2 py-1 rounded-md border border-red-300">ALERT</span>
-          </button>
-
-          {/* Driver & Vehicle Info */}
-          {driver && (
-            <div className="p-3 bg-gray-100 rounded-2xl text-[11px] text-gray-700 border border-gray-200 mt-2">
-              <div className="font-bold text-[#111111] mb-1">Active Captain Info:</div>
-              <div className="flex justify-between">
-                <span>Captain: {driver.name}</span>
-                <span className="font-bold">{driver.vehicleNumber}</span>
-              </div>
-              <div className="text-gray-500 text-[10px] mt-0.5">Booking Reference: {bookingId}</div>
-            </div>
-          )}
-        </div>
+            <div className="text-gray-500">Booking {trip.bookingId}</div>
+          </div>
+        )}
       </div>
-    </div>
+    </Modal>
   );
 };

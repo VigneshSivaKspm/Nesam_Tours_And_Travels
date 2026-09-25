@@ -1,297 +1,179 @@
 import React, { useState } from 'react';
 import { UserProfile } from '../types';
-import { updateUserProfileInFirestore } from '../services/userFirestoreService';
+import { updateCustomerProfile } from '../services/userFirestoreService';
+import { uploadProfilePhoto, validateImageFile } from '../services/storageService';
+import { Avatar, ErrorNotice, Modal, Spinner, inputCls, labelCls, primaryBtn } from '../components/ui';
+import { SUPPORT_PHONE, SUPPORT_PHONE_DISPLAY } from '../config/constants';
+import { formatINR, formatPhone, isValidEmail, isValidIndianMobile, isValidName, localMobile } from '../utils/format';
+import { describeError } from '../utils/retry';
 
 interface ProfileScreenProps {
   user: UserProfile;
-  onUpdateUser: (updated: UserProfile) => void;
   onOpenSavedPlaces: () => void;
-  onOpenSupport?: () => void;
+  onOpenSupport: () => void;
   onLogout: () => void;
 }
 
-export const ProfileScreen: React.FC<ProfileScreenProps> = ({
-  user,
-  onUpdateUser,
-  onOpenSavedPlaces,
-  onOpenSupport,
-  onLogout,
-}) => {
-  const [activeModal, setActiveModal] = useState<'none' | 'edit' | 'wallet' | 'language' | 'settings'>('none');
-  const [name, setName] = useState(user.name);
-  const [email, setEmail] = useState(user.email);
-  const [emergency, setEmergency] = useState(user.emergencyContact);
-  const [addWalletAmt, setAddWalletAmt] = useState('500');
-  const [language, setLanguage] = useState(user.language || 'English');
+export const ProfileScreen: React.FC<ProfileScreenProps> = ({ user, onOpenSavedPlaces, onOpenSupport, onLogout }) => {
+  const [editing, setEditing] = useState(false);
+  const [confirmLogout, setConfirmLogout] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState<number | null>(null);
+  const [photoError, setPhotoError] = useState('');
 
-  // Toggle States for notification settings
-  const [pushNotifs, setPushNotifs] = useState(true);
-  const [smsNotifs, setSmsNotifs] = useState(true);
-
-  const handleSaveProfile = () => {
-    const updated = {
-      ...user,
-      name,
-      email,
-      emergencyContact: emergency,
-      language,
-    };
-    onUpdateUser(updated);
-    updateUserProfileInFirestore(user.uid, updated);
-    setActiveModal('none');
-  };
-
-  const handleAddWalletMoney = () => {
-    const amt = parseInt(addWalletAmt) || 0;
-    onUpdateUser({
-      ...user,
-      walletBalance: user.walletBalance + amt,
-    });
-    alert(`₹${amt} added to NESAM Wallet successfully via Razorpay!`);
-    setActiveModal('none');
+  const changePhoto = async (file: File | undefined) => {
+    if (!file) return;
+    const invalid = validateImageFile(file);
+    if (invalid) {
+      setPhotoError(invalid);
+      return;
+    }
+    setPhotoError('');
+    setPhotoBusy(0);
+    try {
+      const url = await uploadProfilePhoto(user.uid, file, setPhotoBusy);
+      await updateCustomerProfile(user.uid, { photoUrl: url });
+    } catch (e) {
+      setPhotoError(describeError(e, 'Couldn’t update your photo.'));
+    } finally {
+      setPhotoBusy(null);
+    }
   };
 
   return (
-    <div className="flex-1 bg-[#F7F7F7] overflow-y-auto p-4 space-y-4 max-w-3xl w-full mx-auto">
-      {/* Profile Header Card */}
-      <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm flex items-center gap-4">
-        {user.photoUrl ? (
-          <img src={user.photoUrl} alt={user.name} className="w-16 h-16 rounded-full object-cover border-2 border-[#E31E24]" />
-        ) : (
-          <div className="w-16 h-16 rounded-full flex items-center justify-center text-2xl font-bold text-white border-2 border-[#E31E24]" style={{background: '#E21B23'}}>
-            {(user.name || 'U')[0].toUpperCase()}
-          </div>
-        )}
-        <div className="flex-1">
-          <h2 className="text-base font-black text-[#111111]">{user.name}</h2>
-          <div className="text-xs text-gray-500 font-bold">{user.phone}</div>
-          <div className="text-[10px] text-gray-400">{user.email}</div>
+    <div className="flex-1 overflow-y-auto p-4 space-y-4 max-w-2xl w-full mx-auto">
+      <EditProfileModal open={editing} user={user} onClose={() => setEditing(false)} />
+      <Modal open={confirmLogout} onClose={() => setConfirmLogout(false)} title="Log out?">
+        <p className="text-sm text-gray-600">You’ll need to verify your phone number again to sign back in.</p>
+        <div className="flex gap-2 mt-4">
+          <button onClick={() => setConfirmLogout(false)} className="flex-1 bg-gray-100 py-3 rounded-2xl text-sm font-bold">
+            Stay
+          </button>
+          <button onClick={onLogout} className="flex-1 bg-[#D92D20] text-white py-3 rounded-2xl text-sm font-bold">
+            Log out
+          </button>
         </div>
-        <button
-          onClick={() => setActiveModal('edit')}
-          className="text-xs font-bold text-[#E31E24] hover:underline"
-        >
+      </Modal>
+
+      <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm flex items-center gap-4">
+        <label className="relative cursor-pointer shrink-0" title="Change photo">
+          <Avatar name={user.name} photoUrl={user.photoUrl} className="w-16 h-16 text-xl" />
+          <span className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-white border border-gray-200 shadow flex items-center justify-center text-[11px]">
+            {photoBusy != null ? <Spinner className="w-3 h-3" /> : '✎'}
+          </span>
+          <input type="file" accept="image/*" className="sr-only" onChange={(e) => void changePhoto(e.target.files?.[0])} disabled={photoBusy != null} />
+        </label>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-base font-black text-gray-900 truncate">{user.name}</h2>
+          <div className="text-xs text-gray-600">{formatPhone(user.phone)}</div>
+          <div className="text-[11px] text-gray-400 truncate">{user.email}</div>
+        </div>
+        <button onClick={() => setEditing(true)} className="text-xs font-bold text-[#E31E24] hover:underline">
           Edit
         </button>
       </div>
+      {photoError && <ErrorNotice message={photoError} />}
 
-      {/* NESAM Wallet Card */}
-      <div className="bg-white text-gray-900 p-4 rounded-2xl border border-gray-200 shadow-sm flex items-center justify-between">
-        <div>
-          <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">NESAM WALLET BALANCE</div>
-          <div className="text-xl font-black text-[#20A464]">₹{user.walletBalance.toLocaleString()}</div>
+      <div className="bg-white p-4 rounded-2xl border border-gray-200 shadow-sm">
+        <div className="text-[11px] text-gray-500 font-bold uppercase tracking-wider">NESAM Wallet</div>
+        <div className="text-2xl font-black text-emerald-700">{formatINR(user.walletBalance)}</div>
+        <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-xl mt-3">
+          <div className="text-[13px] font-semibold text-yellow-800">Online wallet top-up coming soon</div>
+          <div className="text-[12px] text-yellow-700 mt-1">Please pay cash to your driver or via UPI during the trip.</div>
         </div>
-        <button
-          onClick={() => setActiveModal('wallet')}
-          className="bg-[#E31E24] text-white px-3 py-1.5 rounded-xl text-xs font-bold shadow hover:bg-[#C41820]"
-        >
-          + Add Money
+      </div>
+
+      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm divide-y divide-gray-100 text-sm">
+        <button onClick={onOpenSavedPlaces} className="w-full p-4 flex justify-between hover:bg-gray-50 font-semibold text-gray-900">
+          Saved places <span className="text-gray-400">→</span>
+        </button>
+        <div className="p-4 flex justify-between">
+          <span className="font-semibold text-gray-900">Emergency contact</span>
+          <span className="text-gray-600">{user.emergencyContact ? formatPhone(user.emergencyContact) : 'Not set'}</span>
+        </div>
+        <button onClick={onOpenSupport} className="w-full p-4 flex justify-between hover:bg-gray-50 font-semibold text-gray-900">
+          Help & support <span className="text-gray-400">→</span>
         </button>
       </div>
 
-      {/* Menu Options */}
-      <div className="bg-white rounded-2xl border border-gray-200 shadow-sm divide-y divide-gray-100">
-        <div
-          onClick={onOpenSavedPlaces}
-          className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-gray-50 text-xs font-bold"
-        >
-          <span className="flex items-center gap-2 text-[#111111]">Saved Locations (Home, Office)</span>
-          <span className="text-gray-400">→</span>
-        </div>
-
-        <div
-          onClick={() => setActiveModal('language')}
-          className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-gray-50 text-xs font-bold"
-        >
-          <span className="flex items-center gap-2 text-[#111111]">App Language</span>
-          <span className="text-[#E31E24] font-bold">{language} →</span>
-        </div>
-
-        <div
-          onClick={() => setActiveModal('settings')}
-          className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-gray-50 text-xs font-bold"
-        >
-          <span className="flex items-center gap-2 text-[#111111]">Notification Settings</span>
-          <span className="text-gray-400">→</span>
-        </div>
-
-        <div className="p-3.5 flex items-center justify-between text-xs font-bold">
-          <span className="flex items-center gap-2 text-gray-700">Emergency Contact</span>
-          <span className="text-[10px] text-gray-500 font-normal">{user.emergencyContact}</span>
-        </div>
-
-        <div
-          onClick={onOpenSupport}
-          className="p-3.5 flex items-center justify-between cursor-pointer hover:bg-gray-50 text-xs font-bold"
-        >
-          <span className="flex items-center gap-2 text-[#111111]">Contact Help & Support</span>
-          <span className="text-gray-400">→</span>
-        </div>
-      </div>
-
-      {/* App Info & Terms */}
-      <div className="bg-white p-4 rounded-2xl border border-gray-200 text-xs space-y-2 text-gray-600">
-        <div className="flex justify-between">
-          <span>Terms of Service</span>
-          <span className="font-bold text-[#111111]">View</span>
-        </div>
-        <div className="flex justify-between">
-          <span>Privacy Policy</span>
-          <span className="font-bold text-[#111111]">View</span>
-        </div>
-        <div className="flex justify-between text-[10px] text-gray-400 pt-1">
-          <span>NESAM App Version</span>
-          <span className="font-mono font-bold">v2.4.0 (Build 882)</span>
-        </div>
-      </div>
-
-      {/* Logout */}
-      <button
-        onClick={onLogout}
-        className="w-full bg-red-50 text-[#D92D20] border border-red-200 py-3 rounded-2xl font-bold text-xs shadow hover:bg-red-100"
-      >
-        Log Out of Account
+      <button onClick={() => setConfirmLogout(true)} className="w-full bg-red-50 text-[#D92D20] border border-red-200 py-3 rounded-2xl font-bold text-sm hover:bg-red-100">
+        Log out
       </button>
-
-      {/* ── MODALS ── */}
-
-      {/* Edit Profile Modal */}
-      {activeModal === 'edit' && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-2xl p-5 space-y-3">
-            <h3 className="text-xs font-black text-[#111111]">EDIT PROFILE DETAILS</h3>
-            <div>
-              <label className="text-[10px] font-bold text-gray-400 block mb-1">Full Name</label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full bg-gray-100 border border-gray-300 rounded-xl px-3 py-2 text-xs font-bold"
-              />
-            </div>
-            <div>
-              <label className="text-[10px] font-bold text-gray-400 block mb-1">Email</label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full bg-gray-100 border border-gray-300 rounded-xl px-3 py-2 text-xs font-bold"
-              />
-            </div>
-            <div>
-              <label className="text-[10px] font-bold text-gray-400 block mb-1">Emergency Contact</label>
-              <input
-                type="text"
-                value={emergency}
-                onChange={(e) => setEmergency(e.target.value)}
-                className="w-full bg-gray-100 border border-gray-300 rounded-xl px-3 py-2 text-xs font-bold"
-              />
-            </div>
-            <div className="flex gap-2 pt-2">
-              <button onClick={() => setActiveModal('none')} className="flex-1 bg-gray-200 text-gray-700 py-2 rounded-xl text-xs font-bold">
-                Cancel
-              </button>
-              <button onClick={handleSaveProfile} className="flex-1 bg-[#E31E24] text-white py-2 rounded-xl text-xs font-bold">
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Add Money Modal */}
-      {activeModal === 'wallet' && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-2xl p-5 space-y-3">
-            <h3 className="text-xs font-black text-[#111111]">ADD MONEY TO NESAM WALLET</h3>
-            <div>
-              <label className="text-[10px] font-bold text-gray-400 block mb-1">Amount (₹)</label>
-              <input
-                type="number"
-                value={addWalletAmt}
-                onChange={(e) => setAddWalletAmt(e.target.value)}
-                className="w-full bg-gray-100 border border-gray-300 rounded-xl px-3 py-2 text-sm font-black text-[#111111]"
-              />
-            </div>
-            <div className="flex gap-2">
-              {['200', '500', '1000'].map((val) => (
-                <button
-                  key={val}
-                  onClick={() => setAddWalletAmt(val)}
-                  className="flex-1 py-1.5 bg-gray-100 text-xs font-bold rounded-lg border hover:border-[#E31E24]"
-                >
-                  +₹{val}
-                </button>
-              ))}
-            </div>
-            <div className="flex gap-2 pt-2">
-              <button onClick={() => setActiveModal('none')} className="flex-1 bg-gray-200 text-gray-700 py-2 rounded-xl text-xs font-bold">
-                Cancel
-              </button>
-              <button onClick={handleAddWalletMoney} className="flex-1 bg-[#20A464] text-white py-2 rounded-xl text-xs font-bold">
-                Pay via Razorpay
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Language Selector Modal */}
-      {activeModal === 'language' && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-2xl p-5 space-y-3">
-            <h3 className="text-xs font-black text-[#111111]">SELECT APP LANGUAGE</h3>
-            {['English', 'Tamil (தமிழ்)'].map((lang) => (
-              <div
-                key={lang}
-                onClick={() => {
-                  setLanguage(lang);
-                  setActiveModal('none');
-                }}
-                className={`p-3 rounded-xl border text-xs font-bold cursor-pointer flex justify-between ${
-                  language.includes(lang.split(' ')[0]) ? 'border-[#E31E24] bg-red-50 text-[#E31E24]' : 'border-gray-200'
-                }`}
-              >
-                <span>{lang}</span>
-                {language.includes(lang.split(' ')[0]) && <span>✓</span>}
-              </div>
-            ))}
-            <button onClick={() => setActiveModal('none')} className="w-full bg-gray-200 text-gray-700 py-2 rounded-xl text-xs font-bold">
-              Close
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Settings Modal */}
-      {activeModal === 'settings' && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-2xl p-5 space-y-3">
-            <h3 className="text-xs font-black text-[#111111]">NOTIFICATION SETTINGS</h3>
-            <div className="flex justify-between items-center text-xs font-bold border-b border-gray-100 pb-2">
-              <span>Push Notifications</span>
-              <input
-                type="checkbox"
-                checked={pushNotifs}
-                onChange={(e) => setPushNotifs(e.target.checked)}
-                className="w-4 h-4 accent-[#E31E24]"
-              />
-            </div>
-            <div className="flex justify-between items-center text-xs font-bold border-b border-gray-100 pb-2">
-              <span>SMS Ride Updates</span>
-              <input
-                type="checkbox"
-                checked={smsNotifs}
-                onChange={(e) => setSmsNotifs(e.target.checked)}
-                className="w-4 h-4 accent-[#E31E24]"
-              />
-            </div>
-            <button onClick={() => setActiveModal('none')} className="w-full bg-[#111111] text-white py-2 rounded-xl text-xs font-bold">
-              Save Settings
-            </button>
-          </div>
-        </div>
-      )}
     </div>
+  );
+};
+
+const EditProfileModal: React.FC<{ open: boolean; user: UserProfile; onClose: () => void }> = ({ open, user, onClose }) => {
+  const [name, setName] = useState(user.name);
+  const [email, setEmail] = useState(user.email);
+  const [emergency, setEmergency] = useState(localMobile(user.emergencyContact));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  React.useEffect(() => {
+    if (open) {
+      setName(user.name);
+      setEmail(user.email);
+      setEmergency(localMobile(user.emergencyContact));
+      setError('');
+    }
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const save = async () => {
+    if (!isValidName(name)) return setError('Enter your full name (letters and spaces, 2–60 characters).');
+    if (!isValidEmail(email)) return setError('Enter a valid email address.');
+    if (!isValidIndianMobile(emergency)) return setError('Enter a 10-digit emergency contact number.');
+    if (emergency === localMobile(user.phone)) return setError('Emergency contact must differ from your own number.');
+    setBusy(true);
+    setError('');
+    try {
+      const allowedFields = {
+        name,
+        email: email.toLowerCase() || null,
+        emergencyContact: `+91 ${emergency}` || null,
+      };
+      await updateCustomerProfile(user.uid, allowedFields);
+      onClose();
+    } catch (e) {
+      setError(describeError(e, 'Couldn’t save your changes.'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Edit profile" dismissible={!busy}>
+      <div className="space-y-3">
+        <div>
+          <label htmlFor="ep-name" className={labelCls}>
+            Full name
+          </label>
+          <input id="ep-name" value={name} onChange={(e) => setName(e.target.value)} className={inputCls} />
+        </div>
+        <div>
+          <label htmlFor="ep-email" className={labelCls}>
+            Email
+          </label>
+          <input id="ep-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} className={inputCls} />
+        </div>
+        <div>
+          <label htmlFor="ep-em" className={labelCls}>
+            Emergency contact (+91)
+          </label>
+          <input
+            id="ep-em"
+            type="tel"
+            inputMode="numeric"
+            maxLength={10}
+            value={emergency}
+            onChange={(e) => setEmergency(e.target.value.replace(/\D/g, '').slice(0, 10))}
+            className={inputCls}
+          />
+        </div>
+        {error && <ErrorNotice message={error} />}
+        <button onClick={() => void save()} disabled={busy} className={primaryBtn}>
+          {busy ? <Spinner label="Saving…" /> : 'Save changes'}
+        </button>
+      </div>
+    </Modal>
   );
 };

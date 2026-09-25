@@ -1,276 +1,240 @@
-import React, { useState, useEffect } from 'react';
-import {
-  LocationItem,
-  TripRecord,
-  UserProfile,
-} from './types';
-
+import React, { useEffect, useMemo, useState } from 'react';
+import type { User } from 'firebase/auth';
+import { NotificationItem, TripRecord, UserProfile } from './types';
 import { AppHeader } from './components/AppHeader';
 import { BottomNavigation, NavTab } from './components/BottomNavigation';
-
-// Screens
-import { OnboardingFlow } from './screens/OnboardingFlow';
-import { HomeScreen } from './screens/HomeScreen';
-import { BookingFlowScreen } from './screens/BookingFlowScreen';
-import { TrackingScreen } from './screens/TrackingScreen';
+import { NetworkBanner } from './components/NetworkBanner';
+import { ErrorNotice, FullScreenLoader, secondaryBtn } from './components/ui';
+import { AuthFlow } from './screens/AuthFlow';
+import { RideBookingScreen } from './screens/RideBookingScreen';
+import { ActiveRideScreen } from './screens/ActiveRideScreen';
 import { TripsHistoryScreen } from './screens/TripsHistoryScreen';
 import { SavedPlacesScreen } from './screens/SavedPlacesScreen';
 import { NotificationsScreen } from './screens/NotificationsScreen';
 import { OffersScreen } from './screens/OffersScreen';
 import { SupportScreen } from './screens/SupportScreen';
 import { ProfileScreen } from './screens/ProfileScreen';
-
-import {
-  subscribeToUserBookings,
-  createBookingInFirestore,
-  cancelBookingInFirestore,
-  getExistingCustomerProfile,
-} from './services/userFirestoreService';
 import { subscribeToAuthUser, signOutUser } from './services/authService';
+import { subscribeToCustomerProfile, subscribeToUserNotifications } from './services/userFirestoreService';
+import { isLiveRide, subscribeToUserBookings } from './services/rideService';
+import { SUPPORT_PHONE, SUPPORT_PHONE_DISPLAY } from './config/constants';
+import { describeError } from './utils/retry';
 
-const fallbackTrip: TripRecord = {
-  id: 'BK-SAMPLE',
-  bookingId: 'NTT-2024-0001',
-  pickup: { id: 'p1', name: 'Chennai Central', address: 'Kannappar Thidal, Chennai', type: 'other' },
-  drop: { id: 'd1', name: 'Chennai Airport Gate 4', address: 'Meenambakkam, Chennai', type: 'airport' },
-  tripType: 'Airport',
-  date: 'Today',
-  time: '10:30 AM',
-  vehicle: {
-    id: 'veh-sedan',
-    name: 'Dzire / Etios',
-    category: 'Sedan',
-    passengers: 4,
-    luggage: 2,
-    basePrice: 450,
-    perKmRate: 13,
-    image: 'https://images.unsplash.com/photo-1552519507-da3b142c6e3d?w=300&auto=format&fit=crop&q=80',
-    tagline: 'Comfortable sedans with AC',
-    eta: '4 mins away'
-  },
-  fare: 750,
-  status: 'Confirmed',
-  paymentStatus: 'Paid',
-  paymentMethod: 'UPI',
-  distanceKm: 22,
-  duration: '45 mins',
-  otp: '4892'
-};
+const BLOCKED_STATUSES = ['Blocked', 'Suspended', 'Rejected', 'Inactive'];
+/** Completed trips younger than this re-open for a rating prompt. */
+const RATING_PROMPT_WINDOW_MS = 3 * 60 * 60 * 1000;
 
 export default function App() {
-  const [user, setUser] = useState<UserProfile | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  const [authUser, setAuthUser] = useState<User | null | undefined>(undefined);
+  const [profile, setProfile] = useState<UserProfile | null | undefined>(undefined);
+  const [profileError, setProfileError] = useState('');
+  const [profileKey, setProfileKey] = useState(0);
 
-  // Primary Navigation State
-  const [activeTab, setActiveTab] = useState<NavTab>('home');
-  const [currentScreen, setCurrentScreen] = useState<
-    'main' | 'booking_flow' | 'tracking' | 'saved_places' | 'offers' | 'support'
-  >('main');
+  useEffect(
+    () =>
+      subscribeToAuthUser((u) => {
+        setAuthUser(u);
+        setProfile(undefined);
+        setProfileError('');
+      }),
+    [],
+  );
 
-  // Active Data Context
-  const [trips, setTrips] = useState<TripRecord[]>([]);
-  const [activeTrackingTrip, setActiveTrackingTrip] = useState<TripRecord>(fallbackTrip);
-  const [bookingServiceType, setBookingServiceType] = useState<
-    'Local' | 'Outstation' | 'Airport' | 'One Way' | 'Round Trip'
-  >('Outstation');
-  const [bookingPreselectedDrop, setBookingPreselectedDrop] = useState<LocationItem | undefined>(undefined);
-
-  // Bootstrap the session from Firebase Auth — a returning user with a
-  // persisted session skips OnboardingFlow entirely on page load/refresh.
   useEffect(() => {
-    const unsubscribe = subscribeToAuthUser(async (fbUser) => {
-      if (!fbUser) {
-        setUser(null);
-        setAuthLoading(false);
-        return;
-      }
-      const profile = await getExistingCustomerProfile(fbUser.uid);
-      setUser(profile);
-      setAuthLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // Subscribe to real-time Firestore bookings for the signed-in customer
-  useEffect(() => {
-    if (!user) return undefined;
-    const unsubscribe = subscribeToUserBookings(user.uid, (liveTrips) => {
-      setTrips(liveTrips);
-      if (liveTrips.length > 0) {
-        const ongoing = liveTrips.find(t => t.status === 'Confirmed' || t.status === 'Driver Assigned' || t.status === 'Trip Started');
-        if (ongoing) setActiveTrackingTrip(ongoing);
-        else setActiveTrackingTrip(liveTrips[0]);
-      }
-    });
-
-    return () => unsubscribe();
-  }, [user]);
-
-  if (authLoading) {
-    return (
-      <div className="web-app-container items-center justify-center bg-[#F7F7F7]">
-        <span className="text-xs text-gray-500 font-bold uppercase tracking-wider">Loading...</span>
-      </div>
+    if (!authUser) return undefined;
+    setProfileError('');
+    return subscribeToCustomerProfile(
+      authUser.uid,
+      (p) => {
+        setProfile(p);
+        setProfileError('');
+      },
+      (e) => setProfileError(describeError(e, 'We couldn’t load your account.')),
     );
-  }
+  }, [authUser?.uid, profileKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // If user is not logged in / onboarded
-  if (!user) {
-    return (
-      <div className="web-app-container items-center justify-center bg-[#F7F7F7] p-4">
-        <div className="w-full max-w-md bg-white rounded-3xl overflow-hidden shadow-xl border border-gray-200">
-          <OnboardingFlow
-            onComplete={(completedUser) => {
-              setUser(completedUser);
-            }}
-          />
+  let body: React.ReactNode;
+  if (authUser === undefined) body = <FullScreenLoader />;
+  else if (!authUser) body = <AuthFlow mode="signed-out" />;
+  else if (profile === undefined && profileError)
+    body = (
+      <div className="min-h-screen flex items-center justify-center p-6 bg-[#F7F7F7]">
+        <div className="w-full max-w-sm space-y-3">
+          <ErrorNotice message={profileError} onRetry={() => setProfileKey((k) => k + 1)} />
+          <button onClick={() => void signOutUser()} className={secondaryBtn}>
+            Sign out
+          </button>
         </div>
       </div>
     );
-  }
-
-  // Handle Starting a New Booking Journey
-  const handleStartBooking = (
-    serviceType: 'Local' | 'Outstation' | 'Airport' | 'One Way' | 'Round Trip',
-    dropLocation?: LocationItem
-  ) => {
-    setBookingServiceType(serviceType);
-    setBookingPreselectedDrop(dropLocation);
-    setCurrentScreen('booking_flow');
-  };
-
-  // Handle Booking Confirmed
-  const handleBookingConfirmed = (newTrip: TripRecord) => {
-    setTrips([newTrip, ...trips]);
-    setActiveTrackingTrip(newTrip);
-    setCurrentScreen('tracking');
-    // Save to Firestore in real-time
-    createBookingInFirestore(newTrip, user.uid);
-  };
-
-  // Handle Cancel Trip
-  const handleCancelTrip = (tripId: string, reason?: string) => {
-    setTrips(
-      trips.map((t) =>
-        t.id === tripId ? { ...t, status: 'Cancelled', paymentStatus: 'Refunded' } : t
-      )
+  else if (profile === undefined) body = <FullScreenLoader label="Loading your account…" />;
+  else if (profile === null) body = <AuthFlow mode="needs-profile" uid={authUser.uid} phone={authUser.phoneNumber ?? ''} />;
+  else if (BLOCKED_STATUSES.includes(profile.status))
+    body = (
+      <div className="min-h-screen flex items-center justify-center p-6 bg-[#F7F7F7] text-center">
+        <div className="max-w-sm space-y-3">
+          <h1 className="text-lg font-black text-gray-900">Account on hold</h1>
+          <p className="text-sm text-gray-600">
+            Your account is currently {profile.status.toLowerCase()}. Please call{' '}
+            <a className="font-bold" href={`tel:${SUPPORT_PHONE}`}>
+              {SUPPORT_PHONE_DISPLAY}
+            </a>{' '}
+            for help.
+          </p>
+          <button onClick={() => void signOutUser()} className={secondaryBtn}>
+            Sign out
+          </button>
+        </div>
+      </div>
     );
-    cancelBookingInFirestore(tripId, reason);
-  };
-
-  const unreadNotifCount = 0;
+  else body = <RiderApp profile={profile} />;
 
   return (
-    <div className="web-app-container">
-      {/* Full-width Desktop & Mobile Web Navigation Header */}
-      <AppHeader
-        user={user}
-        activeTab={activeTab}
-        onSelectTab={(tab) => {
-          setActiveTab(tab);
-          setCurrentScreen('main');
-        }}
-        unreadNotificationsCount={unreadNotifCount}
-        onOpenNotifications={() => {
-          setActiveTab('notifications');
-          setCurrentScreen('main');
-        }}
-        onOpenSavedPlaces={() => setCurrentScreen('saved_places')}
-      />
-
-      {/* Main Content Workspace */}
-      <main className="flex-1 flex flex-col min-h-0 bg-[#F7F7F7]">
-        {currentScreen === 'booking_flow' ? (
-          <BookingFlowScreen
-            initialServiceType={bookingServiceType}
-            initialDropLocation={bookingPreselectedDrop}
-            onCancel={() => setCurrentScreen('main')}
-            onBookingConfirmed={handleBookingConfirmed}
-          />
-        ) : currentScreen === 'tracking' ? (
-          <TrackingScreen
-            trip={activeTrackingTrip}
-            onBack={() => setCurrentScreen('main')}
-            onTripCompleted={() => {
-              setActiveTab('trips');
-              setCurrentScreen('main');
-            }}
-          />
-        ) : currentScreen === 'saved_places' ? (
-          <div className="max-web-width mx-auto w-full py-6">
-            <SavedPlacesScreen ownerId={user.uid} onBack={() => setCurrentScreen('main')} />
-          </div>
-        ) : currentScreen === 'offers' ? (
-          <div className="max-web-width mx-auto w-full py-6">
-            <OffersScreen onApplyOffer={() => handleStartBooking('Outstation')} onBack={() => setCurrentScreen('main')} />
-          </div>
-        ) : currentScreen === 'support' ? (
-          <div className="max-web-width mx-auto w-full py-6">
-            <SupportScreen customerId={user.uid} onBack={() => setCurrentScreen('main')} />
-          </div>
-        ) : (
-          /* Main Tab Routing */
-          <>
-            {activeTab === 'home' && (
-              <HomeScreen
-                onStartBooking={handleStartBooking}
-                onOpenSavedPlaces={() => setCurrentScreen('saved_places')}
-                onOpenOffers={() => setCurrentScreen('offers')}
-              />
-            )}
-
-            {activeTab === 'bookings' && (
-              <div className="max-web-width mx-auto w-full py-6">
-                <TripsHistoryScreen
-                  trips={trips}
-                  onTrackTrip={(trip) => {
-                    setActiveTrackingTrip(trip);
-                    setCurrentScreen('tracking');
-                  }}
-                  onCancelTrip={handleCancelTrip}
-                />
-              </div>
-            )}
-
-            {activeTab === 'trips' && (
-              <TrackingScreen
-                trip={activeTrackingTrip}
-                onBack={() => setActiveTab('home')}
-                onTripCompleted={() => setActiveTab('bookings')}
-              />
-            )}
-
-            {activeTab === 'notifications' && (
-              <div className="max-web-width mx-auto w-full py-6">
-                <NotificationsScreen recipientId={user.uid} />
-              </div>
-            )}
-
-            {activeTab === 'profile' && (
-              <div className="max-web-width mx-auto w-full py-6">
-                <ProfileScreen
-                  user={user}
-                  onUpdateUser={(updated) => setUser(updated)}
-                  onOpenSavedPlaces={() => setCurrentScreen('saved_places')}
-                  onOpenSupport={() => setCurrentScreen('support')}
-                  onLogout={() => { signOutUser(); }}
-                />
-              </div>
-            )}
-          </>
-        )}
-      </main>
-
-      {/* Mobile-only Bottom Bar (Hidden on md+ desktop screens) */}
-      {currentScreen === 'main' && (
-        <div className="md:hidden sticky bottom-0 z-30">
-          <BottomNavigation
-            activeTab={activeTab}
-            onSelectTab={(tab) => setActiveTab(tab)}
-            unreadCount={unreadNotifCount}
-          />
-        </div>
-      )}
-    </div>
+    <>
+      <NetworkBanner />
+      {body}
+    </>
   );
 }
+
+// ── Signed-in rider ─────────────────────────────────────────────────────────
+
+type Overlay = 'saved_places' | 'offers' | 'support' | null;
+
+const RiderApp: React.FC<{ profile: UserProfile }> = ({ profile }) => {
+  const [tab, setTab] = useState<NavTab>('home');
+  const [overlay, setOverlay] = useState<Overlay>(null);
+  const [trips, setTrips] = useState<TripRecord[]>([]);
+  const [tripsLoading, setTripsLoading] = useState(true);
+  const [tripsError, setTripsError] = useState('');
+  const [tripsKey, setTripsKey] = useState(0);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [focused, setFocused] = useState<{ id: string; unconfirmed: boolean } | null>(null);
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    setTripsError('');
+    return subscribeToUserBookings(
+      profile.uid,
+      (t) => {
+        setTrips(t);
+        setTripsLoading(false);
+        setTripsError('');
+      },
+      (e) => {
+        setTripsLoading(false);
+        setTripsError(describeError(e, 'We couldn’t load your trips.'));
+      },
+    );
+  }, [profile.uid, tripsKey]);
+  useEffect(() => subscribeToUserNotifications(profile.uid, setNotifications), [profile.uid]);
+
+  const liveRide = useMemo(() => trips.find((t) => isLiveRide(t)) ?? null, [trips]);
+
+  // Bring the rider to their live ride (or an unrated trip that just ended)
+  // unless they minimised it.
+  useEffect(() => {
+    if (focused) return;
+    const candidate =
+      liveRide ??
+      trips.find(
+        (t) =>
+          t.status === 'Completed' &&
+          t.rating == null &&
+          !!t.completedAt &&
+          Date.now() - t.completedAt.getTime() < RATING_PROMPT_WINDOW_MS,
+      );
+    if (candidate && !dismissed.has(candidate.id)) {
+      setFocused({ id: candidate.id, unconfirmed: false });
+      setTab('home');
+      setOverlay(null);
+    }
+  }, [liveRide, trips, focused, dismissed]);
+
+  const closeRide = () => {
+    if (focused) setDismissed((s) => new Set(s).add(focused.id));
+    setFocused(null);
+  };
+
+  const selectTab = (t: NavTab) => {
+    setTab(t);
+    setOverlay(null);
+  };
+
+  const unread = notifications.filter((n) => !n.read).length;
+
+  let content: React.ReactNode;
+  if (overlay === 'saved_places') content = <SavedPlacesScreen ownerId={profile.uid} onBack={() => setOverlay(null)} />;
+  else if (overlay === 'offers') content = <OffersScreen onBack={() => setOverlay(null)} />;
+  else if (overlay === 'support') content = <SupportScreen customerId={profile.uid} onBack={() => setOverlay(null)} />;
+  else if (tab === 'home')
+    content = focused ? (
+      <ActiveRideScreen key={focused.id} bookingId={focused.id} unconfirmed={focused.unconfirmed} profile={profile} onClose={closeRide} />
+    ) : (
+      <div className="flex-1 flex flex-col min-h-0">
+        {liveRide && (
+          <button
+            onClick={() => setFocused({ id: liveRide.id, unconfirmed: false })}
+            className="shrink-0 bg-gray-900 text-white text-xs font-bold px-4 py-2.5 text-left flex justify-between"
+          >
+            <span>Ride in progress · {liveRide.drop.name}</span>
+            <span>View →</span>
+          </button>
+        )}
+        <RideBookingScreen
+          profile={profile}
+          trips={trips}
+          hasLiveRide={!!liveRide}
+          onRideRequested={(id, unconfirmed) => {
+            setDismissed((s) => {
+              const n = new Set(s);
+              n.delete(id);
+              return n;
+            });
+            setFocused({ id, unconfirmed });
+          }}
+          onOpenSavedPlaces={() => setOverlay('saved_places')}
+        />
+      </div>
+    );
+  else if (tab === 'bookings')
+    content = (
+      <TripsHistoryScreen
+        profile={profile}
+        trips={trips}
+        loading={tripsLoading}
+        error={tripsError}
+        onRetry={() => setTripsKey((k) => k + 1)}
+        onOpenTrip={(t) => {
+          setFocused({ id: t.id, unconfirmed: false });
+          setTab('home');
+        }}
+      />
+    );
+  else if (tab === 'notifications') content = <NotificationsScreen notifications={notifications} />;
+  else
+    content = (
+      <ProfileScreen
+        user={profile}
+        onOpenSavedPlaces={() => setOverlay('saved_places')}
+        onOpenSupport={() => setOverlay('support')}
+        onLogout={() => void signOutUser()}
+      />
+    );
+
+  return (
+    <div className="h-[100dvh] flex flex-col overflow-hidden bg-[#F7F7F7]">
+      <AppHeader
+        user={profile}
+        activeTab={tab}
+        onSelectTab={selectTab}
+        unreadNotificationsCount={unread}
+        onOpenOffers={() => setOverlay('offers')}
+      />
+      <main className="flex-1 flex flex-col min-h-0">{content}</main>
+      <div className="md:hidden shrink-0">
+        <BottomNavigation activeTab={tab} onSelectTab={selectTab} unreadCount={unread} />
+      </div>
+    </div>
+  );
+};

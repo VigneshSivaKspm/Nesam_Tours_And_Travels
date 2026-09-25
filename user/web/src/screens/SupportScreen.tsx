@@ -1,34 +1,65 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { SupportTicket } from '../types';
-import { submitSupportTicketInFirestore } from '../services/userFirestoreService';
+import { submitSupportTicketInFirestore, subscribeToSupportTickets } from '../services/userFirestoreService';
+import { describeError } from '../utils/retry';
+import { str } from '../utils/format';
 
 export const SupportScreen: React.FC<{ customerId: string; onBack?: () => void }> = ({ customerId, onBack }) => {
   const [submitted, setSubmitted] = useState(false);
   const [tickets, setTickets] = useState<SupportTicket[]>([]);
   const [activeTab, setActiveTab] = useState<'faqs' | 'ticket' | 'my_tickets'>('faqs');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
 
   // Form State
-  const [category, setCategory] = useState('Payment Issue');
+  const [category, setCategory] = useState('Payment / Refund Issue');
   const [bookingId, setBookingId] = useState('');
   const [description, setDescription] = useState('');
 
-  const handleCreateTicket = () => {
-    if (!description) return;
-    const newTck: SupportTicket = {
-      id: 'TCK-' + Math.floor(100 + Math.random() * 900),
+  useEffect(
+    () =>
+      subscribeToSupportTickets(customerId, (rows) =>
+        setTickets(
+          rows.map((r) => ({
+            id: r.id,
+            category: str(r.category),
+            bookingId: str(r.bookingId),
+            description: str(r.description),
+            status: r.status || 'Open',
+            createdAt: str(r.createdAt?.toDate?.().toLocaleString('en-IN') ?? r.createdAt),
+          })),
+        ),
+      ),
+    [customerId],
+  );
+
+  const handleCreateTicket = async () => {
+    if (description.trim().length < 10) {
+      setError('Please describe the issue in at least 10 characters.');
+      return;
+    }
+    const newTck = {
+      customerId: customerId,
+      customerName: 'Customer', // Would be from profile
       category,
-      bookingId: bookingId || 'NST10245',
-      description,
+      bookingId: bookingId.trim(),
+      description: description.trim().slice(0, 2000),
       status: 'Open',
-      createdAt: 'Just Now',
     };
-    setTickets([newTck, ...tickets]);
-    submitSupportTicketInFirestore(newTck, customerId);
-    setSubmitted(true);
-    setDescription('');
-    setBookingId('');
-    setActiveTab('my_tickets');
-    setTimeout(() => setSubmitted(false), 3000);
+    setSending(true);
+    setError('');
+    try {
+      await submitSupportTicketInFirestore(newTck);
+      setSubmitted(true);
+      setDescription('');
+      setBookingId('');
+      setActiveTab('my_tickets');
+      setTimeout(() => setSubmitted(false), 3000);
+    } catch (e) {
+      setError(describeError(e, 'We couldn’t submit your ticket. Please try again or call support.'));
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
@@ -137,7 +168,7 @@ export const SupportScreen: React.FC<{ customerId: string; onBack?: () => void }
             <label className="text-[10px] font-bold text-gray-400 block mb-1">Booking ID (Optional)</label>
             <input
               type="text"
-              placeholder="e.g. NST10245"
+              placeholder="e.g. NT260925-ABCDE"
               value={bookingId}
               onChange={(e) => setBookingId(e.target.value)}
               className="w-full bg-gray-100 border border-gray-300 rounded-xl px-3 py-2 text-xs font-bold"
@@ -155,11 +186,17 @@ export const SupportScreen: React.FC<{ customerId: string; onBack?: () => void }
             />
           </div>
 
+          {error && (
+            <p role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-xl p-3">
+              {error}
+            </p>
+          )}
           <button
-            onClick={handleCreateTicket}
-            className="w-full bg-[#E31E24] text-white py-3 rounded-xl font-bold text-xs shadow hover:bg-[#C41820]"
+            onClick={() => void handleCreateTicket()}
+            disabled={sending}
+            className="w-full bg-[#E31E24] text-white py-3 rounded-xl font-bold text-xs shadow hover:bg-[#C41820] disabled:opacity-60"
           >
-            Submit Ticket →
+            {sending ? 'Submitting…' : 'Submit Ticket →'}
           </button>
         </div>
       )}

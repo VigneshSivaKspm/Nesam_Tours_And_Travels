@@ -1,7 +1,14 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'firebase/app-check';
 import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import {
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  type Firestore,
+} from 'firebase/firestore';
+import { getStorage } from 'firebase/storage';
 
 export const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyClCvf1FUnXb6na8UeZ_knRBTCakAVJCQs",
@@ -50,4 +57,21 @@ if (
 }
 
 export const auth = getAuth(app);
-export const db = getFirestore(app);
+
+// Persistent (IndexedDB) cache so trip history and the active ride render
+// offline and survive reloads. Falls back to the in-memory cache where
+// IndexedDB is unavailable (private mode, some embedded webviews) or when
+// Firestore was already initialised (Vite HMR).
+function createFirestore(): Firestore {
+  try {
+    return initializeFirestore(app, {
+      localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+    });
+  } catch (err) {
+    console.warn('[firebase] persistent cache unavailable, using memory cache:', err);
+    return getFirestore(app);
+  }
+}
+
+export const db = createFirestore();
+export const storage = getStorage(app);
