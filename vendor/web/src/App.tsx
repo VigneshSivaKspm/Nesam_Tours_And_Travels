@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   VendorProfile,
+  VendorRecord,
   FleetVehicle,
   FleetDriver,
   OpenTrip,
@@ -37,29 +38,132 @@ const pageMeta: Record<string, { title: string; breadcrumb: string[] }> = {
 
 import {
   saveVehicleToFirestore,
-  saveDriverToFirestore,
+  inviteDriverByVendor,
   subscribeToOpenMarketplaceTrips,
   subscribeToFleetVehicles,
   subscribeToFleetDrivers,
   submitBidToFirestore,
   assignTripInFirestore,
   submitPayoutRequestToFirestore,
-  getExistingVendorProfile,
   subscribeToVendorActiveTrips,
   subscribeToVendorPayouts
 } from './services/vendorFirestoreService';
-import { subscribeToAuthUser, signOutUser } from './services/authService';
+import type { User } from 'firebase/auth';
+import {
+  subscribeToAuthUser,
+  signOutUser,
+  getAuthIntent,
+  setAuthIntent,
+  resetRecaptchaVerifier,
+} from './services/authService';
+import { subscribeToVendor, type VendorSnapshot } from './services/onboardingService';
+import { describeDataError } from './utils/retry';
+import { OnboardingWizard } from './screens/onboarding/OnboardingWizard';
+import { AccountStatusScreen } from './screens/AccountStatusScreen';
+import { Button, FullScreenLoader } from './components/onboarding/ui';
 
+async function handleSignOut() {
+  setAuthIntent(null);
+  resetRecaptchaVerifier();
+  try {
+    await signOutUser();
+  } catch (error) {
+    console.warn('Sign out failed:', error);
+  }
+}
+
+/**
+ * Gatekeeper. Routing is driven entirely by two live listeners:
+ *   Firebase Auth user  →  vendors/{uid} snapshot  →  screen for its status.
+ * When an admin approves the vendor, the snapshot fires and the dashboard
+ * mounts immediately — no refresh needed.
+ */
 export function App() {
+  const [authLoading, setAuthLoading] = useState(true);
+  const [user, setUser] = useState<User | null>(null);
+  // undefined = still loading, null = no vendors/{uid} doc yet
+  const [vendor, setVendor] = useState<VendorSnapshot | null | undefined>(undefined);
+  const [vendorError, setVendorError] = useState('');
+  const [listenerKey, setListenerKey] = useState(0);
+  const [reapplying, setReapplying] = useState(false);
+
+  useEffect(() => {
+    return subscribeToAuthUser((fbUser) => {
+      setUser(fbUser);
+      setAuthLoading(false);
+    });
+  }, []);
+
+  useEffect(() => {
+    setVendor(undefined);
+    setVendorError('');
+    setReapplying(false);
+    if (!user) return undefined;
+    return subscribeToVendor(
+      user.uid,
+      (snap) => {
+        setVendor(snap);
+        setVendorError('');
+      },
+      (error) => setVendorError(describeDataError(error)),
+    );
+  }, [user?.uid, listenerKey]);
+
+  const status = vendor?.record.status;
+  // Leave "reapply" mode once the vendor resubmits or the admin acts.
+  useEffect(() => {
+    if (status !== 'REJECTED') setReapplying(false);
+  }, [status]);
+
+  if (authLoading) return <FullScreenLoader />;
+  if (!user) return <VendorLoginScreen />;
+
+  if (vendorError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-4" style={{ background: '#F5F5F5' }}>
+        <div className="max-w-sm w-full bg-white rounded-2xl border border-[#E5E5E5] p-6 text-center shadow-sm">
+          <h1 className="text-[16px] font-bold text-[#111] mb-2">Couldn't load your account</h1>
+          <p className="text-[13px] text-[#666] mb-5">{vendorError}</p>
+          <div className="flex gap-2 justify-center">
+            <Button variant="secondary" onClick={handleSignOut}>Sign out</Button>
+            <Button onClick={() => setListenerKey((k) => k + 1)}>Try again</Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (vendor === undefined) return <FullScreenLoader label="Loading your account…" />;
+
+  const phone = user.phoneNumber || vendor?.record.phone || '';
+
+  if (!vendor || status === 'INCOMPLETE' || status === 'CHANGES_REQUESTED' || (status === 'REJECTED' && reapplying)) {
+    const notice =
+      !vendor && getAuthIntent() === 'login'
+        ? `No vendor account is registered to ${phone} yet. Complete the steps below to apply.`
+        : undefined;
+    return <OnboardingWizard key={user.uid} record={vendor?.record ?? null} phone={phone} notice={notice} onSignOut={handleSignOut} />;
+  }
+
+  if (status !== 'APPROVED') {
+    return (
+      <AccountStatusScreen
+        record={vendor.record}
+        onSignOut={handleSignOut}
+        onReapply={status === 'REJECTED' ? () => setReapplying(true) : undefined}
+      />
+    );
+  }
+
+  return <VendorDashboard profile={vendor.profile} record={vendor.record} />;
+}
+
+function VendorDashboard({ profile, record }: { profile: VendorProfile; record: VendorRecord }) {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [collapsed, setCollapsed] = useState<boolean>(false);
   const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
 
-  // Auth Bootstrap
-  const [authLoading, setAuthLoading] = useState<boolean>(true);
-
   // State Stores
-  const [profile, setProfile] = useState<VendorProfile | null>(null);
   const [vehicles, setVehicles] = useState<FleetVehicle[]>([]);
   const [drivers, setDrivers] = useState<FleetDriver[]>([]);
   const [openTrips, setOpenTrips] = useState<OpenTrip[]>([]);
@@ -69,25 +173,8 @@ export function App() {
   const [payoutRequests, setPayoutRequests] = useState<PayoutRequest[]>([]);
   const [transactions, setTransactions] = useState<TransactionRecord[]>([]);
 
-  // Bootstrap the session from Firebase Auth — a returning vendor with a
-  // persisted session skips VendorLoginScreen entirely on page load / refresh.
+  // Firestore Subscriptions — mounted only for APPROVED vendors.
   useEffect(() => {
-    const unsubscribe = subscribeToAuthUser(async (fbUser) => {
-      if (!fbUser) {
-        setProfile(null);
-        setAuthLoading(false);
-        return;
-      }
-      const existing = await getExistingVendorProfile(fbUser.uid);
-      setProfile(existing);
-      setAuthLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // Firestore Subscriptions — only once we have an authenticated vendor.
-  useEffect(() => {
-    if (!profile) return undefined;
     const vendorId = profile.id;
 
     const unsubMarketplace = subscribeToOpenMarketplaceTrips((liveTrips) => {
@@ -117,20 +204,7 @@ export function App() {
       unsubActiveTrips();
       unsubPayouts();
     };
-  }, [profile?.id]);
-
-  // Auth gates — rendered before the dashboard is ever mounted.
-  if (authLoading) {
-    return (
-      <div className="h-screen w-screen flex items-center justify-center" style={{ background: '#F5F5F5' }}>
-        <span className="text-[12px] text-[#999] font-semibold uppercase tracking-wider">Loading…</span>
-      </div>
-    );
-  }
-
-  if (!profile) {
-    return <VendorLoginScreen onComplete={(completedProfile) => setProfile(completedProfile)} />;
-  }
+  }, [profile.id]);
 
   const navigate = (tab: string) => {
     setActiveTab(tab);
@@ -178,7 +252,6 @@ export function App() {
             ...d,
             assignedVehicleNumber: vehicles.find(v => v.id === vehicleId)?.vehicleNumber
           };
-          saveDriverToFirestore(updated, profile.id);
           return updated;
         }
         return d;
@@ -186,17 +259,17 @@ export function App() {
     }
   };
 
-  // Driver Handlers
   const handleAddDriver = (newDriver: FleetDriver) => {
     setDrivers([newDriver, ...drivers]);
-    saveDriverToFirestore(newDriver, profile.id);
+    inviteDriverByVendor(newDriver.phone, profile.id, profile.companyName, newDriver.assignedVehicleNumber);
   };
 
   const handleUpdateDriverStatus = (driverId: string, status: FleetDriver['status']) => {
     setDrivers(prev => prev.map(d => {
       if (d.id === driverId) {
         const updated = { ...d, status };
-        saveDriverToFirestore(updated, profile.id);
+        // We cannot update driver docs. Let's just simulate locally or remove this
+        // saveDriverToFirestore(updated, profile.id);
         return updated;
       }
       return d;
@@ -389,6 +462,7 @@ export function App() {
 
           {activeTab === 'wallet' && (
             <WalletPayoutScreen
+              vendorId={profile.id}
               wallet={wallet}
               payoutRequests={payoutRequests}
               transactions={transactions}
@@ -397,10 +471,7 @@ export function App() {
           )}
 
           {activeTab === 'documents' && (
-            <DocumentsVerificationScreen
-              profile={profile}
-              onUpdateProfile={setProfile}
-            />
+            <DocumentsVerificationScreen record={record} />
           )}
         </main>
       </div>

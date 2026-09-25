@@ -35,11 +35,11 @@ export default function DriverEarnings() {
   const driverRows = useMemo(() => {
     return liveDrivers.map((d) => {
       const trips = liveBookings.filter(
-        (b) =>
+        (b: any) =>
           isCompleted(b) &&
-          !!b.driver &&
-          d.name &&
-          b.driver.toLowerCase() === d.name.toLowerCase(),
+          (b.assignedDriverId
+            ? b.assignedDriverId === d.id
+            : !!b.driver && !!d.name && b.driver.toLowerCase() === d.name.toLowerCase()),
       );
       const gross = trips.reduce((s, b) => s + parseAmount(b.fare), 0);
       const commission = gross * COMMISSION_RATE;
@@ -258,7 +258,7 @@ export default function DriverEarnings() {
                 </div>
                 <div>
                   <div className="text-[13px] font-semibold text-[#111]">{p.driverName || p.vendorName || p.driverId || p.vendorId}</div>
-                  <div className="text-[11px] text-[#999]">Requested {p.requestedAt || p.createdAt?.toDate?.().toLocaleDateString?.() || "recently"}</div>
+                  <div className="text-[11px] text-[#999]">Requested {typeof p.requestedAt === "string" ? p.requestedAt : p.createdAt?.toDate?.().toLocaleDateString?.() || "recently"}{p.method ? ` • ${p.method}: ${p.details || ""}` : ""}</div>
                 </div>
               </div>
               <div className="flex items-center gap-4">

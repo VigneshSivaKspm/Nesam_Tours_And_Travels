@@ -1,0 +1,1076 @@
+================================================================================
+ NESAM TOURS & TRAVELS — COMPLETE QA / TEST REPORT
+ All four panels: Admin · Customer (User) · Driver · Vendor
+================================================================================
+
+ Report date      : 25 Sep 2026, snapshot taken 14:48–14:56 IST
+ Repository       : D:\LegendaryOne\Websites\nesamtravels  (branch: main)
+ Firebase project : nesamtoursandtravels-202f5
+ Tester role      : Senior QA / release gate review
+
+ !!! IMPORTANT — READ FIRST !!!
+ While this test was running, THREE other Claude Code sessions were actively
+ editing this same project (driver app, vendor app, customer app, rules).
+ Files changed between 14:15 and 14:47 IST, and the customer app gained new
+ files (pricingService.ts, rideService.ts, storageService.ts) during testing.
+ This report is therefore a SNAPSHOT of the code as it stood at ~14:50 IST.
+ Anything marked "IN PROGRESS" was visibly being rewritten at that moment.
+ Re-run Section 2 (automated checks) after those sessions finish.
+
+--------------------------------------------------------------------------------
+ CONTENTS
+--------------------------------------------------------------------------------
+  1. Executive summary & release verdict
+  2. Automated test results (type-check, build, security-rules tests)
+  3. End-to-end workflow test matrix (cross-panel integration)
+  4. Security findings
+  5. ADMIN PANEL — page by page
+  6. CUSTOMER (USER) APP — screen by screen
+  7. DRIVER APP — screen by screen
+  8. VENDOR APP — screen by screen
+  9. Forms & UI/UX review (modern / professional forms)
+ 10. Non-functional: performance, accessibility, reliability
+ 11. Pre-launch / deployment checklist
+ 12. Prioritised fix plan
+ 13. Regression test checklist (re-test after fixes)
+
+ Severity legend
+   [BLOCKER]  Breaks a core business flow or is a security hole. Must fix before launch.
+   [CRITICAL] Wrong data, silent data loss, or a page crashes/is unusable.
+   [MAJOR]    Feature does not do what the UI claims; fake/demo behaviour.
+   [MINOR]    Cosmetic, UX, validation, consistency.
+   [IMPROVE]  Recommended enhancement, not a defect.
+
+ Status legend (Section 3)
+   PASS / FAIL / BLOCKED (cannot be reached because an earlier step fails) /
+   PARTIAL / NOT BUILT
+
+
+================================================================================
+ 1. EXECUTIVE SUMMARY & RELEASE VERDICT
+================================================================================
+
+ VERDICT:  NOT READY FOR PRODUCTION LAUNCH.
+
+ The platform is part-way through a migration from a demo prototype to a
+ real, Firestore-backed system:
+
+   • Security rules (firestore.rules / storage.rules): REWRITTEN and TESTED
+     (66/66 rules tests pass). Rules are strict and correct — but they are
+     only on disk, NOT DEPLOYED.
+   • Driver app: largely REBUILT on real data (registration, KYC uploads,
+     marketplace accept, OTP-verified trip start, tolls, payouts). Builds.
+     Best-integrated panel.
+   • Vendor app: onboarding/login/KYC REBUILT and good. But the operational
+     dashboard (marketplace, bids, dispatch, fleet, drivers) still uses the
+     OLD service layer — nearly every write is denied by the new rules and
+     the error is swallowed, so the UI shows fake "success".
+   • Customer app: IN PROGRESS — types/constants were replaced but screens
+     were not, so the app currently DOES NOT BUILD (14 type errors, 4 build
+     errors). Every customer route is down.
+   • Admin panel: Drivers page rebuilt (real approvals + invites). Most other
+     cross-panel pages (Bookings, Booking Details, Marketplace, Vendors,
+     Vehicles, Live Trips, Notifications) still write the OLD data shape, so
+     their actions never reach the driver/vendor/customer apps.
+
+ Counts (this snapshot)
+   BLOCKER  : 17
+   CRITICAL : 31
+   MAJOR    : 58
+   MINOR    : 40+
+   Builds   : Admin builds (2 TS errors) · Customer FAILS · Driver builds ·
+              Vendor builds
+
+ TOP 15 LAUNCH BLOCKERS
+   B1  Customer app does not compile — whole customer panel is down.            (§6.0)
+   B2  New firestore.rules / storage.rules / indexes not deployed.              (§11)
+   B3  Admin UI still grants entry to any email containing "admin" or ending
+       "@nesam.in" (App.tsx:334-335, authService.ts:41-42). Data is now
+       protected by rules, but such users get a broken, empty admin shell.     (§4)
+   B4  Razorpay secret key stored in settings/config, which EVERY signed-in
+       user (customers, drivers, vendors) can read.                             (§5.25)
+   B5  Customer can create a booking with any fare (rules only require
+       fare >= 0 → a ₹0 booking is accepted).                                   (§4)
+   B6  Admin "Add Booking" never links a customer account, never publishes to
+       the marketplace, never creates a boarding OTP → driver can never start
+       an admin-created trip.                                                   (§5.2)
+   B7  Admin Marketplace page: vendor bids are invisible (reads a `bids`
+       array; bids live in a sub-collection); "Assign" writes a driver NAME,
+       not assignedDriverId; driver list filtered on a status that never
+       exists → assignment impossible.                                          (§5.4)
+   B8  Admin Booking Details "Assign/Reassign Driver" writes only `driver:
+       name` → driver app never sees the trip.                                  (§5.3)
+   B9  Admin Vendors page lists pending applicants by status "Pending", but
+       vendors now submit as "PENDING_APPROVAL" → NEW VENDOR APPLICATIONS NEVER
+       APPEAR FOR APPROVAL. Uploaded vendor documents cannot be viewed.         (§5.7)
+   B10 Vendor "Accept offered rate" writes an illegal booking update with a
+       FAKE driver ("Muthu Kumar", DRV-7892) — denied by rules, error hidden,
+       UI shows a fake active trip.                                             (§8.5)
+   B11 Vendor counter-bids omit `tripId` → every bid is denied; success
+       banner still shown.                                                      (§8.5)
+   B12 Vendor "Add Driver" tries to create drivers/DRV-xxxx (vendors are not
+       allowed) → silently lost. Vendor has no invite flow.                     (§8.4)
+   B13 Vendor trip dispatch (assign driver+vehicle) denied by rules (extra
+       `id` field, wrong shape) → vendor-owned trips can never get a driver.    (§8.6)
+   B14 Admin Notifications "Send broadcast" writes no recipientId → no
+       customer or driver ever receives it.                                     (§5.21)
+   B15 Customer support tickets never reach admin (no admin Support page);
+       customer "My Tickets" is local memory only (lost on refresh).            (§5.26, §6.8)
+
+ What is genuinely working and tested (keep it):
+   ✓ Security model: rule-derived roles, field allow-lists, legal state
+     transitions, rule-verified boarding OTP, invite-based vendor linking,
+     race-safe marketplace claims (66 emulator tests, all pass).
+   ✓ Driver: phone-OTP auth, registration + KYC photo uploads to Storage,
+     live approval gate, marketplace accept (batched, race-safe), pre-trip
+     photos, GPS-checked "Reached pickup", OTP start, tolls with receipt
+     photos, completion, earnings/wallet derived from real trips, payouts.
+   ✓ Vendor: phone-OTP auth, 5-step onboarding wizard with document uploads,
+     live account-status gate, private KYC collection (vendor_kyc).
+   ✓ Admin: Drivers page (approve / reject with reason / suspend / reinstate
+     / invite / real document viewer), catalog pages (Services, Tour
+     Packages, Locations, Pricing, Coupons, Vehicle Categories) write to
+     Firestore.
+
+
+================================================================================
+ 2. AUTOMATED TEST RESULTS
+================================================================================
+
+ 2.1 TypeScript type-check (npx tsc --noEmit)
+ ─────────────────────────────────────────────
+ ADMIN  — 2 errors
+   src/pages/Penalties.tsx(38)  'entityType' not in type PenaltyRecord
+        → PenaltyRecord type out of date; field written but not typed.
+   src/pages/Vendors.tsx(65)    commission: number assigned to string
+        → Vendor.commission typed string, page writes number. Pick one.
+   (Previously also TourPackages.tsx(588) `setPackages` undefined — a
+    runtime crash on save. FIXED by another session during this test.)
+
+ CUSTOMER — 14 errors  (app mid-refactor)
+   OnboardingFlow.tsx(157)          UserProfile.status missing
+   TrackingScreen.tsx(2)            'DriverInfo' no longer exported
+   TrackingScreen.tsx(147,167)      TripRecord.otp removed
+   TripsHistoryScreen.tsx(31,285)   compares status to 'Trip Started' (no longer a status)
+   TripsHistoryScreen.tsx(265)      TripRecord.vehicle removed
+   userFirestoreService.ts(35-51)   passengerName/passengerPhone/vehicle/otp removed
+   userFirestoreService.ts(95)      mapper returns old TripRecord shape
+   userFirestoreService.ts(271)     UserProfile.status missing
+
+ DRIVER — 0 errors.      VENDOR — 0 errors.
+
+ 2.2 Production build (npx vite build)
+ ─────────────────────────────────────
+ ADMIN    PASS  (JS bundle 1,671 kB / 438 kB gzip — oversize warning)
+ CUSTOMER FAIL  [MISSING_EXPORT] "vehicleCategories" not exported by
+                config/constants.ts (HomeScreen.tsx:2, BookingFlowScreen,
+                App.tsx …) — 4 build errors. NOTHING CAN BE DEPLOYED.
+ DRIVER   PASS  (1,470 kB / 387 kB gzip — oversize warning)
+ VENDOR   PASS  (1,106 kB / 284 kB gzip — oversize warning)
+
+ 2.3 Firestore security-rules tests (local emulator, 66 cases)
+ ─────────────────────────────────────────────────────────────
+ Result: 66 PASSED / 0 FAILED (re-run against the rules as modified by the
+ other sessions at 14:48 — still 66/66).
+
+ Covered: admin identity (email backdoor closed); customer booking create /
+ cannot pre-confirm / cannot mark paid / cannot book for others / cannot
+ edit fare or wallet; driver claim (pending driver denied, steal denied,
+ marketplace-only update denied); OTP (wrong OTP denied, right OTP accepted,
+ driver cannot read OTP); stage/complete transitions; customer cancel +
+ marketplace close; customer rating + review; vendor bid / forged bid /
+ accept / steal / dispatch own vs foreign driver / cannot approve driver;
+ invites (read own only, vendor link only via invite, no self-approval,
+ vendor cannot pre-approve); payouts (Pending only); support tickets.
+
+ NOT covered by automated tests (recommend adding):
+   • storage.rules (no storage emulator run — needs JDK 21 for firebase-tools;
+     only the Firestore emulator jar could be started on JDK 17)
+   • vendor onboarding submission rules (vendorSubmitOk) added by another
+     session after my suite was written
+   • admin-side writes (admin is allow-all by design)
+
+
+================================================================================
+ 3. END-TO-END WORKFLOW TEST MATRIX (CROSS-PANEL INTEGRATION)
+================================================================================
+ Tested by tracing each step's code path against the CURRENT rules (i.e.
+ the behaviour you will get once the new rules are deployed).
+
+ W1  CUSTOMER SELF-BOOKING → DRIVER COMPLETES TRIP
+   1. Customer signs up with phone OTP ......................... BLOCKED (app does not build)
+   2. Customer books a ride (booking + marketplace + OTP) ...... BLOCKED (new rideService.ts
+                                                                  looks correct; screens not wired)
+   3. Admin sees booking in Bookings ........................... PASS (reads all bookings)
+   4. Driver sees trip in marketplace .......................... PASS
+   5. Driver accepts (race-safe batch) ......................... PASS
+   6. Customer sees assigned driver / live stage ............... BLOCKED
+   7. Driver pre-trip photos → En Route ........................ PASS
+   8. Driver "Reached pickup" (GPS ≤ 2 km) ..................... PASS (bypassed if GPS denied — §7.6)
+   9. Customer shows OTP; driver enters OTP → Ongoing .......... PASS (driver side) / BLOCKED (customer side)
+  10. Driver adds tolls, completes ............................. PASS
+  11. Customer rates trip → review queue ....................... BLOCKED
+  12. Admin sees live trip + pre-trip photos ................... PARTIAL (LiveTrips reads photos;
+                                                                  stage names mismatched — §5.5)
+  13. Driver earnings/wallet updated ........................... PASS (client-derived)
+
+ W2  ADMIN CREATES BOOKING FOR WALK-IN / PHONE CUSTOMER
+   1. Admin Add Booking ........................................ PARTIAL (saved, but status 'Confirmed',
+                                                                  no customerId, no marketplace, no OTP)
+   2. Driver can see/accept it ................................. FAIL (never published to marketplace;
+                                                                  status not 'Pending' so claim rule denies)
+   3. Admin assigns a driver ................................... FAIL (writes name only)
+   4. Driver starts trip with OTP .............................. FAIL (no booking_secrets doc)
+   5. Customer sees it in their app ............................ FAIL (no customerId)
+
+ W3  VENDOR MARKETPLACE: BID → ADMIN ACCEPTS → VENDOR DISPATCHES → DRIVER RUNS
+   1. Vendor sees open trips ................................... PARTIAL (shows Assigned/Closed trips too;
+                                                                  fake fallback routes/payouts)
+   2. Vendor submits counter-bid ............................... FAIL (missing tripId → denied, hidden)
+   3. Admin reviews bids ....................................... FAIL (bids sub-collection never read)
+   4. Admin accepts bid → booking.assignedVendorId ............. FAIL (only sets status strings)
+   5. Vendor "Accept offered rate" ............................. FAIL (illegal write + fake driver)
+   6. Vendor dispatches own driver + vehicle ................... FAIL (denied)
+   7. Vendor's driver sees trip ................................ BLOCKED
+
+ W4  DRIVER ONBOARDING
+   1. Driver OTP signup + KYC uploads .......................... PASS
+   2. Admin sees pending driver + real documents ............... PASS (new Drivers page)
+   3. Admin approves → driver workspace unlocks live ........... PASS
+   4. Admin rejects with reason → driver resubmits ............. PASS
+   5. Admin invites driver by phone (pre-approved) ............. PASS
+   6. Vendor invites driver ....................................... NOT BUILT (vendor app writes drivers/
+                                                                  directly; no driver_invites UI)
+
+ W5  VENDOR ONBOARDING
+   1. Vendor OTP signup + 5-step wizard + uploads .............. PASS
+   2. Submit → PENDING_APPROVAL ................................ PASS
+   3. Admin sees application ................................... FAIL (filters "Pending" only)
+   4. Admin views documents / KYC .............................. FAIL (no document viewer)
+   5. Admin approve ............................................. PARTIAL (writes legacy 'Active',
+                                                                  which vendor app maps to APPROVED)
+   6. Admin "request changes" with reason ...................... NOT BUILT (vendor app supports
+                                                                  CHANGES_REQUESTED; admin can't set it)
+   7. Vendor dashboard unlocks live ............................ PASS
+
+ W6  PAYOUTS
+   1. Driver requests payout ................................... PASS
+   2. Vendor requests payout ................................... PARTIAL (created, but vendor wallet is
+                                                                  always ₹0 and goes negative locally)
+   3. Admin approves / defers (Driver Earnings page) ........... PASS for drivers
+   4. Admin processes vendor payouts ........................... PARTIAL (VendorFinance lists but actions
+                                                                  are alert() popups)
+   5. Amount ≤ available balance enforced ...................... FAIL (not enforced anywhere server-side)
+
+ W7  SUPPORT & NOTIFICATIONS
+   1. Customer raises ticket ................................... PASS (write) / FAIL (list is local only)
+   2. Admin sees & answers ticket .............................. NOT BUILT
+   3. Admin sends notification to a user/driver ................ FAIL (no recipientId)
+   4. Customer/driver mark notification read ................... PARTIAL (driver persists; customer local)
+
+ W8  CANCELLATION
+   1. Customer cancels before trip starts ...................... BLOCKED (customer app)
+   2. Admin cancels from Booking Details ....................... PASS (but marketplace entry left Open —
+                                                                  drivers can still accept a cancelled
+                                                                  trip's marketplace card; claim then fails)
+   3. Admin emergency-cancel in Live Trips ..................... FAIL (updates doc id = bookingId field,
+                                                                  not the document id — §5.5)
+
+
+================================================================================
+ 4. SECURITY FINDINGS
+================================================================================
+ S1 [BLOCKER] Admin UI email backdoor still present
+    admin/src/App.tsx:330-335 and admin/src/services/authService.ts:37-42 treat
+    any email containing "admin" or ending "@nesam.in" as Super Admin. Rules
+    no longer honour this (tested), so the hole is closed at data level, but
+    the UI must be fixed: such users land in a shell where every list is
+    empty and every save fails. Remove both blocks; rely on admins/{uid}.role.
+
+ S2 [BLOCKER] Payment gateway secret readable by all users
+    Settings.tsx:29-30 saves rzpKey / rzpSecret into settings/config.
+    firestore.rules: settings → read: isSignedIn(). Any customer/driver/vendor
+    can read the secret. Never store a secret in Firestore for a client-only
+    app. Remove the field; keep secrets only in a server (Cloud Function)
+    when payments are introduced. Split public settings (company name, GST
+    rate, cancel window) from admin-only settings.
+
+ S3 [BLOCKER] Customer-controlled fare
+    Rule accepts any numeric fare >= 0. A customer can book at ₹0 or ₹1.
+    Without a server, mitigate: (a) admin must "confirm fare" before the
+    booking is published (booking status Pending → admin-verified), or (b)
+    enforce minimum fare per category in rules (read vehicle_categories),
+    or (c) move booking creation to a Cloud Function (recommended).
+
+ S4 [CRITICAL] Payout amount not bounded
+    payout_requests create only checks amount > 0. A driver/vendor can
+    request any amount. Admin must verify against the ledger before paying
+    (add the computed available balance next to each request in admin UI).
+
+ S5 [CRITICAL] Marketplace readable by unapproved partners
+    marketplace_trips read: isVendor() || isDriver() — includes Pending /
+    Rejected / Suspended accounts. Customer pickup/drop addresses leak to
+    unvetted accounts. Use isApprovedVendor() || isApprovedDriver().
+
+ S6 [MAJOR] Vendor-linked drivers can self-claim marketplace trips
+    driverClaimOk does not require vendorId == ''. A fleet driver can take
+    trips independently of their vendor. Decide the business rule; enforce.
+
+ S7 [MAJOR] No vehicle-category check on claims
+    A Sedan driver can accept a Tempo Traveller booking.
+
+ S8 [MAJOR] Storage: customers/ path missing
+    user/web storageService.ts:41 uploads avatars to customers/{uid}/… — no
+    matching storage rule → every customer photo upload is denied.
+
+ S9 [MAJOR] driver_presence collection missing from rules
+    Customer rideService.ts:52 reads `driver_presence` (nearby drivers map).
+    No rule → default deny; nothing writes it either (driver app writes
+    drivers/{uid}.presenceStatus). Either add the collection (driver writes
+    own doc, approved customers read) or drop the feature.
+
+ S10 [MAJOR] b2b_partners removed from rules — the B2B page has no backing
+     collection permission (page is also unreachable — §5.24).
+
+ S11 [MINOR] Admin self-signup creates admins/{uid} as 'pending' with no
+     admin UI to approve pending admins (must be done in Firebase console).
+
+ S12 [MINOR] Staff & Roles records do not grant or restrict anything — every
+     approved admin has full access; "permissions" are cosmetic.
+
+ S13 [IMPROVE] Enable Firebase App Check before launch (currently opt-in via
+     VITE_APPCHECK_ENABLED); restrict API key by HTTP referrer in GCP console.
+
+
+================================================================================
+ 5. ADMIN PANEL — PAGE BY PAGE
+================================================================================
+
+ 5.0 Shell / Auth (App.tsx, authService.ts, Login.tsx, Signup.tsx)
+   [BLOCKER]  Email backdoor (S1).
+   [MAJOR]    No "Forgot password" on Login (no sendPasswordResetEmail).
+   [MAJOR]    Signup lets anyone create a pending admin account publicly;
+              consider removing public signup (invite-only admins).
+   [MINOR]    Mobile hamburger overlaps page header content (fixed top-left
+              button, no header padding on small screens).
+   [MINOR]    Loading state is plain text "Loading…".
+   [IMPROVE]  No URL routing — refresh always returns to Dashboard; back
+              button leaves the app; pages cannot be bookmarked/shared.
+              Add react-router (or hash routing).
+
+ 5.1 Dashboard (Dashboard.tsx)
+   [MAJOR]    Reads `b.driver` for driver column — new flows write
+              assignedDriverName (driver app writes both; vendor/admin paths
+              don't) → blank driver names.
+   [MINOR]    Revenue/KPIs use parseAmount on `fare` — OK for both
+              "₹1,500" and 1500. Keep fare numeric everywhere going forward.
+   [IMPROVE]  Show pending actions: vendor applications, driver approvals,
+              open bids, payout requests, open tickets.
+
+ 5.2 Bookings (Bookings.tsx) — includes the "Add New Booking" form (screenshot)
+   [BLOCKER]  Add Booking does not create a working booking:
+              • no customerId (datalist match only fills name/phone) →
+                customer never sees it (L103-120)
+              • status 'Confirmed' (L118) — driver claim rule requires
+                'Pending'; nothing publishes to marketplace_trips
+              • boardingOTP stored ON the booking (L119) — readable by the
+                driver; and no booking_secrets doc → OTP start impossible
+   [CRITICAL] Payment select (Cash/UPI/Card) is saved into `payment`
+              (a STATUS field: Paid/Pending) → table badge shows "Cash".
+              Must save to paymentMethod and set payment: 'Pending'.
+   [CRITICAL] Fare typed manually; calculateCentralFare is imported but never
+              used (L13) — no quote from fare rules.
+   [CRITICAL] Vehicle select hard-coded (Sedan/SUV/Innova/Tempo) instead of
+              admin vehicle_categories.
+   [MAJOR]    fare saved as string "₹1500" — every other panel expects number.
+   [MAJOR]    Empty pickup/drop silently saved as "Pickup Location"/"Drop
+              Location"; date defaults to today; time defaults "10:00 AM".
+              No required-field validation except name; uses alert().
+   [MAJOR]    Service <select> uncontrolled; if Firestore services exist the
+              first option may differ from state default "Airport Taxi" → the
+              saved service is not what is displayed.
+   [MAJOR]    Edit modal: "Assigned Driver" is free text (writes `driver`
+              name, no id); status freely editable to any value, bypassing
+              the lifecycle (e.g. Completed without a driver); saves the
+              entire booking object back (can overwrite concurrent driver
+              updates).
+   [MAJOR]    Date filter compares b.date === 'YYYY-MM-DD' — customer
+              bookings store other formats → filter misses them.
+   [MINOR]    "Sorted by date (newest first)" label — list is NOT sorted.
+   [MINOR]    Pagination not reset when filters change (page 3 of a 1-page
+              result shows empty table).
+   [MINOR]    CSV export: values not escaped for quotes; encodeURI on a data
+              URI breaks on "#" characters.
+   [MINOR]    Table rows use key={i}.
+   [MINOR]    Form UI (screenshot): placeholder-only fields (no labels), no
+              required markers except name, no inline errors, date/time
+              native pickers unstyled, no modal max-height/scroll, no Escape
+              key / overlay-click close, no loading state on submit, modal
+              closes before the save succeeds (optimistic, errors ignored).
+
+ 5.3 Booking Details (BookingDetails.tsx)
+   [BLOCKER]  Assign/Reassign driver writes only `driver: name` + status
+              'Confirmed' (L175-183) — no assignedDriverId → driver app never
+              sees the trip. Dropdown lists ALL drivers incl. pending/rejected.
+   [CRITICAL] Fake data shown as real: customer email "rajesh.k@email.com"
+              (L315), phone fallback "+91 98412 33456" (L314), driver phone
+              "+91 94567 12345" (L359), rating "4.8 ★" (L360), payment method
+              "UPI (PhonePe)" (L484), timeline timestamps "24 Aug 2024"
+              hard-coded (L34-45), "Est. Duration 45 mins".
+   [CRITICAL] If the booking id is not found a fake default booking is
+              rendered (L133-153) instead of "Booking not found".
+   [MAJOR]    "Edit Status" uses window.prompt with free text (L226) — any
+              typo becomes a status.
+   [MAJOR]    Every status change writes twice (setFirestoreDocument +
+              updateFirestoreDocument, L157-158, 169-170, 179-180).
+   [MAJOR]    Fare breakdown is reverse-engineered from the total using an
+              invented table (L50-62) and the "verified" badge compares the
+              number with itself — misleading. Store the breakdown at booking
+              time and display it.
+   [MAJOR]    Cancel does not close the marketplace entry.
+   [MAJOR]    Generated invoice uses customerId = customer NAME (L249) →
+              customer can never read it; company GSTIN/address hard-coded.
+   [MINOR]    Pre-trip photos, tolls, OTP-verified time, odometer not shown.
+
+ 5.4 Marketplace (Marketplace.tsx)
+   [BLOCKER]  Bids never displayed — reads trip.bids[] (L75,182,208); vendor
+              bids are in marketplace_trips/{id}/bids. Use collectionGroup
+              ('bids') (index already declared in firestore.indexes.json).
+   [BLOCKER]  Accept bid only sets marketplace 'Accepted' + booking
+              'Assigned' (L196-197, 224-225, 233-234) — no assignedVendorId,
+              no vendorPayout, bid doc not updated; vendor never gets the trip.
+   [BLOCKER]  "Assign Manually" lists drivers where status === 'Online'
+              (L299) — never true (status is Pending/Approved; presence is
+              presenceStatus) → dropdown always empty; and writes driver
+              name only (L305).
+   [CRITICAL] Renders trip.pickup / trip.drop directly (L147-148). Customer-
+              created trips store pickup as an OBJECT → React crash
+              ("Objects are not valid as a React child") the moment a real
+              customer trip exists.
+   [CRITICAL] Status vocabulary mismatch: vendor writes 'Bidding', driver/
+              vendor claims write 'Assigned'; page expects 'Bid Received' /
+              'Counter Bid' / 'Accepted'. Stats and filters are wrong.
+   [MAJOR]    "Post to Marketplace" form: free-text Booking ID with no
+              validation that the booking exists; creates doc id MKT-… (all
+              other panels assume marketplace id == booking id); payout saved
+              as string "₹1000"; pickup saved as string (driver/vendor expect
+              object); no date/time validation.
+   [MINOR]    "Closed Today" counts all closed, not today.
+
+ 5.5 Live Trips (LiveTrips.tsx)
+   [CRITICAL] Emergency Cancel updates document `trip.bookingId` (L443) —
+              that is the display code, not the Firestore doc id → cancel
+              fails for customer bookings ("NST…" id vs doc id).
+   [MAJOR]    Stage names: page expects "Trip Started / En Route to Pickup /
+              Waiting at Pickup"; drivers write tripStage "En Route Pickup /
+              Reached Pickup / In Progress / Arrived Destination". Stats show 0.
+   [MAJOR]    "OTP verified" = Boolean(verified || boardingOTP) — true as soon
+              as an OTP exists. Use status === 'Ongoing' / startedAt.
+   [MAJOR]    Contact driver/customer buttons use alert() instead of tel: links.
+   [MINOR]    currentLocation falls back to pickup text (no live location).
+
+ 5.6 Customers (Customers.tsx)
+   [MAJOR]    Bookings / Spent / Last booking columns read static fields set
+              to 0/"₹0"/"—" on create; never computed from bookings → always
+              zero for real customers. Compute from bookings (customerId).
+   [MAJOR]    Admin-created customers get random ids (CUS-####, can collide)
+              and are not linked to any login; the real customer signing up
+              with that phone gets a second record (duplicates).
+   [MAJOR]    "Blocked" status is not enforced anywhere (rules/customer app).
+   [MINOR]    email saved as "N/A" when blank; city defaults "Chennai".
+   [MINOR]    alert() used for validation errors (L189, 217).
+
+ 5.7 Vendors (Vendors.tsx)
+   [BLOCKER]  Pending tab / alert filter status === "Pending" (L33); new
+              applications are "PENDING_APPROVAL" → invisible.
+   [BLOCKER]  No document review: audit modal shows hard-coded "✓ Verified
+              GSTIN / ✓ Verified PAN" badges (L250-258) — never the vendor's
+              uploaded files (vendors/{uid}.documents, vendor_kyc/{uid}).
+   [CRITICAL] Approve writes legacy 'Active' (L47); should write 'APPROVED'
+              (+ reviewedAt, reviewedBy). No "Request changes" (sets
+              CHANGES_REQUESTED + reason) and no rejection reason — vendor
+              app supports both.
+   [CRITICAL] Table reads v.name / v.owner / v.fleetSize / v.activeDrivers /
+              v.wallet / v.docs — new vendor docs store business{…},
+              fleet{…}, companyName → blank columns.
+   [MAJOR]    "Register Vendor" creates VEN-<timestamp> docs with fake
+              defaults (phone "+91 90000 00000", email "vendor@nesam.in",
+              docs "Verified") — not linked to a login. Should create a
+              vendor_invites/{+91…} (optionally preApproved) instead.
+   [MINOR]    TS error L65 (commission number vs string).
+
+ 5.8 Drivers (Drivers.tsx) — REBUILT by another session during this test
+   PASS       Approve (status Approved + verified), reject with reason,
+              suspend, reinstate, invite by phone (optional pre-approval),
+              real KYC/vehicle document images, sidebar pending badge.
+   [MINOR]    Re-verify: confirm the modal shows identity (Aadhaar/PAN) only
+              to authorised staff — sensitive PII.
+   [IMPROVE]  Show driver's vendor, presence (Online/On Trip), last seen.
+
+ 5.9 Vehicles (Vehicles.tsx)
+   [CRITICAL] Compliance column is hard-coded badges ("RC: Verified",
+              "Ins: Active", "FC: Valid", "Permit: All India") for every
+              vehicle (L436-439). Audit modal shows fake dates/permit numbers
+              (L477-501). Real vendor vehicle documents are never shown.
+   [MAJOR]    Register Vehicle: no vendor/owner selection, no driver
+              assignment, docStatus 'Approved' immediately, rate "₹12/km"
+              hard-coded, year field captured but not saved, number not
+              format-validated.
+   [MAJOR]    Driver-app vehicles (drivers/{uid}.vehicleInfo) are not listed
+              here — two separate vehicle registries.
+   [MINOR]    No reject action, only approve.
+
+ 5.10 Vehicle Categories (VehicleCategories.tsx) — reviewed at data-flow level
+   PASS       CRUD to vehicle_categories.
+   [MAJOR]    Categories are not used by admin Add Booking (hard-coded list)
+              nor by the driver registration vehicleType list — keep one
+              source of truth.
+
+ 5.11 Services (Services.tsx) — data-flow level
+   PASS       CRUD. [MINOR] Seeds sample descriptions. [MAJOR] onlineBooking
+              flags not honoured by customer app (verify after refactor).
+
+ 5.12 Tour Packages (TourPackages.tsx)
+   FIXED      `setPackages` crash on save (fixed during test).
+   [MINOR]    Seed data uses Unsplash cover images (L28, 83, 153) — replace
+              with owned images or Storage uploads (hot-link risk).
+   [MAJOR]    No customer-side booking of tour packages.
+
+ 5.13 Locations (Locations.tsx) — data-flow level
+   PASS       CRUD + preset loader.
+   [MAJOR]    Lat/lng needed for fixed-route pricing & distance; ensure
+              required when "online booking enabled".
+
+ 5.14 Pricing & Fare (Pricing.tsx) — data-flow level
+   PASS       Fare rules CRUD, simulator.
+   [CRITICAL] Customer app must use THE SAME engine (admin fareEngine.ts)
+              or quotes will differ between admin and customer.
+   [MINOR]    Preset codes via Math.random (L616) can collide.
+
+ 5.15 Offers & Coupons (Offers.tsx) — data-flow level
+   PASS       CRUD + validation simulator.
+   [CRITICAL] usedCount never incremented by bookings; per-customer limits
+              unenforceable client-side. Customer "Offers" screen shows a
+              hard-coded list, not these coupons (§6.7).
+
+ 5.16 Payments (Payments.tsx)
+   [CRITICAL] `payments` collection is never written by any panel → page is
+              permanently empty. Either record cash/UPI collections when a
+              trip completes (admin action) or remove the page until a
+              gateway exists.
+
+ 5.17 Invoices (Invoices.tsx)
+   [CRITICAL] Invoice customerId = customer name (L239) → customer cannot
+              read their invoice (rule compares uid).
+   [MAJOR]    Company details come from settings defaults containing a
+              placeholder GSTIN "33AABCN1234F1Z5" — must be the real GSTIN.
+   [MINOR]    window.confirm for void.
+
+ 5.18 Driver Earnings & TDS (DriverEarnings.tsx)
+   PASS       Payout approve ("Paid") / defer writes.
+   [MAJOR]    Earnings grouped by driver NAME in places (fragile) — use
+              assignedDriverId (partially changed by another session; re-verify).
+   [MAJOR]    No confirmation dialog before "Approve & Pay"; no payment
+              reference/UTR captured; processedAt ISO string vs Timestamp.
+   [MINOR]    15% commission / 1% TDS constants hard-coded — move to settings.
+
+ 5.19 Vendor Finance & GST (VendorFinance.tsx)
+   [MAJOR]    "View details", "Export GSTR-1", "Download GST report" are
+              alert() popups that claim success but do nothing (L178, 208, 243).
+   [MAJOR]    Vendor payout requests: no approve/pay action.
+   [MAJOR]    Reads v.wallet / v.commission legacy fields.
+
+ 5.20 Penalties & Disputes (Penalties.tsx)
+   [MAJOR]    "View", "Configure Rule", "Edit Rule" are alert() stubs
+              (L171, 200, 228); rules table is static.
+   [MAJOR]    "Applied / walletDeducted: true" does not deduct anything —
+              no ledger entry is written; driver/vendor wallets ignore
+              penalties.
+   [MINOR]    TS error L38 entityType.
+
+ 5.21 Notifications (NotificationsPage.tsx)
+   [BLOCKER]  Send writes {type, title, message} with NO recipientId and id
+              = Date.now() (L42-51). Customer/driver apps query recipientId
+              == uid → nobody receives it. Implement: target = one user
+              (recipientId) or fan-out to all customers/drivers/vendors
+              (batched writes, one doc per recipient).
+   [MINOR]    "Mark all read" writes every doc individually (use batch);
+              time stored as "Just now" string.
+
+ 5.22 Reviews & Ratings (Reviews.tsx)
+   [MAJOR]    "Add sample review" creates a PUBLISHED fake review with
+              invented names ("Senthil Kumar", "Ramesh V", "+91 98401 23456")
+              and text (L186-209). Remove before launch — fake reviews on a
+              public site are a legal/consumer-protection risk.
+   [MINOR]    Info text references BK-789234 / Ramesh V (L759).
+
+ 5.23 Reports & Analytics (ReportsAnalytics.tsx)
+   PASS       Computed from live bookings/vendors.
+   [MINOR]    No date-range selector; no export.
+
+ 5.24 B2B Integrations (B2BIntegrations.tsx)
+   [MAJOR]    Page is UNREACHABLE — App.tsx has case "b2b" but Sidebar has
+              no "b2b" item. Content is still mock (initialPartners,
+              mockWebhookLogs L59, fake "sync" setTimeout L73) and its
+              collection is not in the rules. Hide or build properly.
+
+ 5.25 Settings (Settings.tsx)
+   [BLOCKER]  Razorpay secret stored in client-readable doc (S2).
+   [CRITICAL] Defaults are placeholders (GST "33AABCN1234F1Z5", phone
+              "+91 44 4567 8901", address "No. 42, Mount Road…",
+              rzp_live_XXXX). Clicking Save writes them as real values.
+              Start with empty fields + required validation.
+   [MAJOR]    Settings not consumed by other panels (cancel window, GST
+              rate, COD flag, min notice are ignored by customer/driver).
+   [MINOR]    No error handling if save fails (shows "Saved" regardless).
+
+ 5.26 Support Tickets — MISSING PAGE
+   [BLOCKER]  Customers write support_tickets; admin has no page to view,
+              reply, or close them. Add "Support" under System.
+
+ 5.27 Staff & Roles (StaffRoles.tsx)
+   [MAJOR]    Adding staff creates a record only — no login, no admins/{uid},
+              permissions not enforced (S12). "Create role" is a prompt()
+              + alert() stub (L199-200); "Edit permissions" is alert() (L224).
+   [MINOR]    staff id STAFF-<timestamp>.
+
+ 5.28 Header (Header.tsx) & Sidebar (Sidebar.tsx)
+   [MAJOR]    Header "Search anything…" input has no handler (L73-77) — dead.
+   [MINOR]    Sidebar badges now live (vendors/drivers/marketplace) —
+              vendors badge counts "Pending" only (same bug as §5.7).
+   [MINOR]    key={i} lists.
+
+
+================================================================================
+ 6. CUSTOMER (USER) APP — SCREEN BY SCREEN
+================================================================================
+ 6.0 BUILD STATUS: FAILS (IN PROGRESS refactor by another session).
+     types/index.ts and config/constants.ts were replaced with a new model
+     (RideCategory, FareBreakdown, BookingStatus/TripStage, GeoPlace), and
+     new services were added (rideService.ts, pricingService.ts,
+     geoService.ts, storageService.ts). The screens below still use the
+     OLD model, which is why the app does not compile. Findings below
+     describe the screens as they exist now; most will be resolved only if
+     the refactor rewrites them.
+
+ 6.1 Onboarding / Login (OnboardingFlow.tsx)
+   [CRITICAL] TS error L157 (profile.status missing).
+   [MINOR]    Hard-coded Unsplash avatar for new users (L163).
+   [MINOR]    1.5 s forced splash delay (L64).
+
+ 6.2 Home (HomeScreen.tsx)
+   [BLOCKER]  Imports removed export `vehicleCategories` → build failure.
+   [MAJOR]    Pickup pre-filled "Koduvilar Patti, Theni"; search inputs are
+              not passed into the booking flow (typed text is discarded).
+
+ 6.3 Booking Flow (BookingFlowScreen.tsx) — the core customer form
+   [BLOCKER]  Pickup is chosen from 2 hard-coded places, drop from 3
+              hard-coded places (L19-56); no free text / map search.
+   [BLOCKER]  Distance is a constant (180 km, 40 km, 340 km) (L117-122).
+   [BLOCKER]  Travel date/time fixed ("26 Aug 2026", "07:00 AM") — no input.
+   [BLOCKER]  Booking marked "Paid" for any non-cash method with no payment
+              taken (L154); a FAKE driver "Senthil Nathan" / TN 37 BZ 9912 is
+              attached (L161-174) and shown on the success screen.
+   [BLOCKER]  Booking is saved ONLY if the customer clicks "Track Driver
+              Live" — downloading the ticket and leaving loses the booking.
+   [CRITICAL] Passenger phone pre-filled with the company number
+              "+91 85319 70197" (L108); name "Valued Customer".
+   [CRITICAL] Coupon NESAM200 hard-coded; toll ₹150 flat; GSTIN pre-filled
+              "33AAACN9042K1Z8".
+   [MAJOR]    "Razorpay UPI / Card / NetBanking" offered although no gateway
+              is integrated. Offer Cash (and "pay driver by UPI") only until
+              a gateway exists.
+   [MAJOR]    Printable "Tax Invoice" generated client-side before the trip
+              happens, with fake driver/vehicle.
+   (The new rideService.ts / pricingService.ts appear to address most of
+    this; re-test after the screens are rewired.)
+
+ 6.4 Tracking (TrackingScreen.tsx)
+   [BLOCKER]  Entirely simulated: fake driver "Kumar M." (L7-19), buttons
+              "Demo: Skip to Captain Assigned", "Demo: Captain Arrived",
+              "Demo: Complete Ride" (L90, 152, 205); ETA "06 mins", speed
+              "58 km/h" hard-coded. Not bound to the booking's real status /
+              tripStage / assigned driver.
+   [CRITICAL] OTP fallback '8821' shown if none (L147,167) — must read
+              booking_secrets/{id}.
+   [MAJOR]    Rating submits nothing (alert only, L243) — should update
+              booking rating + create reviews/{bookingId} (rules ready).
+   [MAJOR]    "Message" button is an alert (L138).
+   [MAJOR]    Map (MapView.tsx) is a drawn grid "Simulated Map" with default
+              driver name 'Kumar M.' — no real map.
+
+ 6.5 Trips History (TripsHistoryScreen.tsx)
+   [CRITICAL] Filters on 'Trip Started' (no longer a status) → Upcoming tab
+              misses Assigned/Ongoing trips; Cancel only offered for
+              'Confirmed' (should be Pending/Confirmed/Assigned).
+   [MAJOR]    "Download PDF Invoice" is an alert (L118); invoice modal
+              computes GST from total locally.
+   [MAJOR]    Cancel sets payment 'Refunded' locally although nothing was
+              paid; rules forbid customers changing payment.
+
+ 6.6 Profile (ProfileScreen.tsx)
+   [BLOCKER]  "Add money" shows "₹X added to NESAM Wallet successfully via
+              Razorpay!" (L50) — FAKE; no money moves; local balance
+              increases. Remove until a gateway exists.
+   [MAJOR]    Save writes the whole profile object (incl. walletBalance,
+              phone, uid) — only name/email/photoUrl/emergencyContact/
+              language are permitted by rules; will be denied if any of the
+              other values differ.
+   [MAJOR]    Avatar upload path customers/{uid}/… has no storage rule (S8).
+   [MINOR]    Notification/SMS toggles are local only.
+
+ 6.7 Offers (OffersScreen.tsx)
+   [MAJOR]    Shows hard-coded coupons (NESAMFIRST, AIRPORT50 …) instead of
+              admin `coupons`; codes will not validate at checkout.
+   [MINOR]    "Copied" alert without actually copying (no clipboard API).
+
+ 6.8 Support (SupportScreen.tsx)
+   [BLOCKER]  "My tickets" is local state; tickets vanish on refresh; admin
+              replies can never be shown. subscribeToSupportTickets exists
+              in the service but is unused.
+   [MINOR]    Ticket id TCK-### (3 random digits) collides quickly.
+
+ 6.9 Saved Places (SavedPlacesScreen.tsx)
+   PASS       Live subscribe/save/delete by ownerId.
+   [MINOR]    No coordinates captured → saved places can't be used for
+              distance/fare calculation.
+
+ 6.10 Notifications (NotificationsScreen.tsx)
+   [MAJOR]    "Mark all read" is local only (rules allow recipients to set
+              read/readAt).
+   [MAJOR]    Header unread count hard-coded 0 (App.tsx).
+
+ 6.11 Safety Center (SafetyCenterModal.tsx)
+   [CRITICAL] "Share trip" and "SOS" show success alerts (L65, L86) but
+              notify nobody. For a safety feature this is dangerous — replace
+              with tel:112, tel:<support>, and a real share link (Web Share
+              API / WhatsApp link), or clearly label as "call".
+
+
+================================================================================
+ 7. DRIVER APP — SCREEN BY SCREEN (rebuilt by another session; best state)
+================================================================================
+ 7.1 Auth (AuthScreen.tsx) — PASS: OTP login/signup intent, resend timer,
+     reCAPTCHA reset. [MINOR] focus management via setTimeout.
+ 7.2 Registration / KYC (RegistrationScreen.tsx) — PASS: profile, identity,
+     licence, vehicle, bank, photo uploads (compressed), invite pre-fill,
+     resubmit after rejection.
+   [MAJOR]    Vehicle type list is local, not admin vehicle_categories.
+   [MAJOR]    Aadhaar/PAN numbers + bank stored on drivers/{uid}, which the
+              linked vendor can READ (rule) — move PII to a private
+              driver_kyc/{uid} doc (as done for vendors).
+ 7.3 Verification Status (VerificationStatusScreen.tsx) — PASS (live).
+   [MINOR]    SUPPORT_PHONE '+919840012345' (L5) differs from customer app's
+              '+918531970197' — confirm the real control-room number; keep in
+              one config.
+ 7.4 Dashboard (DashboardScreen.tsx) — PASS: presence toggle, open offers,
+     active trip card, earnings summary.
+   [MAJOR]    Offers not filtered by the driver's vehicle category (S7).
+ 7.5 Pre-Trip Verification — PASS: 4 real photos + odometer, stored on
+     booking.preTrip.
+ 7.6 Trip Execution (TripExecutionScreen.tsx) — PASS: navigate links,
+     GPS radius check, OTP start (rule-verified), tolls with receipt photo
+     (saved immediately), completion.
+   [MAJOR]    If location permission is denied/unavailable the 2 km check is
+              skipped silently (getPosition → null). Show a warning and
+              record "location unavailable" on the booking.
+   [MINOR]    End odometer not validated ≥ start odometer.
+ 7.7 Earnings (EarningsScreen.tsx) — PASS (derived from completed trips).
+   [MAJOR]    Vendor-linked drivers are shown platform earnings
+              (fare × 0.85) even though their vendor pays them → wallet and
+              payouts double-count. Hide wallet/payout for vendor drivers.
+ 7.8 Wallet & Payouts — PASS: request payout, history.
+   [MAJOR]    Balance is computed on the device; not authoritative (S4).
+ 7.9 Notifications — PASS (live, mark read persisted).
+ 7.10 Profile — PASS (contact details, edit documents).
+ 7.11 Header / BottomNav / SOS — PASS. [MINOR] SOS copy says it "dispatches
+      live GPS to NESAM Safety Team" — it only offers phone calls; reword.
+
+
+================================================================================
+ 8. VENDOR APP — SCREEN BY SCREEN
+================================================================================
+ 8.1 Login (VendorLoginScreen.tsx) — PASS: OTP, resend cooldown, intent.
+ 8.2 Onboarding Wizard (Business / Documents / Fleet / Payout / Review)
+     — PASS: validation, uploads with progress/retry, draft save,
+     private vendor_kyc, submit → PENDING_APPROVAL (or APPROVED via invite).
+   [MINOR]    Re-verify offline handling (useOnlineStatus) on slow networks.
+ 8.3 Account Status (AccountStatusScreen.tsx) — PASS: live status, reapply.
+   [BLOCKED]  Depends on admin support for CHANGES_REQUESTED / reasons (§5.7).
+
+ --- Operational dashboard (App.tsx VendorDashboard + vendorFirestoreService.ts):
+     STILL THE OLD IMPLEMENTATION ---
+
+ 8.4 Driver Management (DriverManagementScreen.tsx)
+   [BLOCKER]  Add Driver creates drivers/DRV-#### (L32) — vendors are not
+              allowed to create driver docs → write denied, error swallowed
+              (saveDriverToFirestore catch → console.warn). Must write
+              driver_invites/{+91…} with vendorId (rules + driver app ready).
+   [CRITICAL] Default photo Unsplash (L27); list mapping invents values:
+              phone '+91 94432 12345', email 'driver@nesam.in', licence
+              'TN43 20180004521', rating 4.8, trips 120, photo Unsplash
+              (vendorFirestoreService.ts L80-90).
+   [CRITICAL] Suspend / status change writes the whole driver object incl.
+              status → denied (vendor may only change fleetStatus /
+              assignedVehicle*). Maps admin status 'Approved' → 'Available'
+              and writes it back.
+   [MAJOR]    Pending invites not listed.
+
+ 8.5 Marketplace & Bidding (MarketplaceBiddingScreen.tsx)
+   [BLOCKER]  Accept offered rate (App.tsx L280-300) builds a fake trip
+              ("Verified Booking Customer", "+91 98400 11223", vehicle
+              'TN 09 BX 4821', driver 'Muthu Kumar'/'DRV-7892') and writes
+              status 'Assigned' + driver → violates vendorClaimOk (must be
+              status 'Confirmed', no driver, batched with marketplace update).
+              Denied, hidden; UI shows the fake trip.
+   [BLOCKER]  Counter-bid: bid doc lacks tripId (service ~L175) → denied;
+              bid id BID-### (3 random digits); success banner shown anyway;
+              "my bids" list is local only (not loaded from Firestore).
+   [CRITICAL] Open-trip feed has no status filter — Assigned/Closed trips
+              are shown as open; fallback fake route "Chennai Airport Gate 4 ➔
+              Puducherry White Town", payout 4200, date "Today, 26 Aug"
+              (service L140-160).
+
+ 8.6 Trip Assignment / Dispatch (TripAssignmentScreen.tsx)
+   [BLOCKER]  assignTripInFirestore uses setDoc(merge) adding `id` and
+              assignedVendorId, no tripStage → denied by vendorDispatchOk.
+   [CRITICAL] Fallbacks: customer phone '+91 98400 00000', vehicle
+              'TN 01 AB 1234', driver phone '+91 94400 00000', fare 2000
+              (service L225-240). Vendor payout = fare × 0.9 instead of the
+              agreed vendorPayout.
+   [MAJOR]    Success message claims "Push dispatch alert sent to driver
+              mobile app" — no push exists.
+
+ 8.7 Fleet / Vehicles (FleetScreen.tsx)
+   [CRITICAL] RC / insurance "uploads" default to Unsplash images (L30-31);
+              no real upload (the new storageService is not used here).
+   [MAJOR]    Vehicle id VEH-### (3 digits) collides; vehicle mapping
+              invents 'TN 01 AB 1234', 'Toyota', 'Innova', '2023'.
+   [MAJOR]    Status/driver changes write the whole vehicle object; if
+              docStatus differs it is denied.
+
+ 8.8 Wallet & Payouts (WalletPayoutScreen.tsx)
+   [CRITICAL] Wallet is DEFAULT_WALLET (₹0) and never computed; requesting
+              a payout subtracts locally → negative balance. Compute from
+              completed vendor bookings (vendorPayout) − payouts.
+   [MINOR]    Payout id VPO-### collides.
+
+ 8.9 Documents (DocumentsVerificationScreen.tsx) — PASS (reads onboarding
+     record).
+ 8.10 Dashboard (DashboardScreen.tsx) — PARTIAL: counts are live, earnings
+      use the ₹0 wallet.
+ 8.11 Header (Header.tsx)
+   [MAJOR]    Shows mockNotifications (L53-80, "assigned to Muthu Kumar")
+              whenever the vendor has no real notifications.
+   [MINOR]    signOut errors swallowed (L306).
+
+
+================================================================================
+ 9. FORMS & UI/UX REVIEW  (the "modern and professional forms" request)
+================================================================================
+ Inventory: ~400 form controls. Admin alone uses 15+ different input
+ styles (e.g. "w-full p-2 border rounded text-xs" ×55, "p-2.5 … rounded-lg
+ text-[12px]" ×40, "rounded-xl text-xs" ×34 …). Customer uses bold grey
+ boxes, driver/vendor another two styles.
+
+ Common defects across forms
+   [MAJOR]  Placeholder-only fields with no <label> (Add Booking, Post to
+            Marketplace, Add Driver (old), Register Vendor, Register Vehicle,
+            Add Staff, Penalties…). Labels disappear as soon as the user
+            types; fails accessibility (WCAG 1.3.1 / 3.3.2).
+   [MAJOR]  Validation via alert(); no inline field errors; no required
+            markers; no phone / email / GSTIN / PAN / vehicle-number / IFSC
+            pattern validation in admin forms.
+   [MAJOR]  Modals: no max-height/scroll (tall forms overflow on laptops),
+            no Escape-to-close, no overlay click close, no focus trap, no
+            body scroll lock, "✕" text button without aria-label.
+   [MAJOR]  Optimistic close: modal closes and shows the row before the save
+            succeeds; failures are swallowed (console.warn) — user believes
+            data was saved.
+   [MAJOR]  Submit buttons have no loading/disabled state → double-submits
+            create duplicate records.
+   [MINOR]  Uncontrolled inputs (no value=) — reopening a modal shows stale
+            DOM values that differ from state.
+   [MINOR]  Native date/time pickers unstyled; selects use default chevron.
+   [MINOR]  Inconsistent brand red (#E21B23, #E31E24, #E21E26) across panels.
+
+ Recommended design system (apply to all four panels)
+   • Shared tokens: brand #E21B23 (pick ONE), radius 10px, border #E4E4E7,
+     focus ring 3-4px brand/15%, text 13-14px, field height 42px.
+   • Components: <Modal> (title, subtitle, body scroll, sticky footer,
+     Esc/overlay close, focus trap), <Field label required hint error>,
+     .field input/select/textarea, <Button variant primary|secondary|danger
+     loading>. Vendor onboarding (components/onboarding/ui.tsx) already has
+     a good start — reuse it as the base for all panels.
+   • Every form: labels above fields, 2-column grid on desktop / 1 on
+     mobile, grouped sections ("Customer", "Trip", "Vehicle & Fare"),
+     inline validation on blur + on submit, disabled submit while saving,
+     toast on success, keep modal open with error on failure.
+   • Add Booking specifically: customer search (existing customer →
+     customerId, or "new walk-in"), service & vehicle from Firestore, pickup
+     /drop from master locations with coordinates, date ≥ today + min notice,
+     live fare quote from calculateCentralFare with editable override,
+     payment method (Cash/UPI) separate from payment status, "Publish to
+     marketplace" / "Assign driver now" choice.
+
+
+================================================================================
+ 10. NON-FUNCTIONAL
+================================================================================
+ Performance
+   [MAJOR]  Bundles 1.1–1.7 MB (gzip 284–438 kB) in a single chunk. Add route
+            -level code splitting (React.lazy) — recharts and firebase are
+            the heaviest.
+   [MAJOR]  Admin subscribes to ENTIRE collections (bookings, drivers,
+            customers…) on many pages simultaneously with no limit/orderBy
+            — cost and memory grow with data. Add pagination/queries.
+   [MINOR]  Many pages subscribe to bookings independently (Dashboard,
+            Sidebar, Services, Locations, Pricing, Offers, Invoices…) — share
+            one subscription via context.
+
+ Reliability / error handling
+   [CRITICAL] Admin service helpers swallow all errors (return false +
+            console.warn); many callers ignore the return value → silent
+            failures. Same in old vendor service. Surface errors to the user.
+   [MAJOR]  Listener errors call back with [] — a permission error looks
+            like "no data". Show an error state.
+   [MINOR]  IDs generated with Math.random / Date.now in many places —
+            use Firestore auto-ids.
+
+ Accessibility
+   [MAJOR]  Icon-only buttons without aria-label; colour-only status;
+            focus outlines removed (focus:outline-none) without a visible
+            replacement on several inputs.
+
+ Data consistency
+   [CRITICAL] Mixed fare types (number vs "₹1,500" string), mixed date
+            formats ("Today", "26 Aug 2026", "2026-09-25"), mixed status
+            vocabularies (see §5.4/§5.5). Standardise: fare number (INR),
+            date 'YYYY-MM-DD', time 'HH:mm', timestamps as serverTimestamp.
+
+ Content / legal
+   [MAJOR]  Fake names, phone numbers and reviews in seed/demo data
+            (admin/src/data/mockData.ts, vendor/web/src/data/mockVendorData.ts,
+            user/web/src/data/mockUserData.ts, Reviews seed). Delete the mock
+            files once nothing imports them; never seed published reviews.
+   [MINOR]  Unsplash hot-linked images in several screens.
+
+
+================================================================================
+ 11. PRE-LAUNCH / DEPLOYMENT CHECKLIST
+================================================================================
+   [ ] All four panels: tsc 0 errors, vite build PASS.
+   [ ] Deploy rules + indexes together with the app code that matches them:
+         firebase deploy --only firestore:rules,firestore:indexes,storage
+       (Deploying the new rules while the admin/vendor pages above are
+        unfixed will make those pages fail. Deploying the apps without the
+        rules will make driver/vendor/customer writes fail.)
+   [ ] Add storage rule for customers/{uid}/…; add or remove driver_presence.
+   [ ] Firebase console: Phone auth enabled; authorised domains include the
+       four production hostnames; SMS region policy = India.
+   [ ] App Check registered and enforced (reCAPTCHA Enterprise key).
+   [ ] API key restricted by HTTP referrer.
+   [ ] Settings: real company name, GSTIN, address, phone, support numbers
+       (driver + customer apps currently use different numbers).
+   [ ] Remove Razorpay secret from Firestore.
+   [ ] Remove email-based admin access from admin UI.
+   [ ] Create real vehicle categories, services, fare rules, locations
+       (collections are currently EMPTY in production — verified).
+   [ ] Delete mock data files and fake seed buttons (Reviews seed, Offers /
+       Pricing / Locations presets — or confirm presets are real).
+   [ ] Backups: enable Firestore PITR / scheduled exports.
+   [ ] Monitoring: enable Crashlytics/Sentry-style error reporting for web.
+   [ ] Privacy policy & terms pages (collecting Aadhaar/PAN/bank details).
+   [ ] Legal: payment collection method decided (cash only until gateway).
+
+
+================================================================================
+ 12. PRIORITISED FIX PLAN
+================================================================================
+ PHASE 1 — make it build and safe (≈1 day)
+   1. Finish the customer-app refactor so it compiles (§6.0).
+   2. Remove admin email backdoor (S1); remove rzpSecret (S2).
+   3. Fix the 2 admin TS errors.
+   4. Storage rule for customers/; decide driver_presence.
+   5. Marketplace read → approved partners only (S5).
+
+ PHASE 2 — make the four panels talk to each other (≈3–4 days)
+   6. Admin: shared booking service (createBooking, assignDriver,
+      publishToMarketplace, acceptBid, rejectBid, cancelBooking) used by
+      Bookings, Booking Details, Marketplace, Live Trips.
+   7. Admin Marketplace: collectionGroup('bids') review queue; accept bid →
+      booking.assignedVendorId/Name + vendorPayout + status Confirmed.
+   8. Admin Vendors: PENDING_APPROVAL queue, document viewer (vendors +
+      vendor_kyc), Approve / Request changes / Reject with reason,
+      Register Vendor → vendor_invites.
+   9. Vendor dashboard: rewrite vendorFirestoreService (claim batch, bids
+      with tripId, dispatch, invites, fleet uploads, computed wallet,
+      real notifications); delete mock fallbacks.
+  10. Customer: booking flow on rideService/pricingService, live tracking
+      from booking + booking_secrets, cancel, rating/review, support ticket
+      list, real notifications, remove fake wallet top-up & SOS alerts.
+  11. Admin Support Tickets page; Notifications with recipients.
+
+ PHASE 3 — forms & polish (≈2 days)
+  12. Shared Modal/Field/Button design system in all panels; convert every
+      form (start with Add Booking from the screenshot).
+  13. Remove all alert()/prompt() stubs; implement or hide the features.
+  14. Code splitting, paginated queries, error states.
+
+ PHASE 4 — verification
+  15. Extend emulator tests (storage rules, vendor onboarding, admin flows).
+  16. Manual E2E on real phones: run workflows W1–W8 end to end with four
+      test accounts (admin, customer, driver, vendor + vendor's driver).
+
+
+================================================================================
+ 13. REGRESSION TEST CHECKLIST (run after fixes)
+================================================================================
+ Accounts: A = admin, C = customer, D = independent driver, V = vendor,
+           VD = vendor's driver (invited by V).
+
+  #  Test                                                           Expected
+ ─── ─────────────────────────────────────────────────────────────── ───────────────────────────────
+  1  C signs up by OTP                                              customers/{uid} created, Approved
+  2  C books a ride (valid pickup/drop/date)                        booking Pending, marketplace Open,
+                                                                     booking_secrets OTP, fare from rules
+  3  C books with fare tampered to 0 (devtools)                     rejected (after S3 fix)
+  4  A sees the booking with customer name/phone                    yes
+  5  D (approved) sees it in marketplace, accepts                   booking Assigned, marketplace Assigned
+  6  D2 tries to accept the same trip                               error "no longer available"
+  7  C sees driver name/phone/vehicle, status "Driver assigned"     live, no refresh
+  8  D pre-trip photos → C sees "Driver on the way"                 live
+  9  D "Reached pickup" > 2 km away                                 blocked with distance message
+ 10  D enters wrong OTP                                              "Incorrect OTP", status unchanged
+ 11  D enters C's OTP                                               status Ongoing
+ 12  C tries to cancel now                                          not allowed
+ 13  D adds toll with photo, completes                              status Completed, tolls saved
+ 14  C rates 5★ + comment                                            booking rating, reviews/{id} Pending
+ 15  A publishes review                                              visible as Published
+ 16  D earnings + wallet increased; requests payout                  payout Pending
+ 17  A approves payout                                               D sees Paid
+ 18  V bids on an open trip                                          bid visible in A's queue
+ 19  A accepts bid                                                   booking Confirmed, V sees trip
+ 20  V dispatches VD + vehicle                                       booking Assigned, VD sees trip
+ 21  V "accept offered rate" on another trip                        booking Confirmed for V
+ 22  V invites VD by phone; VD signs up                              VD linked to V, Pending
+ 23  A approves VD                                                   VD workspace unlocks live
+ 24  New vendor completes onboarding                                 appears in A's pending queue
+ 25  A requests changes with reason                                  vendor sees reason, can resubmit
+ 26  A approves vendor                                               vendor dashboard unlocks live
+ 27  A creates booking for walk-in customer                          driver can accept & run it (OTP
+                                                                     given to A / SMS to customer)
+ 28  A assigns driver from Booking Details                           driver sees trip immediately
+ 29  A cancels booking                                               marketplace Closed, driver/vendor
+                                                                     trip disappears, C sees Cancelled
+ 30  C raises support ticket                                         A sees it, replies, C sees reply
+ 31  A sends notification to C and to all drivers                   received in apps; mark-read persists
+ 32  Non-admin email "x-admin@gmail.com" signs into admin            "Access not authorised"
+ 33  Customer reads settings/config                                  no secrets present
+ 34  Refresh on every page of every panel                            no crash, data reloads
+ 35  Mobile 360px width: every form usable, modals scroll            yes
+ 36  Slow 3G / offline: uploads show progress/retry, errors shown    yes
+
+================================================================================
+ END OF REPORT
+================================================================================

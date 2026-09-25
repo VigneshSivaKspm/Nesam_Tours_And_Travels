@@ -1,5 +1,12 @@
 import { useState, useEffect } from "react";
-import { Booking, TravelService, MasterLocation, FareRule, VehicleCategory, Customer } from "../types";
+import {
+  Booking,
+  TravelService,
+  MasterLocation,
+  FareRule,
+  VehicleCategory,
+  Customer,
+} from "../types";
 import {
   subscribeBookings,
   subscribeServices,
@@ -100,23 +107,24 @@ export default function Bookings({
       return;
     }
     const id = "NTT-" + Date.now();
-    const createdBooking: Booking = {
+    // Generate OTP separately (do NOT put on booking doc)
+    const boardingOTP = Math.floor(1000 + Math.random() * 9000).toString();
+
+    const createdBooking: any = {
       id,
-      customer: newBooking.name.trim(),
-      customerName: newBooking.name.trim(),
-      customerPhone: newBooking.phone.trim(),
-      phone: newBooking.phone.trim(),
+      customer: newBooking.name,
+      phone: newBooking.phone,
       service: newBooking.service,
-      pickup: newBooking.pickup.trim() || "Pickup Location",
-      drop: newBooking.drop.trim() || "Drop Location",
+      pickup: newBooking.pickup || "Pickup Location",
+      drop: newBooking.drop || "Drop Location",
       date: newBooking.date || new Date().toISOString().split("T")[0],
-      time: newBooking.time || "10:00 AM",
+      time: newBooking.time || "10:00",
       vehicle: newBooking.vehicle,
-      fare: "₹" + (newBooking.fare || 0),
-      payment: newBooking.payment,
-      paymentStatus: "Pending",
-      status: "Confirmed",
-      boardingOTP: String(Math.floor(1000 + Math.random() * 9000)),
+      fare: Number(newBooking.fare) || 0,
+      paymentMethod: newBooking.payment,
+      payment: "Pending",
+      status: "Pending",
+      source: "admin",
     };
 
     // Optimistically update bookings list immediately
@@ -138,10 +146,30 @@ export default function Bookings({
     // Save to Firestore
     try {
       await setFirestoreDocument(COLLECTIONS.BOOKINGS, id, createdBooking);
+      await setFirestoreDocument("booking_secrets", id, {
+        boardingOTP,
+        bookingId: id,
+      });
+      await setFirestoreDocument(COLLECTIONS.MARKETPLACE, id, {
+        id,
+        pickup: newBooking.pickup || "Pickup Location",
+        drop: newBooking.drop || "Drop Location",
+        date: newBooking.date || new Date().toISOString().split("T")[0],
+        time: newBooking.time || "10:00",
+        service: newBooking.service,
+        vehicle: newBooking.vehicle,
+        fare: Number(newBooking.fare) || 0,
+        status: "Open",
+        source: "admin",
+      });
     } catch (err) {
       console.warn("Error saving booking to Firestore:", err);
     }
   };
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, statusFilter, serviceFilter, dateFilter]);
 
   const statuses = [
     "All",
@@ -225,7 +253,7 @@ export default function Bookings({
   const handleSaveEdit = async () => {
     if (!editingBooking) return;
     setLiveBookings((prev) =>
-      prev.map((b) => (b.id === editingBooking.id ? editingBooking : b))
+      prev.map((b) => (b.id === editingBooking.id ? editingBooking : b)),
     );
     await setFirestoreDocument(
       COLLECTIONS.BOOKINGS,
@@ -582,13 +610,24 @@ export default function Bookings({
                   className="w-full p-2 border rounded text-xs"
                 >
                   {liveServices.length > 0
-                    ? liveServices.filter(s => s.status === "Active").map(s => (
-                        <option key={s.id} value={s.name}>{s.name}</option>
-                      ))
-                    : ["Airport Taxi", "Outstation Cab", "One Way Taxi", "Local Rental", "Tour Package"].map(srvName => (
-                        <option key={srvName} value={srvName}>{srvName}</option>
-                      ))
-                  }
+                    ? liveServices
+                        .filter((s) => s.status === "Active")
+                        .map((s) => (
+                          <option key={s.id} value={s.name}>
+                            {s.name}
+                          </option>
+                        ))
+                    : [
+                        "Airport Taxi",
+                        "Outstation Cab",
+                        "One Way Taxi",
+                        "Local Rental",
+                        "Tour Package",
+                      ].map((srvName) => (
+                        <option key={srvName} value={srvName}>
+                          {srvName}
+                        </option>
+                      ))}
                 </select>
               </div>
               <div>
@@ -755,13 +794,24 @@ export default function Bookings({
                 }
               >
                 {liveServices.length > 0
-                  ? liveServices.filter(s => s.status === "Active").map(s => (
-                      <option key={s.id} value={s.name}>{s.name}</option>
-                    ))
-                  : ["Airport Taxi", "Outstation Cab", "One Way Taxi", "Local Rental", "Tour Package"].map(srvName => (
-                      <option key={srvName} value={srvName}>{srvName}</option>
-                    ))
-                }
+                  ? liveServices
+                      .filter((s) => s.status === "Active")
+                      .map((s) => (
+                        <option key={s.id} value={s.name}>
+                          {s.name}
+                        </option>
+                      ))
+                  : [
+                      "Airport Taxi",
+                      "Outstation Cab",
+                      "One Way Taxi",
+                      "Local Rental",
+                      "Tour Package",
+                    ].map((srvName) => (
+                      <option key={srvName} value={srvName}>
+                        {srvName}
+                      </option>
+                    ))}
               </select>
 
               <input
@@ -774,7 +824,9 @@ export default function Bookings({
               />
               <datalist id="master-pickup-locations">
                 {liveLocations
-                  .filter((l) => l.status === "Active" && l.pickupEnabled !== false)
+                  .filter(
+                    (l) => l.status === "Active" && l.pickupEnabled !== false,
+                  )
                   .map((l) => (
                     <option key={l.id} value={l.name}>
                       {l.city} ({l.type})
@@ -792,7 +844,9 @@ export default function Bookings({
               />
               <datalist id="master-drop-locations">
                 {liveLocations
-                  .filter((l) => l.status === "Active" && l.dropEnabled !== false)
+                  .filter(
+                    (l) => l.status === "Active" && l.dropEnabled !== false,
+                  )
                   .map((l) => (
                     <option key={l.id} value={l.name}>
                       {l.city} ({l.type})
@@ -840,10 +894,14 @@ export default function Bookings({
                 onChange={(e) =>
                   setNewBooking({ ...newBooking, payment: e.target.value })
                 }
+                value={newBooking.payment}
               >
-                <option>Cash</option>
-                <option>UPI</option>
-                <option>Card</option>
+                <option value="" disabled hidden>
+                  Payment Method (Cash/UPI/Card)
+                </option>
+                <option value="Cash">Cash</option>
+                <option value="UPI">UPI</option>
+                <option value="Card">Card</option>
               </select>
 
               <button

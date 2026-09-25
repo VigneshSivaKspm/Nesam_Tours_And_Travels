@@ -1,5 +1,5 @@
 import React from 'react';
-import { Home, Navigation, DollarSign, Wallet, FileCheck, Bell, User } from 'lucide-react';
+import { Home, Navigation, DollarSign, Wallet, Bell, User } from 'lucide-react';
 
 interface BottomNavProps {
   activeTab: string;
@@ -17,7 +17,6 @@ export const BottomNav: React.FC<BottomNavProps> = ({
   const tabs = [
     { id: 'dashboard', label: 'Home', icon: Home },
     { id: 'trip', label: 'Trip', icon: Navigation, badge: hasActiveTrip ? 'LIVE' : null },
-    { id: 'registration', label: 'Docs', icon: FileCheck },
     { id: 'earnings', label: 'Earnings', icon: DollarSign },
     { id: 'wallet', label: 'Wallet', icon: Wallet },
     { id: 'notifications', label: 'Alerts', icon: Bell, badgeCount: unreadCount },
@@ -53,8 +52,8 @@ export const BottomNav: React.FC<BottomNavProps> = ({
                 )}
 
                 {t.badgeCount && t.badgeCount > 0 ? (
-                  <span className="absolute -top-1 -right-2 w-3.5 h-3.5 bg-[#E21E26] text-white text-[9px] font-bold rounded-full flex items-center justify-center">
-                    {t.badgeCount}
+                  <span className="absolute -top-1 -right-2 min-w-3.5 h-3.5 px-0.5 bg-[#E21E26] text-white text-[9px] font-bold rounded-full flex items-center justify-center">
+                    {t.badgeCount > 9 ? '9+' : t.badgeCount}
                   </span>
                 ) : null}
               </div>

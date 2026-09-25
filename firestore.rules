@@ -6,128 +6,283 @@ rules_version = '2';
 // Identity/role is derived entirely from Firestore documents:
 //   • admins/{uid}   with role == 'admin'       → platform admin
 //   • customers/{uid}                           → customer (auto-approved)
-//   • vendors/{uid}   with status == 'Approved' → active vendor
+//   • vendors/{uid}   with status == 'APPROVED' → active vendor
+//     (legacy 'Approved'/'Active' still honoured). Vendor lifecycle:
+//     INCOMPLETE → PENDING_APPROVAL → APPROVED | CHANGES_REQUESTED | REJECTED,
+//     APPROVED ⇄ SUSPENDED. Only an admin moves a vendor out of PENDING_APPROVAL.
 //   • drivers/{uid}   with status == 'Approved' → active driver
 // A user's profile doc id always equals their auth uid.
 //
-// Self-service rules force a new profile to a safe state (Pending / customer);
-// only an admin can change `status` or `role` afterwards. Financial ledgers
-// are admin-write-only. There is no server, so anything a signed-in user is
-// allowed to write here they can write directly — keep the allow-lists tight.
+// There is no server, so anything a signed-in user is allowed to write here
+// they can write directly. Every non-admin update is therefore pinned to an
+// explicit allow-list of fields (affectedKeys().hasOnly) and, where it
+// matters, to a legal state transition.
+//
+// Booking lifecycle (shared by all four panels):
+//   status:    Pending → Confirmed (vendor accepted) → Assigned (driver set)
+//              → Ongoing (boarding OTP verified) → Completed | Cancelled
+//   tripStage: Assigned → En Route Pickup → Reached Pickup → In Progress
+//              → Arrived Destination → Completed   (driver-reported detail)
 // ─────────────────────────────────────────────────────────────────────────────
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // ── Identity helpers ────────────────────────────────────────────────────
     function isSignedIn() {
       return request.auth != null;
     }
     function uid() {
       return request.auth.uid;
     }
-
-    function adminRole() {
-      return get(/databases/$(database)/documents/admins/$(uid())).data.role;
-    }
-    function isSuperAdminEmail() {
-      return isSignedIn()
-             && request.auth.token.email != null
-             && (
-               request.auth.token.email == 'admin@nesam.in'
-               || request.auth.token.email == 'pradeep@nesamtours.in'
-               || request.auth.token.email.matches('.*admin.*')
-               || request.auth.token.email.matches('.*@nesam\\.in')
-             );
+    function docPath(coll, id) {
+      return /databases/$(database)/documents/$(coll)/$(id);
     }
     function isAdmin() {
-      return isSuperAdminEmail() || (
-        isSignedIn()
-        && exists(/databases/$(database)/documents/admins/$(uid()))
-        && adminRole() == 'admin'
-      );
+      return isSignedIn()
+             && exists(docPath('admins', uid()))
+             && get(docPath('admins', uid())).data.role == 'admin';
     }
     function isOwner(id) {
       return isSignedIn() && uid() == id;
     }
-
     function isCustomer() {
-      return isSignedIn()
-             && exists(/databases/$(database)/documents/customers/$(uid()));
+      return isSignedIn() && exists(docPath('customers', uid()));
     }
     function isVendor() {
-      return isSignedIn()
-             && exists(/databases/$(database)/documents/vendors/$(uid()));
+      return isSignedIn() && exists(docPath('vendors', uid()));
     }
     function isDriver() {
-      return isSignedIn()
-             && exists(/databases/$(database)/documents/drivers/$(uid()));
+      return isSignedIn() && exists(docPath('drivers', uid()));
+    }
+    function isApprovedVendorStatus(status) {
+      return status in ['APPROVED', 'Approved', 'Active'];
     }
     function isApprovedVendor() {
-      return isVendor()
-             && get(/databases/$(database)/documents/vendors/$(uid())).data.status == 'Approved';
+      return isVendor() && isApprovedVendorStatus(get(docPath('vendors', uid())).data.status);
     }
     function isApprovedDriver() {
-      return isDriver()
-             && get(/databases/$(database)/documents/drivers/$(uid())).data.status == 'Approved';
+      return isDriver() && get(docPath('drivers', uid())).data.status == 'Approved';
+    }
+    // E.164 phone number from a phone-auth token ('' when absent).
+    function authPhone() {
+      return request.auth.token.get('phone_number', '');
     }
 
-    // An owner may edit their own profile but may NOT move their own
-    // status/role — those are admin-controlled.
-    function ownerKeepsStatusAndRole() {
-      return request.resource.data.status == resource.data.status
-             && request.resource.data.role == resource.data.role;
+    // ── Field-diff helpers ──────────────────────────────────────────────────
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+    function onlyChanges(keys) {
+      return changedKeys().hasOnly(keys);
+    }
+    function unchanged(key) {
+      return request.resource.data.get(key, null) == resource.data.get(key, null);
+    }
+    function isBlank(key) {
+      return resource.data.get(key, '') == '' || resource.data.get(key, null) == null;
     }
 
-    // ── Profiles ────────────────────────────────────────────────────────────
+    // ── Admins ──────────────────────────────────────────────────────────────
+    // Self-signup lands as role 'pending'; an existing admin promotes it.
     match /admins/{id} {
-      allow create: if isOwner(id) || isAdmin();
+      allow create: if isAdmin() || (
+                       isOwner(id)
+                       && request.resource.data.role == 'pending'
+                       && request.resource.data.status == 'pending'
+                     );
       allow read: if isOwner(id) || isAdmin();
       allow update, delete: if isAdmin();
     }
 
+    // ── Customers ───────────────────────────────────────────────────────────
     match /customers/{id} {
       allow create: if isAdmin() || (
                        isOwner(id)
                        && request.resource.data.role == 'customer'
                        && request.resource.data.status == 'Approved'
+                       && request.resource.data.get('walletBalance', 0) == 0
                      );
       allow read: if isOwner(id) || isAdmin();
-      allow update: if isAdmin() || (isOwner(id) && ownerKeepsStatusAndRole());
+      // Customers edit their own contact details only — never status, role
+      // or wallet balance.
+      allow update: if isAdmin() || (
+                       isOwner(id)
+                       && onlyChanges(['name', 'email', 'photoUrl', 'emergencyContact',
+                                       'language', 'notificationPrefs', 'updatedAt'])
+                     );
       allow delete: if isAdmin();
     }
 
+    // ── Invites (admin/vendor pre-register a partner by phone) ──────────────
+    // Doc id is the invitee's E.164 phone (e.g. +919876543210). On first
+    // phone-OTP sign-in the partner app reads its own invite to pre-fill
+    // registration and inherit the vendor link.
+    match /driver_invites/{phone} {
+      allow read: if isAdmin()
+                  || (isSignedIn() && authPhone() == phone)
+                  || (isVendor() && resource.data.vendorId == uid());
+      allow create: if isAdmin() || (
+                       isApprovedVendor()
+                       && request.resource.data.vendorId == uid()
+                       && request.resource.data.get('preApproved', false) == false
+                     );
+      allow update, delete: if isAdmin()
+                             || (isVendor() && resource.data.vendorId == uid()
+                                 && request.resource.data.get('vendorId', uid()) == uid()
+                                 && request.resource.data.get('preApproved', false) == false);
+    }
+
+    match /vendor_invites/{phone} {
+      allow read: if isAdmin() || (isSignedIn() && authPhone() == phone);
+      allow write: if isAdmin();
+    }
+
+    // ── Vendors ─────────────────────────────────────────────────────────────
+    // Statuses in which the vendor may edit and (re)submit the application.
+    // 'Pending' / 'Needs Correction' / 'Rejected' are legacy spellings.
+    function vendorEditableStatus(status) {
+      return status in ['INCOMPLETE', 'CHANGES_REQUESTED', 'REJECTED',
+                        'Pending', 'Needs Correction', 'Rejected'];
+    }
+    // Top-level fields the vendor may ever write on its own doc. Everything
+    // else (review, verified, commission, walletBalance, …) is admin-only.
+    function vendorOwnerKeys() {
+      return ['uid', 'role', 'phone', 'status', 'onboardingStep', 'business',
+              'documents', 'fleet', 'payoutSummary', 'companyName', 'name',
+              'contactPerson', 'owner', 'email', 'city', 'fleetSize',
+              'totalFleetSize', 'gstin', 'panNumber', 'submittedAt',
+              'createdAt', 'updatedAt'];
+    }
+    function vendorInvitePreApproved() {
+      return authPhone() != ''
+             && exists(docPath('vendor_invites', authPhone()))
+             && get(docPath('vendor_invites', authPhone())).data.get('preApproved', false) == true;
+    }
+    // Submission: every section present, stamped with server time. Goes to
+    // PENDING_APPROVAL, or straight to APPROVED for an admin pre-approved
+    // phone number on a first submission.
+    function vendorSubmitOk() {
+      let d = request.resource.data;
+      return d.submittedAt == request.time
+             && d.business is map && d.fleet is map && d.payoutSummary is map
+             && d.documents is map
+             && d.documents.businessRegistration.files.size() > 0
+             && d.documents.identityProof.files.size() > 0
+             && d.fleet.vehicleTypes.size() > 0
+             && d.fleet.rcFiles.size() > 0
+             && d.fleet.vehiclePhotos.size() > 0
+             && d.fleet.insuranceFiles.size() > 0
+             && (d.status == 'PENDING_APPROVAL'
+                 || (d.status == 'APPROVED'
+                     && resource.data.status in ['INCOMPLETE', 'Pending']
+                     && vendorInvitePreApproved()));
+    }
     match /vendors/{id} {
+      // Self-signup always starts as an INCOMPLETE draft bound to the
+      // verified phone number of the signed-in user.
       allow create: if isAdmin() || (
                        isOwner(id)
+                       && request.resource.data.keys().hasOnly(vendorOwnerKeys())
                        && request.resource.data.role == 'vendor'
-                       && request.resource.data.status == 'Pending'
+                       && request.resource.data.uid == id
+                       && request.resource.data.phone == authPhone()
+                       && request.resource.data.status == 'INCOMPLETE'
                      );
-      allow read: if isOwner(id) || isAdmin() || isVendor() || isDriver();
-      allow update: if isAdmin() || (isOwner(id) && ownerKeepsStatusAndRole());
+      // Only the vendor itself, admins, and drivers attached to this vendor.
+      // (Bank/ID numbers are not here — see vendor_kyc.)
+      allow read: if isOwner(id) || isAdmin()
+                  || (isDriver() && get(docPath('drivers', uid())).data.get('vendorId', '') == id);
+      allow update: if isAdmin() || (
+                       isOwner(id)
+                       && changedKeys().hasOnly(vendorOwnerKeys())
+                       && unchanged('role') && unchanged('uid')
+                       && unchanged('phone') && unchanged('createdAt')
+                       && (
+                            // Draft / corrections, optionally submitting.
+                            (vendorEditableStatus(resource.data.status)
+                             && (unchanged('status') || vendorSubmitOk()))
+                            // Approved: contact details only — legal names stay fixed.
+                         || (isApprovedVendorStatus(resource.data.status)
+                             && unchanged('status')
+                             && onlyChanges(['business', 'email', 'city', 'updatedAt'])
+                             && request.resource.data.business.vendorName == resource.data.business.vendorName
+                             && request.resource.data.business.businessName == resource.data.business.businessName)
+                          )
+                     );
       allow delete: if isAdmin();
     }
 
-    match /drivers/{id} {
-      allow create: if isAdmin() || (
+    // Private vendor KYC: full ID number + bank account. Doc id == vendor uid.
+    // Writable by the vendor only while its application is editable.
+    match /vendor_kyc/{id} {
+      allow read: if isOwner(id) || isAdmin();
+      allow create, update: if isAdmin() || (
                        isOwner(id)
-                       && request.resource.data.role == 'driver'
-                       && request.resource.data.status == 'Pending'
+                       && exists(docPath('vendors', id))
+                       && vendorEditableStatus(get(docPath('vendors', id)).data.status)
+                       && request.resource.data.keys().hasOnly(['identityProof', 'payout', 'updatedAt'])
                      );
+      allow delete: if isAdmin();
+    }
+
+    // ── Drivers ─────────────────────────────────────────────────────────────
+    function driverInvite() {
+      return get(docPath('driver_invites', authPhone())).data;
+    }
+    function hasDriverInvite() {
+      return authPhone() != '' && exists(docPath('driver_invites', authPhone()));
+    }
+    // A self-registering driver may only claim a vendor link / pre-approval
+    // that an invite for their own verified phone number grants.
+    function driverSelfCreateOk() {
+      let d = request.resource.data;
+      let vendorOk = d.get('vendorId', '') == ''
+                     || (hasDriverInvite() && driverInvite().get('vendorId', '') == d.vendorId);
+      let statusOk = d.status == 'Pending'
+                     || (d.status == 'Approved' && hasDriverInvite()
+                         && driverInvite().get('preApproved', false) == true);
+      return d.role == 'driver' && vendorOk && statusOk
+             && d.get('verified', false) == false;
+    }
+    match /drivers/{id} {
+      allow create: if isAdmin() || (isOwner(id) && driverSelfCreateOk());
       allow read: if isOwner(id) || isAdmin()
-                    || (isVendor() && resource.data.vendorId == uid());
+                  || (isVendor() && resource.data.vendorId == uid());
       allow update: if isAdmin()
-                     || (isOwner(id) && ownerKeepsStatusAndRole())
-                     || (isVendor() && resource.data.vendorId == uid());
+                    // The driver edits profile/KYC/presence, never approval —
+                    // except resubmitting a rejected application for review.
+                    || (isOwner(id)
+                        && (unchanged('status')
+                            || (resource.data.status == 'Rejected'
+                                && request.resource.data.status == 'Pending'))
+                        && unchanged('role')
+                        && unchanged('vendorId') && unchanged('verified')
+                        && unchanged('rating') && unchanged('fleetStatus')
+                        && (unchanged('docStatus') || request.resource.data.docStatus == 'Pending'))
+                    // The owning vendor manages fleet-side fields only.
+                    || (isApprovedVendor() && resource.data.get('vendorId', '') == uid()
+                        && onlyChanges(['assignedVehicleId', 'assignedVehicleNumber',
+                                        'fleetStatus', 'updatedAt']));
       allow delete: if isAdmin();
     }
 
     // ── Fleet ───────────────────────────────────────────────────────────────
     match /vehicles/{vehicleId} {
       allow read: if isSignedIn();
-      allow create: if isAdmin()
-                     || (isApprovedVendor() && request.resource.data.vendorId == uid());
-      allow update, delete: if isAdmin()
-                             || (isApprovedVendor() && resource.data.vendorId == uid());
+      allow create: if isAdmin() || (
+                       isApprovedVendor()
+                       && request.resource.data.vendorId == uid()
+                       && request.resource.data.docStatus == 'Pending'
+                     );
+      allow update: if isAdmin() || (
+                       isApprovedVendor()
+                       && resource.data.vendorId == uid()
+                       && unchanged('vendorId')
+                       && (unchanged('docStatus') || request.resource.data.docStatus == 'Pending')
+                     );
+      allow delete: if isAdmin()
+                     || (isApprovedVendor() && resource.data.vendorId == uid());
     }
 
     match /vehicle_categories/{catId} {
@@ -136,47 +291,218 @@ service cloud.firestore {
     }
 
     // ── Bookings ────────────────────────────────────────────────────────────
+    function booking(id) {
+      return get(docPath('bookings', id)).data;
+    }
+    // Post-write view, so a booking and its companion docs can be written
+    // together in one batch.
+    function bookingAfter(id) {
+      return getAfter(docPath('bookings', id)).data;
+    }
+    function marketplaceStatus(id) {
+      return exists(docPath('marketplace_trips', id))
+             ? get(docPath('marketplace_trips', id)).data.status
+             : '';
+    }
+    function bookingSecret(id) {
+      return get(docPath('booking_secrets', id)).data;
+    }
+
+    // Customer self-booking: always starts unassigned, unpaid and pending.
+    function validNewCustomerBooking() {
+      let d = request.resource.data;
+      return isCustomer()
+             && d.customerId == uid()
+             && d.status == 'Pending'
+             && d.payment == 'Pending'
+             && d.get('assignedDriverId', '') == ''
+             && d.get('assignedVendorId', '') == ''
+             && d.fare is number && d.fare >= 0;
+    }
+
+    // Customer may cancel (before the trip starts) or rate a completed trip.
+    function customerUpdateOk() {
+      let d = request.resource.data;
+      return (
+               onlyChanges(['status', 'cancelReason', 'cancelledBy', 'cancelledAt', 'updatedAt'])
+               && d.status == 'Cancelled'
+               && resource.data.status in ['Pending', 'Confirmed', 'Assigned']
+             ) || (
+               onlyChanges(['rating', 'reviewComment', 'ratedAt', 'updatedAt'])
+               && resource.data.status == 'Completed'
+               && d.rating is int && d.rating >= 1 && d.rating <= 5
+             );
+    }
+
+    // Vendor claims an open marketplace booking at the offered rate.
+    function vendorClaimOk(id) {
+      let d = request.resource.data;
+      return isApprovedVendor()
+             && isBlank('assignedVendorId') && isBlank('assignedDriverId')
+             && resource.data.status == 'Pending'
+             && marketplaceStatus(id) in ['Open', 'Bidding']
+             && d.assignedVendorId == uid()
+             && d.status == 'Confirmed'
+             && onlyChanges(['status', 'assignedVendorId', 'assignedVendorName',
+                             'vendorPayout', 'confirmedAt', 'updatedAt']);
+    }
+
+    // Vendor dispatches one of its own drivers to a booking it holds.
+    function vendorDispatchOk() {
+      let d = request.resource.data;
+      return isApprovedVendor()
+             && resource.data.get('assignedVendorId', '') == uid()
+             && resource.data.status in ['Confirmed', 'Assigned']
+             && d.status == 'Assigned'
+             && get(docPath('drivers', d.assignedDriverId)).data.get('vendorId', '') == uid()
+             && onlyChanges(['status', 'tripStage', 'assignedDriverId', 'assignedDriverName',
+                             'driver', 'driverPhone', 'assignedVehicleNumber',
+                             'assignedAt', 'updatedAt']);
+    }
+
+    // Independent driver claims an open marketplace booking.
+    function driverClaimOk(id) {
+      let d = request.resource.data;
+      return isApprovedDriver()
+             && isBlank('assignedVendorId') && isBlank('assignedDriverId')
+             && resource.data.status == 'Pending'
+             && marketplaceStatus(id) == 'Open'
+             && d.assignedDriverId == uid()
+             && d.status == 'Assigned'
+             && onlyChanges(['status', 'tripStage', 'assignedDriverId', 'assignedDriverName',
+                             'driver', 'driverPhone', 'assignedVehicleNumber',
+                             'driverPayout', 'assignedAt', 'updatedAt']);
+    }
+
+    // The assigned driver reports trip progress. Starting the trip requires
+    // the customer's boarding OTP, checked here against booking_secrets —
+    // which the driver can never read.
+    function driverProgressOk(id) {
+      let d = request.resource.data;
+      let before = resource.data.status;
+      let progressKeys = ['tripStage', 'preTrip', 'startOdometer', 'endOdometer',
+                          'tolls', 'tollCharges', 'reachedPickupAt', 'arrivedAt',
+                          'completedAt', 'driverLocation', 'updatedAt'];
+      return isApprovedDriver()
+             && resource.data.get('assignedDriverId', '') == uid()
+             && (
+                  // progress without a status change
+                  (unchanged('status') && before in ['Assigned', 'Ongoing']
+                   && onlyChanges(progressKeys))
+                  // Assigned → Ongoing with a correct OTP
+               || (before == 'Assigned' && d.status == 'Ongoing'
+                   && d.otpAttempt == bookingSecret(id).otp
+                   && onlyChanges(progressKeys.concat(['status', 'otpAttempt', 'startedAt'])))
+                  // Ongoing → Completed
+               || (before == 'Ongoing' && d.status == 'Completed'
+                   && onlyChanges(progressKeys.concat(['status'])))
+                );
+    }
+
     match /bookings/{bookingId} {
-      allow create: if isAdmin() || (
-                       isCustomer()
-                       && request.resource.data.customerId == uid()
-                     );
+      allow create: if isAdmin() || validNewCustomerBooking();
       allow read: if isAdmin()
                   || (isSignedIn() && resource.data.customerId == uid())
                   || (isVendor() && resource.data.assignedVendorId == uid())
                   || (isDriver() && resource.data.assignedDriverId == uid());
       allow update: if isAdmin()
-                    || (isSignedIn() && resource.data.customerId == uid())
-                    || (isApprovedVendor() && resource.data.assignedVendorId == uid())
-                    || (isApprovedDriver() && resource.data.assignedDriverId == uid());
+                    || (isSignedIn() && resource.data.customerId == uid() && customerUpdateOk())
+                    || vendorClaimOk(bookingId)
+                    || vendorDispatchOk()
+                    || driverClaimOk(bookingId)
+                    || driverProgressOk(bookingId);
       allow delete: if isAdmin();
     }
 
+    // Boarding OTP lives apart from the booking so drivers/vendors (who can
+    // read the booking) never see it. Doc id == booking id.
+    match /booking_secrets/{bookingId} {
+      allow create: if isAdmin() || (
+                       isCustomer()
+                       && request.resource.data.customerId == uid()
+                       && bookingAfter(bookingId).customerId == uid()
+                       && request.resource.data.otp is string
+                       && request.resource.data.otp.size() == 4
+                     );
+      allow read: if isAdmin() || (isSignedIn() && resource.data.customerId == uid());
+      allow update, delete: if isAdmin();
+    }
+
     // ── Marketplace ─────────────────────────────────────────────────────────
+    // Doc id == booking id.
     match /marketplace_trips/{tripId} {
-      allow read: if isAdmin() || isVendor() || isDriver();
-      allow write: if isAdmin() || isApprovedVendor() || isApprovedDriver();
+      // Vendors see open trips only once approved.
+      allow read: if isAdmin() || isApprovedVendor() || isDriver();
+      allow create: if isAdmin() || (
+                       isCustomer()
+                       && bookingAfter(tripId).customerId == uid()
+                       && bookingAfter(tripId).status == 'Pending'
+                       && request.resource.data.status == 'Open'
+                     );
+      allow update: if isAdmin()
+                    // vendor counter-bid bookkeeping
+                    || (isApprovedVendor()
+                        && resource.data.status in ['Open', 'Bidding']
+                        && request.resource.data.status == 'Bidding'
+                        && onlyChanges(['status', 'bidCount', 'lastCounterRate',
+                                        'lastBidAt', 'updatedAt']))
+                    // vendor accepts offered rate (booking claimed in same batch)
+                    || (isApprovedVendor()
+                        && resource.data.status in ['Open', 'Bidding']
+                        && request.resource.data.status == 'Assigned'
+                        && request.resource.data.assignedVendorId == uid()
+                        && bookingAfter(tripId).assignedVendorId == uid()
+                        && onlyChanges(['status', 'assignedVendorId', 'assignedVendorName', 'updatedAt']))
+                    // independent driver accepts
+                    || (isApprovedDriver()
+                        && resource.data.status == 'Open'
+                        && request.resource.data.status == 'Assigned'
+                        && request.resource.data.assignedDriverId == uid()
+                        && bookingAfter(tripId).assignedDriverId == uid()
+                        && onlyChanges(['status', 'assignedDriverId', 'assignedDriverName', 'updatedAt']))
+                    // customer withdraws it when cancelling
+                    || (isSignedIn()
+                        && booking(tripId).customerId == uid()
+                        && request.resource.data.status == 'Closed'
+                        && onlyChanges(['status', 'updatedAt']));
+      allow delete: if isAdmin();
 
       match /bids/{bidId} {
         allow create: if isApprovedVendor()
-                       && request.resource.data.vendorId == uid();
+                       && request.resource.data.vendorId == uid()
+                       && request.resource.data.tripId == tripId
+                       && request.resource.data.status == 'Pending Review';
         allow read: if isAdmin() || (isVendor() && resource.data.vendorId == uid());
-        allow update, delete: if isAdmin()
-                               || (isApprovedVendor() && resource.data.vendorId == uid());
+        allow update: if isAdmin();
+        allow delete: if isAdmin()
+                       || (isApprovedVendor() && resource.data.vendorId == uid()
+                           && resource.data.status == 'Pending Review');
       }
+    }
+
+    // Collection-group reads of bids (admin review queue, vendor "my bids").
+    match /{path=**}/bids/{bidId} {
+      allow read: if isAdmin() || (isVendor() && resource.data.vendorId == uid());
     }
 
     // ── Payouts ─────────────────────────────────────────────────────────────
     match /payout_requests/{requestId} {
-      allow create: if (isApprovedVendor() && request.resource.data.vendorId == uid())
-                     || (isApprovedDriver() && request.resource.data.driverId == uid());
+      allow create: if request.resource.data.status == 'Pending'
+                     && request.resource.data.amount is number
+                     && request.resource.data.amount > 0
+                     && (
+                          (isApprovedVendor() && request.resource.data.vendorId == uid()
+                           && request.resource.data.get('driverId', '') == '')
+                       || (isApprovedDriver() && request.resource.data.driverId == uid()
+                           && request.resource.data.get('vendorId', '') == '')
+                        );
       allow read: if isAdmin()
                   || (isVendor() && resource.data.vendorId == uid())
                   || (isDriver() && resource.data.driverId == uid());
       allow update, delete: if isAdmin();
     }
 
-    // ── Wallet ledger (admin-managed) ────────────────
+    // ── Wallet ledger (admin-managed) ───────────────────────────────────────
     match /wallet_ledger/{entryId} {
       allow read: if isAdmin()
                   || (isVendor() && resource.data.vendorId == uid())
@@ -187,20 +513,32 @@ service cloud.firestore {
     // ── Customer extras ─────────────────────────────────────────────────────
     match /saved_places/{placeId} {
       allow create: if isSignedIn() && request.resource.data.ownerId == uid();
-      allow read, update, delete: if isAdmin()
-                                   || (isSignedIn() && resource.data.ownerId == uid());
+      allow read, delete: if isAdmin()
+                           || (isSignedIn() && resource.data.ownerId == uid());
+      allow update: if isAdmin() || (
+                       isSignedIn() && resource.data.ownerId == uid()
+                       && request.resource.data.ownerId == uid()
+                     );
     }
 
     match /support_tickets/{ticketId} {
-      allow create: if isSignedIn() && request.resource.data.customerId == uid();
+      allow create: if isSignedIn()
+                     && request.resource.data.customerId == uid()
+                     && request.resource.data.status == 'Open';
       allow read: if isAdmin() || (isSignedIn() && resource.data.customerId == uid());
       allow update: if isAdmin();
+      allow delete: if isAdmin();
     }
 
     match /notifications/{notifId} {
       allow create: if isAdmin();
-      allow read, update: if isAdmin()
-                           || (isSignedIn() && resource.data.recipientId == uid());
+      allow read: if isAdmin()
+                  || (isSignedIn() && resource.data.recipientId == uid());
+      // Recipients may only mark as read.
+      allow update: if isAdmin() || (
+                       isSignedIn() && resource.data.get('recipientId', '') == uid()
+                       && onlyChanges(['read', 'readAt'])
+                     );
       allow delete: if isAdmin();
     }
 
@@ -209,30 +547,42 @@ service cloud.firestore {
       allow read: if isSignedIn();
       allow write: if isAdmin();
     }
-
     match /tour_packages/{packageId} {
       allow read: if isSignedIn();
       allow write: if isAdmin();
     }
-
     match /locations/{locId} {
       allow read: if isSignedIn();
       allow write: if isAdmin();
     }
-
     match /fare_rules/{ruleId} {
       allow read: if isSignedIn();
       allow write: if isAdmin();
     }
-
     match /coupons/{couponId} {
       allow read: if isSignedIn();
       allow write: if isAdmin();
     }
 
+    // Customers may submit one review for their own completed trip; it
+    // lands as 'Pending' for admin moderation. Only published reviews are
+    // public.
     match /reviews/{reviewId} {
-      allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow read: if isAdmin()
+                  || (isSignedIn() && resource.data.customerId == uid())
+                  || (isSignedIn() && resource.data.status == 'Published');
+      allow create: if isAdmin() || (
+                       isCustomer()
+                       && reviewId == request.resource.data.bookingId
+                       && request.resource.data.customerId == uid()
+                       && request.resource.data.status == 'Pending'
+                       && booking(reviewId).customerId == uid()
+                       && booking(reviewId).status == 'Completed'
+                       && request.resource.data.overallRating is int
+                       && request.resource.data.overallRating >= 1
+                       && request.resource.data.overallRating <= 5
+                     );
+      allow update, delete: if isAdmin();
     }
 
     match /invoices/{invoiceId} {
@@ -254,6 +604,9 @@ service cloud.firestore {
       allow read: if isAdmin()
                   || (isSignedIn() && resource.data.customerId == uid());
       allow write: if isAdmin();
+    }
+    match /b2b_partners/{partnerId} {
+      allow read, write: if isAdmin();
     }
 
     match /settings/{docId} {

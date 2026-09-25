@@ -27,8 +27,8 @@ export const FleetScreen: React.FC<FleetScreenProps> = ({
   const [year, setYear] = useState<string>('2024');
   const [seatingCapacity, setSeatingCapacity] = useState<number>(4);
   const [selectedDriverId, setSelectedDriverId] = useState<string>('');
-  const [rcDoc, setRcDoc] = useState<string>('https://images.unsplash.com/photo-1568605117036-5fe5e7bab0b7?w=400&auto=format&fit=crop&q=80');
-  const [insuranceDoc, setInsuranceDoc] = useState<string>('https://images.unsplash.com/photo-1450133064473-71024230f91b?w=400&auto=format&fit=crop&q=80');
+  const [rcDoc, setRcDoc] = useState<string>('');
+  const [insuranceDoc, setInsuranceDoc] = useState<string>('');
 
   const handleCreateVehicle = (e: React.FormEvent) => {
     e.preventDefault();

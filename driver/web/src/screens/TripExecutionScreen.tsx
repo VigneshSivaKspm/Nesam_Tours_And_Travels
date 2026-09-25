@@ -1,442 +1,384 @@
 import React, { useState } from 'react';
-import { TripDetails, TripStatus, TollReceipt } from '../types';
+import type { TollReceipt, TripDetails, TripStage } from '../types';
 import {
   MapPin,
   Navigation,
   PhoneCall,
   KeyRound,
-  CheckCircle,
-  AlertTriangle,
-  Upload,
   Gauge,
   Receipt,
   Flag,
-  ShieldCheck,
   CheckCircle2,
-  Share2
+  Loader2,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
+import { PhotoUpload } from '../components/PhotoUpload';
+import { describeFirestoreError, saveTripTolls } from '../services/driverFirestoreService';
 
 interface TripExecutionScreenProps {
   trip: TripDetails;
-  onUpdateTripStatus: (status: TripStatus, updatedTrip?: Partial<TripDetails>) => void;
+  onReachedPickup: (location: { lat: number; lng: number } | null) => Promise<void>;
+  onStartTrip: (otp: string) => Promise<void>;
+  onArrived: () => Promise<void>;
+  onComplete: (endOdometer: number, tolls: TollReceipt[]) => Promise<void>;
 }
+
+const PICKUP_RADIUS_KM = 2;
+const STAGE_ORDER: TripStage[] = ['En Route Pickup', 'Reached Pickup', 'In Progress', 'Arrived Destination'];
+const STAGE_LABELS = ['To Pickup', 'At Pickup', 'On Trip', 'End Trip'];
+
+function haversineKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const R = 6371;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLng = ((b.lng - a.lng) * Math.PI) / 180;
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+function getPosition(): Promise<{ lat: number; lng: number } | null> {
+  return new Promise((resolve) => {
+    if (!('geolocation' in navigator)) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 },
+    );
+  });
+}
+
+const mapsLink = (loc: TripDetails['pickup']) =>
+  loc.lat != null && loc.lng != null
+    ? `https://www.google.com/maps/dir/?api=1&destination=${loc.lat},${loc.lng}`
+    : `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(loc.address)}`;
 
 export const TripExecutionScreen: React.FC<TripExecutionScreenProps> = ({
   trip,
-  onUpdateTripStatus
+  onReachedPickup,
+  onStartTrip,
+  onArrived,
+  onComplete,
 }) => {
-  const [driverDistanceKm, setDriverDistanceKm] = useState<number>(trip.pickupDistanceKm || 1.2);
-  const [inputOTP, setInputOTP] = useState<string>('');
-  const [otpError, setOtpError] = useState<boolean>(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [otp, setOtp] = useState('');
 
-  // Ending Odometer & Tolls state
-  const [endOdometer, setEndOdometer] = useState<number>((trip.startOdometer || 84290) + Math.round(trip.distanceKm));
-  const [tollName, setTollName] = useState<string>('Chennasamudram Toll Plaza');
-  const [tollAmount, setTollAmount] = useState<number>(trip.tollCharges || 50);
-  const [tollsList, setTollsList] = useState<TollReceipt[]>(trip.tolls || []);
-  const [showTollModal, setShowTollModal] = useState<boolean>(false);
+  const [endOdometer, setEndOdometer] = useState('');
+  const [tolls, setTolls] = useState<TollReceipt[]>(trip.tolls);
+  const [showTollModal, setShowTollModal] = useState(false);
+  const [tollName, setTollName] = useState('');
+  const [tollAmount, setTollAmount] = useState('');
+  const [tollPhoto, setTollPhoto] = useState('');
+  const [tollError, setTollError] = useState('');
 
-  const isWithinRadius = driverDistanceKm <= 2.0;
+  const stageIdx = STAGE_ORDER.indexOf(trip.stage);
 
-  // Handle Boarding OTP Verification
-  const handleVerifyBoardingOTP = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (inputOTP === trip.customerOTP) {
-      setOtpError(false);
-      onUpdateTripStatus('In Progress', { startOdometer: trip.startOdometer || 84290 });
-    } else {
-      setOtpError(true);
+  const run = async (fn: () => Promise<void>, fallback: string) => {
+    setError('');
+    setBusy(true);
+    try {
+      await fn();
+    } catch (err) {
+      setError(describeFirestoreError(err, fallback));
+    } finally {
+      setBusy(false);
     }
   };
 
-  // Add Toll Receipt
-  const handleAddToll = (e: React.FormEvent) => {
+  const handleReachedPickup = () =>
+    run(async () => {
+      const here = await getPosition();
+      if (here && trip.pickup.lat != null && trip.pickup.lng != null) {
+        const d = haversineKm(here, { lat: trip.pickup.lat, lng: trip.pickup.lng });
+        if (d > PICKUP_RADIUS_KM) {
+          throw new Error(`You are ${d.toFixed(1)} km from the pickup point. Move within ${PICKUP_RADIUS_KM} km to continue.`);
+        }
+      }
+      await onReachedPickup(here);
+    }, 'Could not update the trip.');
+
+  const handleStart = (e: React.FormEvent) => {
     e.preventDefault();
-    const newToll: TollReceipt = {
-      id: `TOLL-${Date.now()}`,
-      name: tollName,
-      amount: tollAmount,
-      receiptPhotoUrl: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=400&auto=format&fit=crop&q=80',
-      uploadedAt: new Date().toLocaleTimeString()
-    };
-    setTollsList([...tollsList, newToll]);
-    setShowTollModal(false);
+    if (!/^\d{4}$/.test(otp)) {
+      setError('Enter the 4-digit boarding OTP shown in the customer’s app.');
+      return;
+    }
+    run(() => onStartTrip(otp), 'Incorrect OTP. Please check with the customer and try again.');
   };
 
-  // Complete Trip
-  const handleCompleteTrip = () => {
-    const totalTolls = tollsList.reduce((sum, t) => sum + t.amount, 0);
-    onUpdateTripStatus('Completed', {
-      endOdometer: endOdometer,
-      tollCharges: totalTolls,
-      tolls: tollsList
-    });
+  const handleAddToll = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const amount = Number(tollAmount);
+    if (!tollName.trim() || !(amount > 0)) {
+      setTollError('Enter the toll plaza name and amount.');
+      return;
+    }
+    if (!tollPhoto) {
+      setTollError('Upload a photo of the toll receipt.');
+      return;
+    }
+    const next = [
+      ...tolls,
+      { id: `TOLL-${Date.now()}`, name: tollName.trim(), amount, receiptPhotoUrl: tollPhoto, uploadedAt: new Date().toISOString() },
+    ];
+    try {
+      await saveTripTolls(trip.id, next);
+      setTolls(next);
+      setShowTollModal(false);
+      setTollName('');
+      setTollAmount('');
+      setTollPhoto('');
+      setTollError('');
+    } catch (err) {
+      setTollError(describeFirestoreError(err, 'Could not save the toll receipt.'));
+    }
   };
+
+  const removeToll = async (id: string) => {
+    const next = tolls.filter((t) => t.id !== id);
+    try {
+      await saveTripTolls(trip.id, next);
+      setTolls(next);
+    } catch (err) {
+      setError(describeFirestoreError(err, 'Could not remove the toll receipt.'));
+    }
+  };
+
+  const handleComplete = () => {
+    const end = Number(endOdometer);
+    const start = trip.startOdometer ?? 0;
+    if (!(end > 0)) {
+      setError('Enter the ending odometer reading.');
+      return;
+    }
+    if (end < start) {
+      setError(`Ending reading must be at least the starting reading (${start} km).`);
+      return;
+    }
+    run(() => onComplete(end, tolls), 'Could not complete the trip. Please try again.');
+  };
+
+  const totalTolls = tolls.reduce((s, t) => s + t.amount, 0);
 
   return (
     <div className="max-w-4xl mx-auto space-y-5 sm:space-y-6">
-
-      {/* Top Header Control */}
-      <div className="bg-white text-gray-900 p-5 sm:p-6 rounded-2xl border border-gray-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+      {/* Header */}
+      <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <span className="bg-[#E21E26] text-white text-[10px] font-extrabold uppercase px-2 py-0.5 rounded">
-              LIVE TRIP
-            </span>
+            <span className="bg-[#E21E26] text-white text-[10px] font-extrabold uppercase px-2 py-0.5 rounded">Live Trip</span>
             <span className="text-xs text-gray-400 font-mono">{trip.bookingId}</span>
           </div>
           <h1 className="text-lg sm:text-xl font-extrabold mt-1 text-gray-900">{trip.customerName}</h1>
-          <p className="text-xs text-gray-500">Pickup: {trip.pickup.address}</p>
+          <p className="text-xs text-gray-500">{trip.scheduledDate} {trip.scheduledTime} • {trip.paymentMode}</p>
         </div>
-
         <div className="flex items-center gap-3">
-          <a
-            href={`tel:${trip.customerPhone}`}
-            className="flex-1 md:flex-none justify-center px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm flex items-center gap-1.5 transition-colors"
-          >
-            <PhoneCall className="w-4 h-4" /> Call Customer
-          </a>
-
+          {trip.customerPhone && (
+            <a href={`tel:${trip.customerPhone}`} className="flex-1 md:flex-none justify-center px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm flex items-center gap-1.5">
+              <PhoneCall className="w-4 h-4" /> Call Customer
+            </a>
+          )}
           <div className="text-right bg-gray-50 px-4 py-2 rounded-xl border border-gray-200 shrink-0">
-            <span className="text-[10px] text-gray-500 font-medium">Driver Fare</span>
-            <p className="text-lg font-black text-[#E21E26]">₹{trip.driverEarnings}</p>
+            <span className="text-[10px] text-gray-500 font-medium">Your Payout</span>
+            <p className="text-lg font-black text-[#E21E26]">₹{trip.driverEarnings.toLocaleString('en-IN')}</p>
           </div>
         </div>
       </div>
 
-      {/* TRIP STEP TIMELINE */}
-      <div className="bg-white p-4 rounded-2xl border border-[#E5E5E5] shadow-sm">
-        <div className="grid grid-cols-4 gap-2 text-center">
-          
-          <div className={`p-2 rounded-xl border ${
-            trip.status === 'Assigned' || trip.status === 'Pre-Trip Pending' || trip.status === 'En Route Pickup'
-              ? 'bg-red-50 border-red-300 text-[#E21E26] font-bold'
-              : 'bg-emerald-50 border-emerald-200 text-emerald-700 font-semibold'
-          }`}>
-            <span className="text-[10px] block">STEP 1</span>
-            <span className="text-xs">En Route Pickup</span>
+      {/* Timeline */}
+      <div className="bg-white p-3 rounded-2xl border border-gray-200 shadow-sm grid grid-cols-4 gap-2 text-center">
+        {STAGE_LABELS.map((label, i) => (
+          <div
+            key={label}
+            className={`p-2 rounded-xl border text-xs ${
+              i === stageIdx ? 'bg-red-50 border-red-300 text-[#E21E26] font-bold' : i < stageIdx ? 'bg-emerald-50 border-emerald-200 text-emerald-700 font-semibold' : 'bg-gray-50 border-gray-200 text-gray-400'
+            }`}
+          >
+            <span className="text-[10px] block">STEP {i + 1}</span>
+            {label}
           </div>
-
-          <div className={`p-2 rounded-xl border ${
-            trip.status === 'Reached Pickup'
-              ? 'bg-red-50 border-red-300 text-[#E21E26] font-bold'
-              : trip.status === 'In Progress' || trip.status === 'Arrived Destination' || trip.status === 'Completed'
-              ? 'bg-emerald-50 border-emerald-200 text-emerald-700 font-semibold'
-              : 'bg-gray-50 border-gray-200 text-gray-400'
-          }`}>
-            <span className="text-[10px] block">STEP 2</span>
-            <span className="text-xs">Reached Pickup</span>
-          </div>
-
-          <div className={`p-2 rounded-xl border ${
-            trip.status === 'In Progress'
-              ? 'bg-red-50 border-red-300 text-[#E21E26] font-bold'
-              : trip.status === 'Arrived Destination' || trip.status === 'Completed'
-              ? 'bg-emerald-50 border-emerald-200 text-emerald-700 font-semibold'
-              : 'bg-gray-50 border-gray-200 text-gray-400'
-          }`}>
-            <span className="text-[10px] block">STEP 3</span>
-            <span className="text-xs">Trip In Progress</span>
-          </div>
-
-          <div className={`p-2 rounded-xl border ${
-            trip.status === 'Completed'
-              ? 'bg-emerald-600 text-white font-bold'
-              : 'bg-gray-50 border-gray-200 text-gray-400'
-          }`}>
-            <span className="text-[10px] block">STEP 4</span>
-            <span className="text-xs">End & Tolls</span>
-          </div>
-
-        </div>
+        ))}
       </div>
 
-      {/* 2 KM PICKUP RADIUS VERIFICATION WIDGET */}
-      {(trip.status === 'Assigned' || trip.status === 'Pre-Trip Pending' || trip.status === 'En Route Pickup') && (
-        <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-bold text-gray-900 flex items-center gap-2">
-              <Navigation className="w-5 h-5 text-[#E21E26]" /> GPS Location & 2 KM Pickup Radius Restriction
-            </h2>
-            <span className={`text-xs font-bold px-3 py-1 rounded-full ${
-              isWithinRadius ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
-            }`}>
-              {isWithinRadius ? '✓ Within 2 KM Radius' : '⚠️ Distance > 2 KM'}
-            </span>
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-semibold p-3 rounded-xl flex gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0" /> {error}
+        </div>
+      )}
+
+      {/* STEP 1 — driving to pickup */}
+      {trip.stage === 'En Route Pickup' && (
+        <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
+          <h2 className="text-sm font-bold text-gray-900 flex items-center gap-2">
+            <Navigation className="w-5 h-5 text-[#E21E26]" /> Drive to Pickup
+          </h2>
+          <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 flex items-start gap-2">
+            <MapPin className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            <p className="text-sm text-gray-800 font-semibold">{trip.pickup.address}</p>
           </div>
-
-          <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 flex flex-col md:flex-row items-center justify-between gap-4">
-            <div>
-              <p className="text-xs text-gray-600 font-medium">
-                Current Distance to Pickup Location: <span className="font-extrabold text-gray-900 font-mono text-base">{driverDistanceKm} KM</span>
-              </p>
-              <p className="text-[11px] text-gray-500 mt-0.5">
-                NESAM system prevents marking "Reached Pickup" if you are more than 2.0 KM away from customer location.
-              </p>
-            </div>
-
-            <button
-              onClick={() => setDriverDistanceKm(0.3)} // Simulate arriving close
-              className="px-4 py-2 bg-gray-900 hover:bg-black text-white text-xs font-bold rounded-lg shrink-0"
-            >
-              Simulate GPS Location Update (0.3 KM)
-            </button>
-          </div>
-
-          <div className="pt-2 flex justify-end">
-            <button
-              onClick={() => onUpdateTripStatus('Reached Pickup')}
-              disabled={!isWithinRadius}
-              className={`w-full md:w-auto px-6 py-3 rounded-xl font-extrabold text-xs text-white shadow-md flex items-center justify-center gap-2 transition-all ${
-                isWithinRadius
-                  ? 'bg-[#E21E26] hover:bg-[#C9141B] cursor-pointer'
-                  : 'bg-gray-300 text-gray-500 cursor-not-allowed'
-              }`}
-            >
-              <MapPin className="w-4 h-4" /> Reached Pickup Location
+          <p className="text-[11px] text-gray-500">
+            Your location is checked when you mark arrival — you must be within {PICKUP_RADIUS_KM} km of the pickup point.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-2 justify-end">
+            <a href={mapsLink(trip.pickup)} target="_blank" rel="noreferrer" className="px-5 py-3 bg-gray-900 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2">
+              <Navigation className="w-4 h-4" /> Navigate in Google Maps
+            </a>
+            <button onClick={handleReachedPickup} disabled={busy} className="px-6 py-3 rounded-xl font-extrabold text-xs text-white bg-[#E21E26] hover:bg-[#C9141B] shadow-md flex items-center justify-center gap-2 disabled:opacity-60">
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <MapPin className="w-4 h-4" />} I've Reached Pickup
             </button>
           </div>
         </div>
       )}
 
-      {/* CUSTOMER BOARDING OTP VERIFICATION MODAL / WIDGET */}
-      {trip.status === 'Reached Pickup' && (
-        <div className="bg-white p-6 rounded-2xl border-2 border-[#E21E26] shadow-xl space-y-4">
+      {/* STEP 2 — boarding OTP */}
+      {trip.stage === 'Reached Pickup' && (
+        <div className="bg-white p-5 sm:p-6 rounded-2xl border-2 border-[#E21E26] shadow-xl space-y-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center">
               <KeyRound className="w-6 h-6" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-gray-900">Customer Boarding OTP Verification</h2>
-              <p className="text-xs text-gray-500">Ask passenger {trip.customerName} for the 6-digit Boarding OTP</p>
+              <h2 className="text-base font-bold text-gray-900">Boarding OTP</h2>
+              <p className="text-xs text-gray-500">Ask {trip.customerName} for the 4-digit OTP shown in their app.</p>
             </div>
           </div>
-
-          <form onSubmit={handleVerifyBoardingOTP} className="space-y-4 bg-gray-50 p-4 rounded-xl border">
-            <div>
-              <label className="text-xs font-bold text-gray-700 block mb-1">Enter 6-Digit OTP</label>
-              <input
-                type="text"
-                maxLength={6}
-                value={inputOTP}
-                onChange={e => setInputOTP(e.target.value)}
-                placeholder="e.g. 482910"
-                className="w-full px-4 py-3 border border-gray-300 rounded-xl font-mono text-xl font-extrabold tracking-widest text-center focus:outline-none focus:border-[#E21E26]"
-                required
-              />
-              
-            </div>
-
-            {otpError && (
-              <div className="p-2 bg-red-100 text-red-700 text-xs font-bold rounded text-center">
-                Invalid Boarding OTP! Please check with customer.
-              </div>
-            )}
-
-            <button
-              type="submit"
-              className="w-full py-3 bg-[#E21E26] hover:bg-[#C9141B] text-white font-extrabold text-xs rounded-xl shadow transition-all"
-            >
-              Verify OTP & Start Trip
+          <form onSubmit={handleStart} className="space-y-4 bg-gray-50 p-4 rounded-xl border">
+            <input
+              type="text"
+              inputMode="numeric"
+              maxLength={4}
+              value={otp}
+              onChange={(e) => setOtp(e.target.value.replace(/\D/g, ''))}
+              placeholder="• • • •"
+              className="w-full px-4 py-3 border border-gray-300 rounded-xl font-mono text-2xl font-extrabold tracking-[0.5em] text-center focus:outline-none focus:border-[#E21E26]"
+            />
+            <button type="submit" disabled={busy} className="w-full py-3 bg-[#E21E26] hover:bg-[#C9141B] text-white font-extrabold text-xs rounded-xl shadow flex items-center justify-center gap-2 disabled:opacity-60">
+              {busy && <Loader2 className="w-4 h-4 animate-spin" />} Verify OTP &amp; Start Trip
             </button>
           </form>
         </div>
       )}
 
-      {/* LIVE TRIP IN PROGRESS SCREEN */}
-      {trip.status === 'In Progress' && (
-        <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-md space-y-6">
-          <div className="flex items-center justify-between border-b pb-4">
+      {/* STEP 3 — on trip */}
+      {trip.stage === 'In Progress' && (
+        <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-200 shadow-md space-y-5">
+          <div className="flex items-center justify-between border-b pb-4 gap-3">
             <div>
-              <span className="text-[10px] font-bold uppercase text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                ● Live Trip Metering
-              </span>
+              <span className="text-[10px] font-bold uppercase text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">● Trip in progress</span>
               <h2 className="text-lg font-extrabold text-gray-900 mt-1">Driving to Destination</h2>
               <p className="text-xs text-gray-500">{trip.drop.address}</p>
             </div>
-
-            <div className="text-right">
-              <span className="text-xs text-gray-500">Trip Distance</span>
-              <p className="text-2xl font-black text-gray-900">{trip.distanceKm} KM</p>
-            </div>
+            {trip.distanceKm > 0 && (
+              <div className="text-right shrink-0">
+                <span className="text-xs text-gray-500">Est. Distance</span>
+                <p className="text-2xl font-black text-gray-900">{trip.distanceKm} km</p>
+              </div>
+            )}
           </div>
-
-          {/* Map Simulation */}
-          <div className="h-56 sm:h-64 bg-gray-100 rounded-xl relative overflow-hidden flex items-center justify-center text-gray-700 p-6 border border-gray-200">
-            <div className="absolute inset-0 bg-[radial-gradient(#cbd5e1_1px,transparent_1px)] [background-size:16px_16px] opacity-60" />
-            <div className="relative z-10 text-center space-y-2">
-              <Navigation className="w-12 h-12 text-[#E21E26] mx-auto animate-bounce" />
-              <p className="text-sm font-bold text-gray-900">GPS Live Navigation Active</p>
-              <p className="text-xs text-gray-500">Guindy / ECR Highway Route • Est 32 Min</p>
-            </div>
-          </div>
-
-          <div className="flex justify-end">
+          <div className="flex flex-col sm:flex-row gap-2 justify-end">
+            <a href={mapsLink(trip.drop)} target="_blank" rel="noreferrer" className="px-5 py-3 bg-gray-100 text-gray-900 text-xs font-bold rounded-xl flex items-center justify-center gap-2 border">
+              <Navigation className="w-4 h-4 text-[#E21E26]" /> Navigate
+            </a>
             <button
-              onClick={() => onUpdateTripStatus('Arrived Destination')}
-              className="px-6 py-3 bg-[#111] hover:bg-[#262626] text-white text-xs font-extrabold rounded-xl shadow flex items-center gap-2 transition-all"
+              onClick={() => run(onArrived, 'Could not update the trip.')}
+              disabled={busy}
+              className="px-6 py-3 bg-[#111] hover:bg-[#262626] text-white text-xs font-extrabold rounded-xl shadow flex items-center justify-center gap-2 disabled:opacity-60"
             >
-              Arrived at Destination <Flag className="w-4 h-4 text-[#E21E26]" />
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Flag className="w-4 h-4 text-[#E21E26]" />} Arrived at Destination
             </button>
           </div>
         </div>
       )}
 
-      {/* END TRIP, ODOMETER & TOLL UPLOAD */}
-      {(trip.status === 'Arrived Destination' || (trip.status as string) === 'Ending Trip') && (
-        <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-lg space-y-6">
+      {/* STEP 4 — end trip */}
+      {trip.stage === 'Arrived Destination' && (
+        <div className="bg-white p-5 sm:p-6 rounded-2xl border border-gray-200 shadow-lg space-y-5">
           <div className="border-b pb-3">
             <h2 className="text-base font-extrabold text-gray-900 flex items-center gap-2">
-              <Flag className="w-5 h-5 text-[#E21E26]" /> End Trip & Toll Settlement
+              <Flag className="w-5 h-5 text-[#E21E26]" /> End Trip
             </h2>
-            <p className="text-xs text-gray-500">Enter final odometer reading and upload toll receipts</p>
+            <p className="text-xs text-gray-500">Enter the final odometer reading and add any toll receipts.</p>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-6">
-            {/* End Odometer */}
+          <div className="grid md:grid-cols-2 gap-5">
             <div className="bg-gray-50 p-4 rounded-xl border space-y-2">
               <label className="text-xs font-bold text-gray-800 flex items-center gap-1.5">
-                <Gauge className="w-4 h-4 text-[#E21E26]" /> Ending Odometer Reading (KM)
+                <Gauge className="w-4 h-4 text-[#E21E26]" /> Ending Odometer (km)
               </label>
               <input
                 type="number"
+                inputMode="numeric"
                 value={endOdometer}
-                onChange={e => setEndOdometer(Number(e.target.value))}
+                onChange={(e) => setEndOdometer(e.target.value.replace(/[^\d]/g, ''))}
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono font-bold text-lg text-gray-900"
-                required
+                placeholder={trip.startOdometer ? String(trip.startOdometer + Math.round(trip.distanceKm)) : ''}
               />
-              <p className="text-[10px] text-gray-500">
-                Start Reading was: <span className="font-mono font-bold">{trip.startOdometer || 84290} KM</span>
-              </p>
+              {trip.startOdometer != null && (
+                <p className="text-[10px] text-gray-500">
+                  Start reading: <span className="font-mono font-bold">{trip.startOdometer} km</span>
+                  {Number(endOdometer) > trip.startOdometer && ` • Driven: ${Number(endOdometer) - trip.startOdometer} km`}
+                </p>
+              )}
             </div>
 
-            {/* Toll Receipts */}
             <div className="bg-gray-50 p-4 rounded-xl border space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-bold text-gray-800 flex items-center gap-1.5">
-                  <Receipt className="w-4 h-4 text-emerald-600" /> Toll Charges Upload
+                  <Receipt className="w-4 h-4 text-emerald-600" /> Toll Receipts
                 </label>
-                <button
-                  onClick={() => setShowTollModal(true)}
-                  className="px-2.5 py-1 bg-[#111] text-white text-[11px] font-bold rounded flex items-center gap-1"
-                >
-                  + Add Toll Receipt
+                <button onClick={() => setShowTollModal(true)} className="px-2.5 py-1 bg-[#111] text-white text-[11px] font-bold rounded">
+                  + Add Toll
                 </button>
               </div>
-
-              {tollsList.length === 0 ? (
-                <p className="text-xs text-gray-400 italic py-2">No toll receipts uploaded for this trip yet.</p>
+              {tolls.length === 0 ? (
+                <p className="text-xs text-gray-400 italic py-2">No tolls added.</p>
               ) : (
                 <div className="space-y-2 pt-1">
-                  {tollsList.map(t => (
-                    <div key={t.id} className="flex items-center justify-between text-xs bg-white p-2 rounded border">
-                      <span className="font-semibold text-gray-800">{t.name}</span>
+                  {tolls.map((t) => (
+                    <div key={t.id} className="flex items-center gap-2 text-xs bg-white p-2 rounded border">
+                      <img src={t.receiptPhotoUrl} alt="" className="w-8 h-8 rounded object-cover" />
+                      <span className="font-semibold text-gray-800 flex-1 truncate">{t.name}</span>
                       <span className="font-mono font-bold text-[#E21E26]">₹{t.amount}</span>
+                      <button onClick={() => removeToll(t.id)} className="text-gray-400 hover:text-red-600"><Trash2 className="w-3.5 h-3.5" /></button>
                     </div>
                   ))}
+                  <p className="text-[11px] text-right font-bold text-gray-700">Total tolls: ₹{totalTolls}</p>
                 </div>
               )}
             </div>
           </div>
 
-          {/* Modal to Add Toll */}
-          {showTollModal && (
-            <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-              <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4">
-                <h3 className="text-sm font-bold text-gray-900">Upload Toll Receipt</h3>
-                
-                <form onSubmit={handleAddToll} className="space-y-3">
-                  <div>
-                    <label className="text-xs font-bold text-gray-700 block mb-1">Toll Plaza Name</label>
-                    <input
-                      type="text"
-                      value={tollName}
-                      onChange={e => setTollName(e.target.value)}
-                      className="w-full px-3 py-2 border rounded text-xs"
-                      required
-                    />
-                  </div>
+          <div className="bg-gray-50 p-4 rounded-xl border text-xs space-y-1 max-w-md ml-auto">
+            <div className="flex justify-between"><span className="text-gray-500">Trip payout</span><span className="font-mono font-bold">₹{trip.driverEarnings}</span></div>
+            <div className="flex justify-between text-emerald-700"><span>Toll reimbursement</span><span className="font-mono font-bold">+ ₹{totalTolls}</span></div>
+            <div className="border-t pt-1 flex justify-between text-sm font-black text-[#E21E26]"><span>Total earnings</span><span>₹{trip.driverEarnings + totalTolls}</span></div>
+          </div>
 
-                  <div>
-                    <label className="text-xs font-bold text-gray-700 block mb-1">Toll Amount (₹)</label>
-                    <input
-                      type="number"
-                      value={tollAmount}
-                      onChange={e => setTollAmount(Number(e.target.value))}
-                      className="w-full px-3 py-2 border rounded text-xs font-mono font-bold"
-                      required
-                    />
-                  </div>
-
-                  <div className="border border-dashed border-gray-300 p-4 text-center rounded-xl bg-gray-50">
-                    <Upload className="w-6 h-6 text-gray-400 mx-auto mb-1" />
-                    <p className="text-xs text-gray-500 font-medium">Click to capture / attach photo receipt</p>
-                  </div>
-
-                  <div className="flex justify-end gap-2 pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setShowTollModal(false)}
-                      className="px-3 py-1.5 border text-xs font-bold rounded-lg"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      className="px-4 py-1.5 bg-[#E21E26] text-white text-xs font-bold rounded-lg"
-                    >
-                      Save Receipt
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
-          )}
-
-          <div className="flex justify-end pt-2">
-            <button
-              onClick={handleCompleteTrip}
-              className="px-8 py-3 bg-[#E21E26] hover:bg-[#C9141B] text-white font-black text-xs rounded-xl shadow-lg flex items-center gap-2 transition-all"
-            >
-              <CheckCircle2 className="w-4 h-4" /> Complete Trip & Process Driver Payout
+          <div className="flex justify-end">
+            <button onClick={handleComplete} disabled={busy} className="px-8 py-3 bg-[#E21E26] hover:bg-[#C9141B] text-white font-black text-xs rounded-xl shadow-lg flex items-center gap-2 disabled:opacity-60">
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />} Complete Trip
             </button>
           </div>
         </div>
       )}
 
-      {/* COMPLETED TRIP SUMMARY CARD */}
-      {trip.status === 'Completed' && (
-        <div className="bg-white p-6 rounded-2xl border-2 border-emerald-500 shadow-xl space-y-6 text-center">
-          <div className="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto">
-            <CheckCircle className="w-10 h-10" />
-          </div>
-
-          <div>
-            <h2 className="text-xl font-black text-gray-900">Trip Completed Successfully!</h2>
-            <p className="text-xs text-gray-500 mt-1">Earnings have been credited to your NESAM Driver Wallet.</p>
-          </div>
-
-          <div className="bg-gray-50 p-4 rounded-xl border max-w-md mx-auto space-y-2 text-left text-xs">
-            <div className="flex justify-between">
-              <span className="text-gray-500">Gross Fare</span>
-              <span className="font-mono font-bold">₹{trip.fareAmount}</span>
-            </div>
-            <div className="flex justify-between text-emerald-700">
-              <span>Toll Reimbursement</span>
-              <span className="font-mono font-bold">+ ₹{trip.tollCharges}</span>
-            </div>
-            <div className="flex justify-between text-gray-500">
-              <span>NESAM Platform Fee (10%)</span>
-              <span className="font-mono font-bold">- ₹{trip.platformCommission}</span>
-            </div>
-            <div className="border-t pt-2 flex justify-between text-base font-black text-[#E21E26]">
-              <span>Total Credited Earnings</span>
-              <span>₹{trip.driverEarnings + trip.tollCharges}</span>
-            </div>
+      {showTollModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4 max-h-[90vh] overflow-y-auto">
+            <h3 className="text-sm font-bold text-gray-900">Add Toll Receipt</h3>
+            <form onSubmit={handleAddToll} className="space-y-3">
+              <input value={tollName} onChange={(e) => setTollName(e.target.value)} placeholder="Toll plaza name" className="w-full px-3 py-2 border rounded-lg text-sm" />
+              <input type="number" inputMode="numeric" value={tollAmount} onChange={(e) => setTollAmount(e.target.value)} placeholder="Amount (₹)" className="w-full px-3 py-2 border rounded-lg text-sm font-mono font-bold" />
+              <PhotoUpload compact label="Receipt Photo" value={tollPhoto} folder={`trips/${trip.id}/tolls`} name="toll" capture="environment" required onChange={setTollPhoto} />
+              {tollError && <p className="text-[11px] text-red-600 font-semibold">{tollError}</p>}
+              <div className="flex justify-end gap-2 pt-1">
+                <button type="button" onClick={() => { setShowTollModal(false); setTollError(''); }} className="px-3 py-1.5 border text-xs font-bold rounded-lg">Cancel</button>
+                <button type="submit" className="px-4 py-1.5 bg-[#E21E26] text-white text-xs font-bold rounded-lg">Save Receipt</button>
+              </div>
+            </form>
           </div>
         </div>
       )}
-
     </div>
   );
 };

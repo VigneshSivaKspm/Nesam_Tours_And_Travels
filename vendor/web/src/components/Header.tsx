@@ -50,35 +50,7 @@ export const Header: React.FC<HeaderProps> = ({
     return () => unsub();
   }, []);
 
-  const mockNotifications = [
-    {
-      id: 1,
-      title: 'New Trip Request Available',
-      desc: 'Chennai to Puducherry Outstation (Offered ₹4,200)',
-      time: '5m ago',
-      unread: true,
-      tab: 'marketplace'
-    },
-    {
-      id: 2,
-      title: 'Dispatch Confirmed',
-      desc: 'Trip NESAM-BK-4082 successfully assigned to Muthu Kumar',
-      time: '25m ago',
-      unread: true,
-      tab: 'trips'
-    },
-    {
-      id: 3,
-      title: 'Weekly Payout Processed',
-      desc: '₹35,000 transferred to HDFC Bank A/C ...8821',
-      time: '2h ago',
-      unread: false,
-      tab: 'wallet'
-    }
-  ];
-
-  const notifications = liveNotifs.length > 0 ? liveNotifs : mockNotifications;
-
+  const notifications = liveNotifs;
   const unreadCount = notifications.filter((n) => n.unread).length + (pendingBidsCount > 0 ? 1 : 0);
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -303,8 +275,12 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 onClick={async () => {
                   setShowProfileMenu(false);
-                  try { await signOut(auth); } catch {}
-                  window.location.reload();
+                  try {
+                    await signOut(auth);
+                  } catch (error) {
+                    console.error('Sign out error:', error);
+                  }
+                  window.location.href = '/';
                 }}
                 className="w-full text-left px-4 py-2.5 text-[12px] font-semibold transition-colors hover:bg-[#FEF2F2]"
                 style={{ color: '#E21B23' }}

@@ -80,10 +80,10 @@ export const MarketplaceBiddingScreen: React.FC<MarketplaceBiddingScreenProps> =
       {activeTab === 'feed' && (
         <div className="space-y-4">
           {openTrips.filter(t => t.status === 'Open' || t.status === 'Bidding').length === 0 ? (
-            <div className="bg-white p-12 rounded-2xl border border-dashed text-center">
-              <AlertCircle className="w-8 h-8 text-gray-400 mx-auto mb-2" />
-              <p className="text-sm font-bold text-gray-800">No open trips available in marketplace</p>
-              <p className="text-xs text-gray-500 mt-1">Check back shortly for newly published outstation and city rides.</p>
+            <div className="flex flex-col items-center justify-center min-h-[50vh] text-center p-8">
+              <div className="text-4xl mb-3">📭</div>
+              <div className="text-[15px] font-bold text-[#111] mb-1">No Open Trips</div>
+              <div className="text-[13px] text-[#999]">New trip requests will appear here when available.</div>
             </div>
           ) : (
             openTrips.filter(t => t.status === 'Open' || t.status === 'Bidding').map(trip => (

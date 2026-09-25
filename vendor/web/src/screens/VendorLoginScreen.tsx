@@ -1,75 +1,60 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { ConfirmationResult } from 'firebase/auth';
-import { Building2, ShieldCheck, Loader2 } from 'lucide-react';
-import { VendorProfile } from '../types';
-import { DEFAULT_VENDOR_PROFILE } from '../config/constants';
+import { ArrowLeft, Building2, LogIn, ShieldCheck, UserPlus } from 'lucide-react';
 import {
-  createRecaptchaVerifier,
-  sendOtpToPhone,
   confirmOtpCode,
+  createRecaptchaVerifier,
   describePhoneAuthError,
+  sendOtpToPhone,
+  setAuthIntent,
+  type AuthIntent,
 } from '../services/authService';
-import {
-  getExistingVendorProfile,
-  registerVendorProfile,
-} from '../services/vendorFirestoreService';
+import { useOnlineStatus } from '../hooks/useOnlineStatus';
+import { Button, ErrorBanner, OfflineBanner, RED } from '../components/onboarding/ui';
 
-interface VendorLoginScreenProps {
-  onComplete: (profile: VendorProfile) => void;
-}
+type Step = 'choose' | 'phone' | 'otp';
 
-type Step = 'login' | 'otp' | 'signup';
+const RESEND_COOLDOWN_S = 30;
+const EMPTY_OTP = ['', '', '', '', '', ''];
 
-const RED = '#E21B23';
-
-export const VendorLoginScreen: React.FC<VendorLoginScreenProps> = ({ onComplete }) => {
-  const [step, setStep] = useState<Step>('login');
+/**
+ * Entry flow: choose Login / Sign Up → phone → OTP. On success Firebase Auth
+ * fires onAuthStateChanged and App routes from the vendors/{uid} document, so
+ * this screen never decides the destination itself.
+ */
+export const VendorLoginScreen: React.FC = () => {
+  const online = useOnlineStatus();
+  const [step, setStep] = useState<Step>('choose');
+  const [mode, setMode] = useState<AuthIntent>('login');
   const [mobileNumber, setMobileNumber] = useState('');
-  const [otp, setOtp] = useState(['', '', '', '', '', '']);
+  const [otp, setOtp] = useState(EMPTY_OTP);
   const [confirmation, setConfirmation] = useState<ConfirmationResult | null>(null);
-
   const [sendError, setSendError] = useState('');
   const [otpError, setOtpError] = useState('');
-  const [signupError, setSignupError] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
-  const [isRegistering, setIsRegistering] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
+  const verifyingRef = useRef(false);
 
-  // New-vendor signup fields
-  const [companyName, setCompanyName] = useState('');
-  const [contactPerson, setContactPerson] = useState('');
-  const [email, setEmail] = useState('');
-  const [city, setCity] = useState('');
-  const [gstin, setGstin] = useState('');
+  useEffect(() => {
+    if (cooldown <= 0) return undefined;
+    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
 
-  const handleOtpChange = (index: number, val: string) => {
-    const digitsOnly = val.replace(/\D/g, '');
-    if (digitsOnly.length > 1) {
-      const pasted = digitsOnly.slice(0, 6);
-      const newOtp = [...otp];
-      for (let i = 0; i < 6; i++) {
-        newOtp[i] = pasted[i] || '';
-      }
-      setOtp(newOtp);
-      const focusTarget = Math.min(pasted.length, 5);
-      document.getElementById(`vendor-otp-${focusTarget}`)?.focus();
-      return;
-    }
-
-    const singleChar = digitsOnly.slice(-1);
-    const next = [...otp];
-    next[index] = singleChar;
-    setOtp(next);
-    if (singleChar && index < 5) {
-      document.getElementById(`vendor-otp-${index + 1}`)?.focus();
-    }
+  const choose = (m: AuthIntent) => {
+    setMode(m);
+    setAuthIntent(m);
+    setSendError('');
+    setStep('phone');
   };
 
   const handleSendOtp = async () => {
-    if (mobileNumber.length !== 10) {
-      setSendError('Enter a valid 10-digit mobile number.');
+    if (!/^[6-9]\d{9}$/.test(mobileNumber)) {
+      setSendError('Enter a valid 10-digit Indian mobile number.');
       return;
     }
+    if (isSending || cooldown > 0) return;
     setSendError('');
     setOtpError('');
     setIsSending(true);
@@ -77,111 +62,132 @@ export const VendorLoginScreen: React.FC<VendorLoginScreenProps> = ({ onComplete
       const verifier = createRecaptchaVerifier('vendor-recaptcha-container');
       const result = await sendOtpToPhone(`+91${mobileNumber}`, verifier);
       setConfirmation(result);
+      setOtp(EMPTY_OTP);
       setStep('otp');
+      setCooldown(RESEND_COOLDOWN_S);
+      setTimeout(() => document.getElementById('vendor-otp-0')?.focus(), 50);
     } catch (error) {
-      console.error('Firebase SMS dispatch failed:', error);
-      setSendError(describePhoneAuthError(error));
+      const message = describePhoneAuthError(error);
+      if (step === 'otp') setOtpError(message);
+      else setSendError(message);
     } finally {
       setIsSending(false);
     }
   };
 
-  const handleVerifyOtp = async () => {
-    const entered = otp.join('');
-    if (entered.length < 6) {
+  const verify = async (code: string) => {
+    if (verifyingRef.current) return;
+    if (code.length < 6) {
       setOtpError('Please enter the 6-digit OTP.');
       return;
     }
     if (!confirmation) {
-      setOtpError('Authentication session expired. Please request a new OTP.');
+      setOtpError('Your verification session expired. Please resend the OTP.');
       return;
     }
+    verifyingRef.current = true;
     setOtpError('');
     setIsVerifying(true);
     try {
-      const user = await confirmOtpCode(confirmation, entered);
-      const existing = await getExistingVendorProfile(user.uid);
-      if (existing) {
-        onComplete(existing);
-        return;
-      }
-      // Brand-new account — collect company details.
-      setStep('signup');
+      await confirmOtpCode(confirmation, code);
+      // App takes over via the auth listener; keep the spinner until unmount.
     } catch (error) {
-      console.error('Firebase OTP confirmation failed:', error);
       setOtpError(describePhoneAuthError(error));
-    } finally {
       setIsVerifying(false);
+      verifyingRef.current = false;
     }
   };
 
-  const handleRegister = async () => {
-    if (!companyName.trim() || !contactPerson.trim()) {
-      setSignupError('Company name and contact person are required.');
-      return;
+  const handleOtpChange = (index: number, val: string) => {
+    const digits = val.replace(/\D/g, '');
+    const next = [...otp];
+    if (digits.length >= 6) {
+      // Paste / SMS autofill of the full code into any box
+      const pasted = digits.slice(0, 6);
+      for (let i = 0; i < 6; i++) next[i] = pasted[i] || '';
+      setOtp(next);
+      document.getElementById(`vendor-otp-${Math.min(pasted.length, 5)}`)?.focus();
+    } else {
+      next[index] = digits.slice(-1);
+      setOtp(next);
+      if (next[index] && index < 5) document.getElementById(`vendor-otp-${index + 1}`)?.focus();
     }
-    setSignupError('');
-    setIsRegistering(true);
-    try {
-      const profile: VendorProfile = {
-        ...DEFAULT_VENDOR_PROFILE,
-        companyName: companyName.trim(),
-        contactPerson: contactPerson.trim(),
-        email: email.trim(),
-        phone: `+91 ${mobileNumber}`,
-        city: city.trim() || 'Chennai',
-        gstin: gstin.trim(),
-        verificationStatus: 'Pending',
-        joinedDate: 'New Partner',
-      };
-      await registerVendorProfile(profile);
-      onComplete(profile);
-    } catch (error) {
-      const code = (error as { code?: string })?.code ?? '';
-      if (code === 'functions/already-exists') {
-        setSignupError('An account already exists for this number. Please sign in.');
-      } else {
-        setSignupError(describePhoneAuthError(error));
-      }
-    } finally {
-      setIsRegistering(false);
-    }
+    const code = next.join('');
+    if (code.length === 6) verify(code);
   };
+
+  const isSignup = mode === 'signup';
 
   return (
-    <div
-      className="min-h-screen w-full flex items-center justify-center px-4 py-10 font-sans antialiased"
-      style={{ background: '#F5F5F5' }}
-    >
+    <div className="min-h-screen w-full flex items-center justify-center px-4 py-10 font-sans antialiased" style={{ background: '#F5F5F5' }}>
       <div id="vendor-recaptcha-container" />
 
       <div className="w-full max-w-sm">
-        {/* Brand */}
         <div className="text-center mb-7">
-          <div
-            className="w-14 h-14 rounded-2xl mx-auto mb-4 flex items-center justify-center text-white shadow-sm"
-            style={{ background: RED }}
-          >
+          <div className="w-14 h-14 rounded-2xl mx-auto mb-4 flex items-center justify-center text-white shadow-sm" style={{ background: RED }}>
             <Building2 className="w-7 h-7" />
           </div>
           <h1 className="text-[19px] font-bold text-[#111111]">Nesam Fleet Partner</h1>
           <p className="text-[13px] text-[#999] mt-1">
-            {step === 'signup'
-              ? 'Tell us about your fleet business'
-              : 'Sign in to your vendor dashboard'}
+            {step === 'choose'
+              ? 'Manage your fleet, drivers and bookings'
+              : isSignup
+                ? 'Create your vendor account'
+                : 'Sign in to your vendor dashboard'}
           </p>
         </div>
 
+        {!online && (
+          <div className="mb-3">
+            <OfflineBanner />
+          </div>
+        )}
+
         <div className="bg-white rounded-2xl border border-[#E5E5E5] p-6 shadow-sm">
-          {step === 'login' && (
+          {step === 'choose' && (
+            <div className="space-y-3">
+              <button
+                onClick={() => choose('login')}
+                className="w-full flex items-center gap-3 p-4 rounded-xl border border-[#E5E5E5] hover:border-[#E21B23] hover:bg-[#FEF7F7] transition-colors text-left"
+              >
+                <span className="w-10 h-10 rounded-lg flex items-center justify-center text-white shrink-0" style={{ background: RED }}>
+                  <LogIn className="w-5 h-5" />
+                </span>
+                <span>
+                  <span className="block text-[14px] font-bold text-[#111]">Login</span>
+                  <span className="block text-[12px] text-[#888]">I already have a vendor account</span>
+                </span>
+              </button>
+              <button
+                onClick={() => choose('signup')}
+                className="w-full flex items-center gap-3 p-4 rounded-xl border border-[#E5E5E5] hover:border-[#E21B23] hover:bg-[#FEF7F7] transition-colors text-left"
+              >
+                <span className="w-10 h-10 rounded-lg flex items-center justify-center bg-[#111] text-white shrink-0">
+                  <UserPlus className="w-5 h-5" />
+                </span>
+                <span>
+                  <span className="block text-[14px] font-bold text-[#111]">Sign Up</span>
+                  <span className="block text-[12px] text-[#888]">Register my travel agency / fleet</span>
+                </span>
+              </button>
+            </div>
+          )}
+
+          {step === 'phone' && (
             <>
-              <label className="block text-[12px] font-semibold text-[#444] mb-1.5">
-                Registered Mobile Number
+              <button onClick={() => setStep('choose')} className="flex items-center gap-1 text-[12px] text-[#999] hover:text-[#111] mb-4 font-semibold">
+                <ArrowLeft className="w-3.5 h-3.5" /> Back
+              </button>
+              <label htmlFor="vendor-phone" className="block text-[12px] font-semibold text-[#444] mb-1.5">
+                {isSignup ? 'Mobile Number' : 'Registered Mobile Number'}
               </label>
               <div className="flex items-center bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg px-3.5 py-2.5 focus-within:border-[#E21B23] focus-within:ring-1 focus-within:ring-[#E21B23]/20 transition-all">
                 <span className="text-[13px] font-bold text-[#E21B23] mr-2.5">+91</span>
                 <input
+                  id="vendor-phone"
                   type="tel"
+                  inputMode="numeric"
+                  autoComplete="tel-national"
                   autoFocus
                   placeholder="90000 00000"
                   maxLength={10}
@@ -191,23 +197,15 @@ export const VendorLoginScreen: React.FC<VendorLoginScreenProps> = ({ onComplete
                   className="bg-transparent w-full text-[13px] font-semibold text-[#111] focus:outline-none placeholder-[#BBB]"
                 />
               </div>
-
-              {sendError && (
-                <div className="mt-3 px-3 py-2 rounded-lg text-[12px] font-medium text-[#E21B23] bg-[#FEF2F2] border border-[#FBD5D5]">
-                  {sendError}
-                </div>
+              {isSignup && (
+                <p className="mt-1.5 text-[11px] text-[#999]">This number becomes your login and primary business contact.</p>
               )}
-
-              <button
-                onClick={handleSendOtp}
-                disabled={isSending}
-                className="w-full mt-5 py-2.5 text-[13px] font-semibold text-white rounded-lg transition-all hover:opacity-90 active:scale-95 disabled:opacity-60 disabled:active:scale-100 flex items-center justify-center gap-2"
-                style={{ background: RED }}
-              >
-                {isSending && <Loader2 className="w-4 h-4 animate-spin" />}
-                {isSending ? 'Sending OTP…' : 'Continue with OTP'}
-              </button>
-
+              <div className="mt-3">
+                <ErrorBanner message={sendError} />
+              </div>
+              <Button className="w-full mt-4" onClick={handleSendOtp} loading={isSending} disabled={!online}>
+                {isSending ? 'Sending OTP…' : 'Send OTP'}
+              </Button>
               <p className="text-center text-[11px] text-[#999] mt-5 leading-relaxed">
                 By continuing, you agree to NESAM's Fleet Partner Terms of Service and Privacy Policy.
               </p>
@@ -218,20 +216,18 @@ export const VendorLoginScreen: React.FC<VendorLoginScreenProps> = ({ onComplete
             <>
               <button
                 onClick={() => {
-                  setStep('login');
-                  setOtp(['', '', '', '', '', '']);
+                  setStep('phone');
+                  setOtp(EMPTY_OTP);
                   setOtpError('');
                 }}
-                className="text-[12px] text-[#999] hover:text-[#111] mb-4 font-semibold"
+                disabled={isVerifying}
+                className="flex items-center gap-1 text-[12px] text-[#999] hover:text-[#111] mb-4 font-semibold disabled:opacity-50"
               >
-                ← Change Number
+                <ArrowLeft className="w-3.5 h-3.5" /> Change number
               </button>
-
               <p className="text-[13px] text-[#444] mb-4">
-                Enter the 6-digit OTP sent to{' '}
-                <span className="font-bold text-[#111]">+91 {mobileNumber}</span>
+                Enter the 6-digit OTP sent to <span className="font-bold text-[#111]">+91 {mobileNumber}</span>
               </p>
-
               <div className="flex justify-between gap-2">
                 {otp.map((digit, idx) => (
                   <input
@@ -239,130 +235,50 @@ export const VendorLoginScreen: React.FC<VendorLoginScreenProps> = ({ onComplete
                     id={`vendor-otp-${idx}`}
                     type="text"
                     inputMode="numeric"
-                    maxLength={1}
+                    autoComplete={idx === 0 ? 'one-time-code' : 'off'}
+                    aria-label={`OTP digit ${idx + 1}`}
+                    maxLength={6}
                     value={digit}
+                    disabled={isVerifying}
                     onChange={(e) => handleOtpChange(idx, e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === 'Backspace' && !otp[idx] && idx > 0) {
-                        document.getElementById(`vendor-otp-${idx - 1}`)?.focus();
-                      }
+                      if (e.key === 'Backspace' && !otp[idx] && idx > 0) document.getElementById(`vendor-otp-${idx - 1}`)?.focus();
+                      if (e.key === 'Enter') verify(otp.join(''));
                     }}
-                    className={`w-11 h-12 text-center bg-[#F5F5F5] border rounded-lg text-[16px] font-bold text-[#111] focus:outline-none focus:border-[#E21B23] focus:ring-1 focus:ring-[#E21B23]/20 transition-all ${
+                    className={`w-11 h-12 text-center bg-[#F5F5F5] border rounded-lg text-[16px] font-bold text-[#111] focus:outline-none focus:border-[#E21B23] focus:ring-1 focus:ring-[#E21B23]/20 transition-all disabled:opacity-60 ${
                       otpError ? 'border-[#FBD5D5]' : 'border-[#E5E5E5]'
                     }`}
                   />
                 ))}
               </div>
-
-              {otpError && (
-                <div className="mt-3 px-3 py-2 rounded-lg text-[12px] font-medium text-[#E21B23] bg-[#FEF2F2] border border-[#FBD5D5]">
-                  {otpError}
-                </div>
-              )}
-
-              <button
-                onClick={handleVerifyOtp}
-                disabled={isVerifying}
-                className="w-full mt-5 py-2.5 text-[13px] font-semibold text-white rounded-lg transition-all hover:opacity-90 active:scale-95 disabled:opacity-60 disabled:active:scale-100 flex items-center justify-center gap-2"
-                style={{ background: RED }}
-              >
-                {isVerifying && <Loader2 className="w-4 h-4 animate-spin" />}
+              <div className="mt-3">
+                <ErrorBanner message={otpError} />
+              </div>
+              <Button className="w-full mt-4" onClick={() => verify(otp.join(''))} loading={isVerifying} disabled={!online}>
                 {isVerifying ? 'Verifying…' : 'Verify & Continue'}
-              </button>
-
+              </Button>
               <div className="text-right mt-3">
                 <button
                   onClick={handleSendOtp}
-                  disabled={isSending}
-                  className="text-[12px] font-semibold hover:underline disabled:opacity-60"
+                  disabled={isSending || cooldown > 0 || isVerifying}
+                  className="text-[12px] font-semibold hover:underline disabled:opacity-50 disabled:no-underline"
                   style={{ color: RED }}
                 >
-                  Resend OTP
+                  {cooldown > 0 ? `Resend OTP in ${cooldown}s` : isSending ? 'Sending…' : 'Resend OTP'}
                 </button>
               </div>
             </>
           )}
-
-          {step === 'signup' && (
-            <>
-              <div className="space-y-3.5">
-                <Field
-                  label="Company / Fleet Name *"
-                  value={companyName}
-                  onChange={setCompanyName}
-                  placeholder="Sri Balaji Travels"
-                  autoFocus
-                />
-                <Field
-                  label="Contact Person *"
-                  value={contactPerson}
-                  onChange={setContactPerson}
-                  placeholder="Fleet Operations Manager"
-                />
-                <Field
-                  label="Business Email"
-                  value={email}
-                  onChange={setEmail}
-                  placeholder="ops@company.in"
-                  type="email"
-                />
-                <div className="grid grid-cols-2 gap-3">
-                  <Field label="City" value={city} onChange={setCity} placeholder="Chennai" />
-                  <Field label="GSTIN" value={gstin} onChange={setGstin} placeholder="33ABCDE1234F1Z5" />
-                </div>
-              </div>
-
-              {signupError && (
-                <div className="mt-3 px-3 py-2 rounded-lg text-[12px] font-medium text-[#E21B23] bg-[#FEF2F2] border border-[#FBD5D5]">
-                  {signupError}
-                </div>
-              )}
-
-              <button
-                onClick={handleRegister}
-                disabled={isRegistering}
-                className="w-full mt-5 py-2.5 text-[13px] font-semibold text-white rounded-lg transition-all hover:opacity-90 active:scale-95 disabled:opacity-60 disabled:active:scale-100 flex items-center justify-center gap-2"
-                style={{ background: RED }}
-              >
-                {isRegistering && <Loader2 className="w-4 h-4 animate-spin" />}
-                {isRegistering ? 'Creating Account…' : 'Create Vendor Account'}
-              </button>
-
-              <p className="text-center text-[11px] text-[#999] mt-4 leading-relaxed flex items-center justify-center gap-1.5">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                Your account is reviewed by the Nesam team before going live.
-              </p>
-            </>
-          )}
         </div>
 
-        <p className="text-center text-[11px] text-[#BBB] mt-6">
-          Nesam Tours &amp; Travels — Fleet Partner Portal
-        </p>
+        {step !== 'choose' && (
+          <p className="text-center text-[11px] text-[#999] mt-5 flex items-center justify-center gap-1.5">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+            {isSignup ? 'New accounts are verified by the Nesam team before going live.' : 'Secured with SMS one-time password.'}
+          </p>
+        )}
+        <p className="text-center text-[11px] text-[#BBB] mt-4">Nesam Tours &amp; Travels — Fleet Partner Portal</p>
       </div>
     </div>
   );
 };
-
-interface FieldProps {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  type?: string;
-  autoFocus?: boolean;
-}
-
-const Field: React.FC<FieldProps> = ({ label, value, onChange, placeholder, type = 'text', autoFocus }) => (
-  <div>
-    <label className="block text-[12px] font-semibold text-[#444] mb-1.5">{label}</label>
-    <input
-      type={type}
-      autoFocus={autoFocus}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-      className="w-full px-3.5 py-2.5 text-[13px] bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23] focus:ring-1 focus:ring-[#E21B23]/20 transition-all placeholder-[#BBB]"
-    />
-  </div>
-);

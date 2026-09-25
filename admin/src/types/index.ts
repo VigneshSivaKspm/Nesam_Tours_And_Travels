@@ -90,10 +90,10 @@ export interface VehicleCategory {
   icon?: string;
   seatingCapacity: number;
   luggageCapacity?: string | number;
-  acSupported?: 'AC' | 'Non-AC' | 'Both' | boolean;
+  acSupported?: "AC" | "Non-AC" | "Both" | boolean;
   recommendedPassengers?: number;
   displayOrder?: number;
-  status: 'Active' | 'Inactive';
+  status: "Active" | "Inactive";
   fare: VehicleCategoryFare;
   vehicleCount?: number;
   createdAt?: any;
@@ -212,13 +212,15 @@ export interface PaymentTransaction {
 
 export interface PenaltyRecord {
   id: string;
+  entityType?: string;
+  entityName?: string;
   type: string;
-  entity: string;
-  entityId: string;
+  entity?: string;
+  entityId?: string;
   reason: string;
   amount: string;
-  walletDeducted: boolean;
-  custCompensation: string;
+  walletDeducted?: boolean;
+  custCompensation?: string;
   date: string;
   status: string;
   bookingId?: string;
@@ -459,7 +461,7 @@ export interface FareRule {
   vehicleCategoryId: string;
   vehicleCategoryName?: string;
   pricingType: PricingModel;
-  
+
   // Location / Route specific
   originLocationId?: string;
   originLocationName?: string;
@@ -482,7 +484,7 @@ export interface FareRule {
   driverBatta: number;
   nightChargeEnabled?: boolean;
   nightStartTime?: string; // e.g. "22:00"
-  nightEndTime?: string;   // e.g. "05:00"
+  nightEndTime?: string; // e.g. "05:00"
   nightChargeType?: "Fixed" | "Percentage";
   nightChargeValue?: number;
 
@@ -502,7 +504,7 @@ export interface FareRule {
   status: "Active" | "Inactive";
   effectiveFrom?: string;
   effectiveUntil?: string;
-  
+
   createdAt?: any;
   updatedAt?: any;
   createdBy?: string;
@@ -556,7 +558,13 @@ export interface FareCalculationResult {
 }
 
 export type DiscountType = "PERCENTAGE" | "FIXED_AMOUNT";
-export type CouponStatus = "Draft" | "Active" | "Scheduled" | "Expired" | "Inactive" | "Archived";
+export type CouponStatus =
+  | "Draft"
+  | "Active"
+  | "Scheduled"
+  | "Expired"
+  | "Inactive"
+  | "Archived";
 
 export interface MasterCoupon {
   id: string;
@@ -620,8 +628,19 @@ export interface CouponValidationResult {
   finalPayableAmount: number;
 }
 
-export type ModerationStatus = "Pending" | "Published" | "Hidden" | "Flagged" | "Archived";
-export type FlagReason = "Spam" | "Abusive Content" | "Irrelevant" | "Duplicate" | "Privacy Concern" | "Other";
+export type ModerationStatus =
+  | "Pending"
+  | "Published"
+  | "Hidden"
+  | "Flagged"
+  | "Archived";
+export type FlagReason =
+  | "Spam"
+  | "Abusive Content"
+  | "Irrelevant"
+  | "Duplicate"
+  | "Privacy Concern"
+  | "Other";
 
 export interface AdminResponse {
   text: string;
@@ -645,7 +664,7 @@ export interface CustomerReview {
   customerName: string;
   customerPhone?: string;
   customerEmail?: string;
-  
+
   driverId?: string;
   driverName?: string;
   vehicleNumber?: string;
@@ -658,7 +677,7 @@ export interface CustomerReview {
   serviceRating?: number;
 
   reviewText?: string;
-  
+
   status: ModerationStatus;
   adminResponse?: AdminResponse;
   moderation?: ModerationMeta;

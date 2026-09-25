@@ -24,7 +24,7 @@ export const DriverManagementScreen: React.FC<DriverManagementScreenProps> = ({
   const [licenseNumber, setLicenseNumber] = useState<string>('');
   const [licenseExpiry, setLicenseExpiry] = useState<string>('2032-12-31');
   const [assignedVehicleNumber, setAssignedVehicleNumber] = useState<string>('');
-  const [photoUrl, setPhotoUrl] = useState<string>('https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80');
+  const [photoUrl, setPhotoUrl] = useState<string>('');
 
   const handleCreateDriver = (e: React.FormEvent) => {
     e.preventDefault();

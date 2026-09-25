@@ -3,6 +3,7 @@ import {
   subscribeToCollection,
   COLLECTIONS,
 } from "../services/adminFirestoreService";
+import { normalizeVendorStatus } from "../utils/vendorStatus";
 
 interface SidebarProps {
   activePage: string;
@@ -179,6 +180,16 @@ const navGroups = [
       },
     ],
   },
+  {
+    label: "Help & Support",
+    items: [
+      {
+        id: "support",
+        label: "Support Tickets",
+        icon: "M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-5 0a4 4 0 11-8 0 4 4 0 018 0z",
+      },
+    ],
+  },
 ];
 
 export default function Sidebar({
@@ -202,6 +213,7 @@ export default function Sidebar({
     trips: 0,
     marketplace: 0,
     vendors: 0,
+    drivers: 0,
     notifications: 0,
   });
 
@@ -225,8 +237,25 @@ export default function Sidebar({
     const unsubVendors = subscribeToCollection(
       COLLECTIONS.VENDORS,
       (data: any[]) => {
-        const pending = data.filter((v) => v.status === "Pending").length;
+        const pending = data.filter(
+          (v) =>
+            v.status === "Pending" ||
+            v.status === "PENDING_APPROVAL" ||
+            normalizeVendorStatus(v) === "PENDING_APPROVAL",
+        ).length;
         setBadges((prev) => ({ ...prev, vendors: pending }));
+      },
+    );
+    const unsubDrivers = subscribeToCollection(
+      COLLECTIONS.DRIVERS,
+      (data: any[]) => {
+        // New applications + approved drivers with re-uploaded documents.
+        const pending = data.filter(
+          (d) =>
+            d.status === "Pending" ||
+            (d.status === "Approved" && d.docStatus === "Pending"),
+        ).length;
+        setBadges((prev) => ({ ...prev, drivers: pending }));
       },
     );
     const unsubNotifs = subscribeToCollection(
@@ -241,6 +270,7 @@ export default function Sidebar({
       unsubTrips();
       unsubMarketplace();
       unsubVendors();
+      unsubDrivers();
       unsubNotifs();
     };
   }, []);
@@ -251,8 +281,11 @@ export default function Sidebar({
       return badges.marketplace.toString();
     if (id === "vendors" && badges.vendors > 0)
       return badges.vendors.toString();
+    if (id === "drivers" && badges.drivers > 0)
+      return badges.drivers.toString();
     if (id === "notifications" && badges.notifications > 0)
       return badges.notifications.toString();
+    if (id === "support") return "3";
     return undefined;
   };
 

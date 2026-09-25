@@ -1,6 +1,10 @@
 import { useState, useEffect } from "react";
 import { Booking } from "../types";
-import { subscribeBookings, updateFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
+import {
+  subscribeBookings,
+  updateFirestoreDocument,
+  COLLECTIONS,
+} from "../services/adminFirestoreService";
 
 const statusConfig: Record<string, { color: string; bg: string; dot: string }> =
   {
@@ -39,6 +43,13 @@ export default function LiveTrips() {
           b.status === "Assigned",
       );
       if (active.length > 0) {
+        const STAGE_LABELS: Record<string, string> = {
+          "En Route Pickup": "En Route to Pickup",
+          "Reached Pickup": "Waiting at Pickup",
+          "In Progress": "Trip in Progress",
+          "Arrived Destination": "Arrived",
+          "Trip Started": "Trip Started",
+        };
         setLiveTripsList(
           active.map((a: any) => ({
             id: a.id,
@@ -48,12 +59,15 @@ export default function LiveTrips() {
             pickup: a.pickup || a.pickupAddress || "—",
             drop: a.drop || a.dropAddress || "—",
             customerPhone: a.phone || a.customerPhone || "",
-            status: a.status === "Ongoing" ? "Trip Started" : a.status,
+            status:
+              STAGE_LABELS[a.tripStage] ||
+              a.tripStage ||
+              (a.status === "Ongoing" ? "Trip Started" : a.status),
             startedAt: a.time || "—",
             eta: a.eta || "—",
             currentLocation:
               a.currentLocation || a.pickup || a.pickupAddress || "—",
-            boardingOTPVerified: Boolean(a.verified || a.boardingOTP),
+            boardingOTPVerified: a.status === "Ongoing",
             fare:
               a.fare === undefined || a.fare === null || a.fare === ""
                 ? "—"
@@ -425,23 +439,42 @@ export default function LiveTrips() {
 
             {/* Actions */}
             <div className="flex gap-3">
-              <button
-                onClick={() => alert(`Driver: ${trip.driver}${trip.driverPhone ? `\nPhone: ${trip.driverPhone}` : "\nNo phone number on file"}`)}
-                className="flex-1 py-2.5 text-[12px] font-semibold border border-[#E5E5E5] rounded-xl hover:bg-[#F5F5F5] text-[#444] transition-colors cursor-pointer"
+              <a
+                href={`tel:${trip.driverPhone || ""}`}
+                className="flex-1 text-center py-2.5 text-[12px] font-semibold border border-[#E5E5E5] rounded-xl hover:bg-[#F5F5F5] text-[#444] transition-colors cursor-pointer block"
               >
                 Contact Driver
-              </button>
-              <button
-                onClick={() => alert(`Customer for ${trip.bookingId}${trip.customerPhone ? `\nPhone: ${trip.customerPhone}` : "\nNo phone number on file"}`)}
-                className="flex-1 py-2.5 text-[12px] font-semibold border border-[#E5E5E5] rounded-xl hover:bg-[#F5F5F5] text-[#444] transition-colors cursor-pointer"
+              </a>
+              <a
+                href={`tel:${trip.customerPhone || ""}`}
+                className="flex-1 text-center py-2.5 text-[12px] font-semibold border border-[#E5E5E5] rounded-xl hover:bg-[#F5F5F5] text-[#444] transition-colors cursor-pointer block"
               >
                 Contact Customer
-              </button>
+              </a>
               <button
                 onClick={async () => {
-                  if (window.confirm(`Are you sure you want to trigger an Emergency Cancel for booking ${trip.bookingId}?`)) {
-                    await updateFirestoreDocument(COLLECTIONS.BOOKINGS, trip.bookingId, { status: "Cancelled" });
-                    setLiveTripsList(prev => prev.filter(t => t.id !== trip.id));
+                  if (
+                    window.confirm(
+                      `Are you sure you want to trigger an Emergency Cancel for booking ${trip.bookingId}?`,
+                    )
+                  ) {
+                    await updateFirestoreDocument(
+                      COLLECTIONS.BOOKINGS,
+                      trip.id,
+                      {
+                        status: "Cancelled",
+                        cancelledAt: new Date().toISOString(),
+                        cancelReason: "Emergency cancel by admin",
+                      },
+                    );
+                    await updateFirestoreDocument(
+                      COLLECTIONS.MARKETPLACE,
+                      trip.id,
+                      { status: "Closed" },
+                    );
+                    setLiveTripsList((prev) =>
+                      prev.filter((t) => t.id !== trip.id),
+                    );
                     alert(`Trip ${trip.bookingId} cancelled.`);
                   }
                 }}

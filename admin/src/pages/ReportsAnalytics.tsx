@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { vendorStatusLabel } from "../utils/vendorStatus";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend, LineChart, Line } from "recharts";
 import { Booking, Vendor } from "../types";
 import { subscribeBookings, subscribeVendors } from "../services/adminFirestoreService";
@@ -278,7 +279,7 @@ export default function Reports() {
                     <td className="px-4 py-3 font-semibold text-[#111]">{v.companyName || v.name}</td>
                     <td className="px-4 py-3 text-[#666]">{v.city || "—"}</td>
                     <td className="px-4 py-3 font-semibold text-[#111]">{v.fleetSize ?? 0} vehicles</td>
-                    <td className="px-4 py-3 text-green-700 font-semibold">{v.status}</td>
+                    <td className="px-4 py-3 text-green-700 font-semibold">{vendorStatusLabel(v)}</td>
                     <td className="px-4 py-3 font-semibold text-[#E21B23]">{v.commission || "—"}</td>
                   </tr>
                 ))}

@@ -2,6 +2,12 @@ rules_version = '2';
 
 // Client-side-only model — see firestore.rules. Storage rules cross-check the
 // caller's role against their Firestore profile doc (id == uid).
+//
+// Layout:
+//   drivers/{driverId}/kyc/{file}                 driver KYC documents
+//   drivers/{driverId}/pretrip/{bookingId}/{file} pre-trip safety photos
+//   vendors/{vendorId}/...                        vendor business + vehicle docs
+//   bookings/{bookingId}/tolls/{file}             toll receipts (assigned driver)
 
 service firebase.storage {
   match /b/{bucket}/o {
@@ -12,33 +18,68 @@ service firebase.storage {
     function uid() {
       return request.auth.uid;
     }
+    function fsDoc(coll, id) {
+      return /databases/(default)/documents/$(coll)/$(id);
+    }
     function isAdmin() {
       return isSignedIn()
-             && (
-               (request.auth.token.email != null && (request.auth.token.email == 'admin@nesam.in' || request.auth.token.email == 'pradeep@nesamtours.in' || request.auth.token.email.matches('.*admin.*') || request.auth.token.email.matches('.*@nesam\\.in')))
-               || (firestore.exists(/databases/(default)/documents/admins/$(uid())) && firestore.get(/databases/(default)/documents/admins/$(uid())).data.role == 'admin')
-             );
+             && firestore.exists(fsDoc('admins', uid()))
+             && firestore.get(fsDoc('admins', uid())).data.role == 'admin';
     }
     function isVendorUser() {
-      return isSignedIn()
-             && firestore.exists(/databases/(default)/documents/vendors/$(uid()));
+      return isSignedIn() && firestore.exists(fsDoc('vendors', uid()));
+    }
+    // Images or PDFs up to 10 MB. Deletes (request.resource == null) pass.
+    function validUpload() {
+      return request.resource == null || (
+               request.resource.size < 10 * 1024 * 1024
+               && (request.resource.contentType.matches('image/.*')
+                   || request.resource.contentType == 'application/pdf')
+             );
     }
 
-    // Vendor fleet/business documents: RC, insurance, fitness certificate, permit.
+    // Vendor onboarding + business docs:
+    //   vendors/{uid}/onboarding/{category}/{ts}_{rand}_{name}
+    // The owner may add new files at any time but never overwrite one, and may
+    // delete only while the application is editable — so documents cannot be
+    // swapped while an admin is reviewing or after approval.
+    function vendorEditable(vendorId) {
+      return !firestore.exists(fsDoc('vendors', vendorId))
+             || firestore.get(fsDoc('vendors', vendorId)).data.status
+                  in ['INCOMPLETE', 'CHANGES_REQUESTED', 'REJECTED',
+                      'Pending', 'Needs Correction', 'Rejected'];
+    }
     match /vendors/{vendorId}/{allPaths=**} {
-      allow read, write: if isAdmin() || (isSignedIn() && uid() == vendorId);
+      allow read: if isAdmin() || (isSignedIn() && uid() == vendorId);
+      // Storage evaluates a content overwrite as 'create', so owners must
+      // target a path that does not exist yet (resource == null).
+      allow create: if (isAdmin() || (isSignedIn() && uid() == vendorId && resource == null))
+                       && validUpload();
+      allow update: if isAdmin() && validUpload();
+      allow delete: if isAdmin() || (isSignedIn() && uid() == vendorId && vendorEditable(vendorId));
     }
 
-    // Driver KYC + pre-trip verification photos. Vendors can view (not write)
-    // driver documents; the fleet-ownership check happens in Firestore.
+    // Driver KYC + pre-trip photos. The driver's own vendor may view them.
     match /drivers/{driverId}/{allPaths=**} {
-      allow read: if isAdmin() || (isSignedIn() && uid() == driverId) || isVendorUser();
-      allow write: if isAdmin() || (isSignedIn() && uid() == driverId);
+      allow read: if isAdmin()
+                  || (isSignedIn() && uid() == driverId)
+                  || (isVendorUser()
+                      && firestore.get(fsDoc('drivers', driverId)).data.get('vendorId', '') == uid());
+      allow write: if (isAdmin() || (isSignedIn() && uid() == driverId)) && validUpload();
     }
 
-    // Toll receipts uploaded mid-trip by the assigned driver, audited by admin.
+    // Toll receipts: written by the booking's assigned driver, readable by
+    // that driver, the customer and admin.
     match /bookings/{bookingId}/{allPaths=**} {
-      allow read, write: if isSignedIn();
+      allow read: if isAdmin() || (
+                     isSignedIn()
+                     && (firestore.get(fsDoc('bookings', bookingId)).data.get('assignedDriverId', '') == uid()
+                         || firestore.get(fsDoc('bookings', bookingId)).data.get('customerId', '') == uid())
+                   );
+      allow write: if (isAdmin() || (
+                        isSignedIn()
+                        && firestore.get(fsDoc('bookings', bookingId)).data.get('assignedDriverId', '') == uid()
+                      )) && validUpload();
     }
 
     match /{allPaths=**} {

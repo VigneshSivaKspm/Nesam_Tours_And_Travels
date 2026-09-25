@@ -71,6 +71,16 @@ export async function confirmOtpCode(
   return credential.user;
 }
 
+// Which entry path (Login vs Sign Up) the vendor chose before OTP. Routing is
+// decided by the vendors/{uid} document, but this lets the app explain why,
+// e.g. "no account found for this number" after a Login attempt.
+export type AuthIntent = 'login' | 'signup';
+let authIntent: AuthIntent | null = null;
+export const setAuthIntent = (intent: AuthIntent | null) => {
+  authIntent = intent;
+};
+export const getAuthIntent = () => authIntent;
+
 export function subscribeToAuthUser(callback: (user: User | null) => void) {
   return onAuthStateChanged(auth, callback);
 }

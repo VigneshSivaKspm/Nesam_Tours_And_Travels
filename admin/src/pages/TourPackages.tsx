@@ -584,11 +584,7 @@ export default function TourPackages() {
 
       const ok = await setFirestoreDocument(COLLECTIONS.TOUR_PACKAGES, docId, payload);
       if (ok) {
-        if (isEditing) {
-          setPackages((prev) => prev.map((p) => (p.id === docId ? payload : p)));
-        } else {
-          setPackages((prev) => [payload, ...prev]);
-        }
+        // The live tour_packages subscription refreshes the list.
         setShowModal(false);
         showToast(
           isEditing

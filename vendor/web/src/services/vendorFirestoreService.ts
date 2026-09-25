@@ -6,40 +6,24 @@ import {
   onSnapshot,
   query,
   where,
-  serverTimestamp
+  serverTimestamp,
+  getDocs
 } from 'firebase/firestore';
-import { auth, db } from './firebase';
+import { db } from './firebase';
 import {
   FleetVehicle,
   FleetDriver,
   OpenTrip,
   BidProposal,
   VendorTrip,
-  PayoutRequest,
-  VendorProfile
+  PayoutRequest
 } from '../types';
 
 export const VEHICLES_COLLECTION = 'vehicles';
 export const DRIVERS_COLLECTION = 'drivers';
 export const MARKETPLACE_COLLECTION = 'marketplace_trips';
 export const BOOKINGS_COLLECTION = 'bookings';
-export const VENDORS_COLLECTION = 'vendors';
 export const PAYOUTS_COLLECTION = 'payout_requests';
-
-/**
- * Sync Vendor Profile to Firestore
- */
-export async function syncVendorProfile(profile: VendorProfile) {
-  try {
-    const vendorRef = doc(db, VENDORS_COLLECTION, profile.id);
-    await setDoc(vendorRef, {
-      ...profile,
-      updatedAt: serverTimestamp()
-    }, { merge: true });
-  } catch (error) {
-    console.warn('Vendor profile sync error (offline resilient):', error);
-  }
-}
 
 /**
  * Real-time listener for Fleet Vehicles
@@ -128,14 +112,24 @@ export async function saveVehicleToFirestore(vehicle: FleetVehicle, vendorId: st
   } catch (error) { console.warn('Save vehicle error:', error); }
 }
 
-/**
- * Add / Update Fleet Driver in Firestore
- */
-export async function saveDriverToFirestore(driver: FleetDriver, vendorId: string) {
+export async function inviteDriverByVendor(phone: string, vendorId: string, vendorName: string, vehicleAssignment?: string) {
   try {
-    const driverRef = doc(db, DRIVERS_COLLECTION, driver.id);
-    await setDoc(driverRef, { ...driver, vendorId, updatedAt: serverTimestamp() }, { merge: true });
-  } catch (error) { console.warn('Save driver error:', error); }
+    // Normalize phone to +91XXXXXXXXXX format
+    const normalizedPhone = phone.startsWith('+') ? phone : '+91' + phone.replace(/\D/g, '').slice(-10);
+    const inviteRef = doc(db, 'driver_invites', normalizedPhone);
+    await setDoc(inviteRef, {
+      phone: normalizedPhone,
+      vendorId: vendorId,
+      vendorName: vendorName,
+      vehicleAssignment: vehicleAssignment || null,
+      preApproved: false,
+      createdAt: serverTimestamp(),
+    }, { merge: true });
+    return true;
+  } catch (error) {
+    console.warn('Invite driver error:', error);
+    return false;
+  }
 }
 
 /**
@@ -185,45 +179,59 @@ export function subscribeToOpenMarketplaceTrips(callback: (trips: OpenTrip[]) =>
   }
 }
 
-/**
- * Submit Counter Bid in Firestore
- */
 export async function submitBidToFirestore(bid: BidProposal, vendorId: string, vendorName: string) {
   try {
-    // Write to bids subcollection to preserve all bids
-    const bidRef = doc(db, MARKETPLACE_COLLECTION, bid.tripId, 'bids', bid.id);
+    if (!bid.tripId) throw new Error('tripId is required for bid submission');
+    
+    const bidRef = doc(db, 'marketplace_trips', bid.tripId, 'bids', 'BID-' + Date.now());
     await setDoc(bidRef, {
-      id: bid.id,
-      vendorId,
-      vendorName,
+      tripId: bid.tripId,
+      vendorId: vendorId,
+      vendorName: vendorName,
       vendorCounterRate: bid.vendorCounterRate,
-      biddingNote: bid.biddingNote,
       offeredPayout: bid.offeredPayout,
+      biddingNote: bid.biddingNote || '',
+      status: 'Pending Review',
       submittedAt: serverTimestamp(),
-      status: 'Pending Review'
     });
-    // Also update marketplace trip status
-    const tripRef = doc(db, MARKETPLACE_COLLECTION, bid.tripId);
-    await updateDoc(tripRef, {
+    await updateDoc(doc(db, 'marketplace_trips', bid.tripId), {
       status: 'Bidding',
-      lastCounterRate: bid.vendorCounterRate,
-      lastBidAt: serverTimestamp()
+      lastBidAt: serverTimestamp(),
     });
-  } catch (error) { console.warn('Submit bid error:', error); }
+    return true;
+  } catch (error) {
+    console.warn('Submit bid error:', error);
+    return false;
+  }
 }
 
-/**
- * Assign Driver & Vehicle to Active Trip in Firestore
- */
-export async function assignTripInFirestore(tripId: string, driverId: string, driverName: string, vehicleNumber: string, vendorId: string) {
+export async function assignTripInFirestore(
+  tripId: string,
+  driverId: string,
+  driverName: string,
+  vehicleNumber: string,
+  vendorId: string
+) {
   try {
-    // Update bookings
-    const bookingRef = doc(db, BOOKINGS_COLLECTION, tripId);
-    await setDoc(bookingRef, { id: tripId, status: 'Assigned', assignedDriverId: driverId, assignedDriverName: driverName, assignedVehicleNumber: vehicleNumber, assignedVendorId: vendorId, updatedAt: serverTimestamp() }, { merge: true });
-    // Update marketplace_trips to remove from open feed
-    const marketRef = doc(db, MARKETPLACE_COLLECTION, tripId);
-    await setDoc(marketRef, { status: 'Assigned', updatedAt: serverTimestamp() }, { merge: true });
-  } catch (error) { console.warn('Assign trip error:', error); }
+    // The vendorDispatchOk rule requires: only update assignedDriverId, assignedDriverName,
+    // assignedVehicleNumber, tripStage, status. NO id field.
+    await updateDoc(doc(db, 'bookings', tripId), {
+      assignedDriverId: driverId,
+      assignedDriverName: driverName,
+      assignedVehicleNumber: vehicleNumber,
+      status: 'Assigned',
+      // DO NOT include: id, assignedVendorId (already set by admin when accepting bid)
+    });
+    // Update marketplace
+    await setDoc(doc(db, 'marketplace_trips', tripId), {
+      status: 'Assigned',
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+    return true;
+  } catch (error) {
+    console.warn('Assign trip error:', error);
+    return false;
+  }
 }
 
 /**
@@ -234,86 +242,6 @@ export async function submitPayoutRequestToFirestore(request: PayoutRequest, ven
     const payoutRef = doc(db, PAYOUTS_COLLECTION, request.id);
     await setDoc(payoutRef, { ...request, vendorId, createdAt: serverTimestamp() }, { merge: true });
   } catch (error) { console.warn('Submit payout request error:', error); }
-}
-
-import { getDoc } from 'firebase/firestore';
-
-export async function getVendorProfileFromFirestore(vendorId: string): Promise<VendorProfile | null> {
-  try {
-    const vendorRef = doc(db, VENDORS_COLLECTION, vendorId);
-    const snap = await getDoc(vendorRef);
-    if (snap.exists()) {
-      return mapVendorProfile(vendorId, snap.data());
-    }
-    return null;
-  } catch { return null; }
-}
-
-/**
- * Map a raw Firestore vendor document (which may be a freshly registered doc
- * with only `companyName`/`status`, or a fully-populated profile) into the
- * VendorProfile shape the app expects.
- */
-function mapVendorProfile(uid: string, data: Record<string, any>): VendorProfile {
-  const rawStatus = data.status || data.verificationStatus || 'Pending';
-  const verificationStatus =
-    rawStatus === 'Approved' ? 'Approved'
-    : rawStatus === 'Rejected' ? 'Rejected'
-    : rawStatus === 'Needs Correction' ? 'Needs Correction'
-    : 'Pending';
-  return {
-    id: uid,
-    companyName: data.companyName || 'Vendor Partner Fleet',
-    contactPerson: data.contactPerson || 'Fleet Operations Manager',
-    phone: data.phone || '',
-    email: data.email || '',
-    gstin: data.gstin || '',
-    panNumber: data.panNumber || '',
-    address: data.address || 'Tamil Nadu, India',
-    city: data.city || 'Chennai',
-    totalFleetSize: typeof data.totalFleetSize === 'number' ? data.totalFleetSize : 0,
-    totalDriversCount: typeof data.totalDriversCount === 'number' ? data.totalDriversCount : 0,
-    verificationStatus,
-    joinedDate: data.joinedDate || 'New Partner',
-    bankAccountName: data.bankAccountName || '',
-    bankAccountNumber: data.bankAccountNumber || '',
-    ifscCode: data.ifscCode || '',
-    upiId: data.upiId || '',
-  };
-}
-
-/**
- * Returns the existing vendor profile for a signed-in Firebase Auth uid, or
- * null when this account has not completed vendor registration yet.
- */
-export async function getExistingVendorProfile(uid: string): Promise<VendorProfile | null> {
-  return getVendorProfileFromFirestore(uid);
-}
-
-/**
- * Registers a brand-new vendor by writing vendors/{uid} directly. The doc
- * starts as status: 'Pending'; an admin approves it from the admin panel.
- * Firestore rules enforce that a self-created doc can only be 'Pending'.
- */
-export async function registerVendorProfile(profile: VendorProfile): Promise<VendorProfile> {
-  const user = auth.currentUser;
-  if (!user) throw new Error('You must be signed in to register.');
-  await setDoc(doc(db, 'vendors', user.uid), {
-    uid: user.uid,
-    companyName: profile.companyName || '',
-    contactPerson: profile.contactPerson || '',
-    email: profile.email || '',
-    phone: profile.phone || user.phoneNumber || '',
-    gstin: profile.gstin || '',
-    panNumber: profile.panNumber || '',
-    address: profile.address || '',
-    city: profile.city || '',
-    joinedDate: profile.joinedDate || 'New Partner',
-    role: 'vendor',
-    status: 'Pending',
-    createdAt: serverTimestamp(),
-  });
-  return profile;
 }
 
 export function subscribeToVendorActiveTrips(vendorId: string, callback: (trips: VendorTrip[]) => void) {
@@ -354,4 +282,37 @@ export function subscribeToVendorPayouts(vendorId: string, callback: (payouts: P
     }, () => callback([]));
     return unsub;
   } catch { callback([]); return () => {}; }
+}
+
+export function subscribeToVendorWalletBalance(
+  vendorId: string,
+  callback: (balance: number) => void
+) {
+  try {
+    const q = query(
+      collection(db, 'bookings'),
+      where('assignedVendorId', '==', vendorId),
+      where('status', '==', 'Completed')
+    );
+    const unsubTrips = onSnapshot(q, async (tripSnap) => {
+      const totalEarned = tripSnap.docs.reduce((sum, d) => {
+        const data = d.data();
+        const fare = typeof data.fare === 'number' ? data.fare :
+          parseInt(String(data.fare || '0').replace(/[^0-9]/g, '')) || 0;
+        const vendorPayout = data.vendorPayout || Math.round(fare * 0.9);
+        return sum + vendorPayout;
+      }, 0);
+      
+      const payoutsQ = query(
+        collection(db, 'payout_requests'),
+        where('vendorId', '==', vendorId),
+        where('status', '==', 'Paid')
+      );
+      const payoutsSnap = await getDocs(payoutsQ);
+      const totalPaid = payoutsSnap.docs.reduce((sum, d) => sum + (d.data().amount || 0), 0);
+      
+      callback(totalEarned - totalPaid);
+    }, () => callback(0));
+    return unsubTrips;
+  } catch { callback(0); return () => {}; }
 }

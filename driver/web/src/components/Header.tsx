@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { DriverStatus, DriverProfile, WalletDetails } from "../types";
+import type { DriverStatus, DriverProfile } from "../types";
 import {
   AlertTriangle,
   Wallet,
@@ -8,7 +8,6 @@ import {
   LogOut,
   Home,
   Navigation,
-  FileCheck,
   DollarSign,
   User,
   Menu,
@@ -19,7 +18,7 @@ interface HeaderProps {
   status: DriverStatus;
   onStatusChange: (status: DriverStatus) => void;
   profile: DriverProfile;
-  wallet: WalletDetails;
+  walletBalance: number;
   activeTab: string;
   setActiveTab: (tab: string) => void;
   unreadNotificationsCount: number;
@@ -30,7 +29,6 @@ interface HeaderProps {
 const NAV_ITEMS = [
   { id: "dashboard", label: "Home", icon: Home },
   { id: "trip", label: "Trip", icon: Navigation },
-  { id: "registration", label: "Documents", icon: FileCheck },
   { id: "earnings", label: "Earnings", icon: DollarSign },
   { id: "wallet", label: "Wallet", icon: Wallet },
   { id: "notifications", label: "Alerts", icon: Bell },
@@ -41,7 +39,7 @@ export const Header: React.FC<HeaderProps> = ({
   status,
   onStatusChange,
   profile,
-  wallet,
+  walletBalance,
   activeTab,
   setActiveTab,
   unreadNotificationsCount,
@@ -52,14 +50,10 @@ export const Header: React.FC<HeaderProps> = ({
 
   const statusStyles: Record<string, string> = {
     Online: "bg-emerald-50 text-emerald-700 border-emerald-200",
-    "On-Duty": "bg-amber-50 text-amber-700 border-amber-200",
-    "Assigned Trip": "bg-red-50 text-[#E21E26] border-red-200",
     "On Trip": "bg-red-50 text-[#E21E26] border-red-200",
   };
   const statusDot: Record<string, string> = {
     Online: "bg-emerald-500",
-    "On-Duty": "bg-amber-500",
-    "Assigned Trip": "bg-[#E21E26]",
     "On Trip": "bg-[#E21E26]",
   };
 
@@ -157,7 +151,7 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <Wallet className="w-4 h-4 text-amber-500" />
               <span className="font-bold">
-                ₹{wallet.availableBalance.toLocaleString("en-IN")}
+                ₹{walletBalance.toLocaleString("en-IN")}
               </span>
             </button>
 
@@ -253,20 +247,18 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Status switcher */}
-          <div className="grid grid-cols-3 gap-1 bg-gray-100 p-1 rounded-xl">
-            {(["Offline", "Online", "On-Duty"] as DriverStatus[]).map((st) => {
+          <div className="grid grid-cols-2 gap-1 bg-gray-100 p-1 rounded-xl">
+            {(["Offline", "Online"] as DriverStatus[]).map((st) => {
               const isActive = status === st;
               return (
                 <button
                   key={st}
-                  onClick={() => onStatusChange(st)}
+                  onClick={() => { if (status !== st) onStatusChange(st); }}
                   className={`py-2 rounded-lg text-xs font-bold transition-colors ${
                     isActive
                       ? st === "Online"
                         ? "bg-emerald-600 text-white"
-                        : st === "On-Duty"
-                          ? "bg-amber-600 text-white"
-                          : "bg-gray-600 text-white"
+                        : "bg-gray-600 text-white"
                       : "text-gray-500"
                   }`}
                 >

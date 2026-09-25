@@ -1,6 +1,14 @@
-export type DriverStatus = 'Offline' | 'Online' | 'On-Duty' | 'Assigned Trip' | 'On Trip';
+// Driver presence shown in the header / dashboard. Stored on drivers/{uid}
+// as `presenceStatus` — never as `status`, which is the admin approval state.
+export type DriverStatus = 'Offline' | 'Online' | 'On Trip';
 
-export type DocumentStatus = 'Pending' | 'Approved' | 'Rejected' | 'Needs Correction';
+// drivers/{uid}.status — set to 'Pending' at signup, changed only by an admin
+// (except Rejected → Pending when the driver resubmits corrected documents).
+export type ApprovalStatus = 'Pending' | 'Approved' | 'Rejected' | 'Suspended';
+
+export type DocumentStatus = 'Pending' | 'Approved' | 'Rejected';
+
+export type VehicleCategory = 'Hatchback' | 'Sedan' | 'SUV' | 'Premium SUV' | 'Tempo Traveller';
 
 export interface DriverProfile {
   id: string;
@@ -8,72 +16,112 @@ export interface DriverProfile {
   phone: string;
   email: string;
   photoUrl: string;
+  dob: string;
+  gender: string;
   address: string;
+  city: string;
+  pincode: string;
+  emergencyContactName: string;
   emergencyContact: string;
   rating: number;
-  totalTrips: number;
   joiningDate: string;
   vendorId?: string;
   vendorName?: string;
+  approvalStatus: ApprovalStatus;
+  docStatus: DocumentStatus;
+  rejectionReason?: string;
+  presenceStatus: DriverStatus;
+}
+
+export interface IdentityDetails {
+  aadhaarNumber: string;
+  aadhaarFrontUrl: string;
+  aadhaarBackUrl: string;
+  panNumber: string;
+  panPhotoUrl: string;
 }
 
 export interface DrivingLicense {
   number: string;
   expiryDate: string;
-  frontPhotoUrl?: string;
-  backPhotoUrl?: string;
-  status: DocumentStatus;
+  frontPhotoUrl: string;
+  backPhotoUrl: string;
 }
 
 export interface VehicleDetails {
   vehicleNumber: string;
-  vehicleType: 'Sedan' | 'SUV' | 'Mini' | 'Luxury' | 'Tempo Traveller';
+  vehicleType: VehicleCategory;
   make: string;
   model: string;
   year: string;
-  capacity: number;
   color: string;
+  capacity: number;
+  fuelType: string;
   rcNumber: string;
-  rcDocUrl?: string;
+  rcDocUrl: string;
   insuranceNumber: string;
   insuranceExpiry: string;
-  insuranceDocUrl?: string;
+  insuranceDocUrl: string;
   fitnessExpiry: string;
-  fitnessDocUrl?: string;
+  fitnessDocUrl: string;
   statePermitNumber: string;
-  statePermitDocUrl?: string;
-  status: DocumentStatus;
+  permitExpiry: string;
+  statePermitDocUrl: string;
+  frontPhotoUrl: string;
+  rearPhotoUrl: string;
+  sidePhotoUrl: string;
+  interiorPhotoUrl: string;
 }
 
-export interface PreTripVerification {
-  id: string;
-  tripId: string;
-  timestamp: string;
-  driverSelfieUrl?: string;
-  vehicleFrontPhotoUrl?: string;
-  odometerPhotoUrl?: string;
+export interface BankDetails {
+  accountHolder: string;
+  accountNumber: string;
+  ifsc: string;
+  bankName: string;
+  upiId: string;
+}
+
+/** Everything the signup wizard collects. */
+export interface RegistrationData {
+  profile: Pick<DriverProfile,
+    'name' | 'phone' | 'email' | 'photoUrl' | 'dob' | 'gender' | 'address' |
+    'city' | 'pincode' | 'emergencyContactName' | 'emergencyContact'>;
+  identity: IdentityDetails;
+  license: DrivingLicense;
+  vehicle: VehicleDetails;
+  bank: BankDetails;
+}
+
+/** A complete driver record as read back from drivers/{uid}. */
+export interface DriverAccount extends RegistrationData {
+  driver: DriverProfile;
+}
+
+export interface PreTripPhotos {
+  selfie: string;
+  vehicleFront: string;
+  odometer: string;
+  rearSeat: string;
   odometerReading: number;
-  rearSeatPhotoUrl?: string;
-  verifiedBySystem: boolean;
-  status: 'Pending' | 'Passed' | 'Rejected';
+  capturedAt: string;
 }
 
-export type TripStatus =
+// Driver-reported progress, stored on the booking as `tripStage`.
+export type TripStage =
   | 'Assigned'
-  | 'Pre-Trip Pending'
   | 'En Route Pickup'
   | 'Reached Pickup'
-  | 'Boarding Verification'
   | 'In Progress'
   | 'Arrived Destination'
-  | 'Completed'
-  | 'Cancelled';
+  | 'Completed';
+
+// Booking lifecycle status (see firestore.rules).
+export type BookingStatus = 'Pending' | 'Confirmed' | 'Assigned' | 'Ongoing' | 'Completed' | 'Cancelled';
 
 export interface TripLocation {
   address: string;
-  lat: number;
-  lng: number;
-  landMark?: string;
+  lat?: number;
+  lng?: number;
 }
 
 export interface TollReceipt {
@@ -91,22 +139,35 @@ export interface TripDetails {
   customerPhone: string;
   pickup: TripLocation;
   drop: TripLocation;
-  pickupDistanceKm: number;
   distanceKm: number;
-  estimatedTimeMin: number;
   vehicleType: string;
+  serviceType: string;
   fareAmount: number;
   driverEarnings: number;
-  platformCommission: number;
   tollCharges: number;
-  customerOTP: string;
-  status: TripStatus;
+  status: BookingStatus;
+  stage: TripStage;
+  scheduledDate: string;
   scheduledTime: string;
+  paymentMode: string;
   startOdometer?: number;
   endOdometer?: number;
-  preTripVerification?: PreTripVerification;
-  tolls?: TollReceipt[];
-  paymentMode: 'Cash' | 'Online Wallet' | 'Razorpay';
+  preTrip?: PreTripPhotos;
+  tolls: TollReceipt[];
+  completedAt?: Date | null;
+}
+
+/** An open marketplace offer a driver may accept. */
+export interface MarketplaceOffer {
+  id: string;
+  bookingId: string;
+  pickup: TripLocation;
+  drop: TripLocation;
+  pickupTime: string;
+  travelDate: string;
+  vehicleCategory: string;
+  distanceKm: number;
+  offeredPayout: number;
 }
 
 export interface DriverEarningsSummary {
@@ -115,38 +176,23 @@ export interface DriverEarningsSummary {
   thisMonthEarnings: number;
   lifetimeEarnings: number;
   totalTripsCompleted: number;
-  acceptanceRate: number;
-  completionRate: number;
-  platformFeeRate: number; // e.g. 10%
-}
-
-export interface WalletDetails {
-  availableBalance: number;
-  pendingBalance: number;
-  totalPayouts: number;
-  upiId?: string;
-  bankAccountName?: string;
-  bankAccountNumber?: string;
-  ifscCode?: string;
+  tollReimbursements: number;
 }
 
 export interface PayoutRequest {
   id: string;
   amount: number;
   requestedAt: string;
-  processedAt?: string;
-  payoutMethod: 'UPI' | 'Bank Transfer';
-  targetDetails: string;
-  status: 'Pending' | 'Approved' | 'Completed' | 'Rejected';
+  method: 'UPI' | 'Bank Transfer';
+  details: string;
+  status: string; // Pending | Paid | Deferred | Rejected
 }
 
-export interface TransactionRecord {
+export interface DriverNotification {
   id: string;
-  tripId?: string;
-  type: 'Trip Earnings' | 'Platform Fee' | 'Toll Reimbursement' | 'Payout Withdrawal' | 'Bonus';
-  amount: number;
-  isCredit: boolean;
-  timestamp: string;
-  description: string;
-  status: 'Success' | 'Processing' | 'Failed';
+  title: string;
+  message: string;
+  time: string;
+  read: boolean;
+  createdAtMs: number;
 }

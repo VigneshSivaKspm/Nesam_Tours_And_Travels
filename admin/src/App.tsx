@@ -23,6 +23,7 @@ import Services from "./pages/Services";
 import TourPackages from "./pages/TourPackages";
 import Locations from "./pages/Locations";
 import Pricing from "./pages/Pricing";
+import SupportTickets from "./pages/SupportTickets";
 import Offers from "./pages/Offers";
 import Reviews from "./pages/Reviews";
 import Settings from "./pages/Settings";
@@ -214,6 +215,8 @@ function AdminShell({ session }: { session: AdminSession }) {
         return <Reviews />;
       case "settings":
         return <Settings />;
+      case "support":
+        return <SupportTickets />;
 
       // Generic placeholder pages
       default:
@@ -301,7 +304,9 @@ function AdminShell({ session }: { session: AdminSession }) {
 }
 
 export default function App() {
-  const [session, setSession] = useState<AdminSession | null | undefined>(undefined);
+  const [session, setSession] = useState<AdminSession | null | undefined>(
+    undefined,
+  );
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
 
   useEffect(() => {
@@ -326,13 +331,7 @@ export default function App() {
     return <Login onSignUp={() => setAuthMode("signup")} />;
   }
 
-  const emailLower = session.user.email?.toLowerCase() || '';
-  const isSuperAdmin =
-    session.role === "admin" ||
-    emailLower === "admin@nesam.in" ||
-    emailLower === "pradeep@nesamtours.in" ||
-    emailLower.includes("admin") ||
-    emailLower.endsWith("@nesam.in");
+  const isSuperAdmin = session.role === "admin" && session.status === "active";
 
   if (!isSuperAdmin) {
     return (
@@ -346,8 +345,8 @@ export default function App() {
           </h1>
           <p className="text-[13px] text-[#666] mb-6">
             This account ({session.user.email}) is signed in but does not have
-            Super Admin access. Contact the platform team if you believe this
-            is a mistake.
+            Super Admin access. Contact the platform team if you believe this is
+            a mistake.
           </p>
           <button
             onClick={() => signOutAdmin()}
@@ -361,5 +360,7 @@ export default function App() {
     );
   }
 
-  return <AdminShell session={{ ...session, role: "admin", status: "active" }} />;
+  return (
+    <AdminShell session={{ ...session, role: "admin", status: "active" }} />
+  );
 }

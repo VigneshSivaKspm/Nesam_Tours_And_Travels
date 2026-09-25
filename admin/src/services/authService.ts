@@ -5,11 +5,11 @@ import {
   signOut as firebaseSignOut,
   onAuthStateChanged,
   type User,
-} from 'firebase/auth';
-import { doc, onSnapshot, serverTimestamp, setDoc } from 'firebase/firestore';
-import { auth, db } from './firebase';
+} from "firebase/auth";
+import { doc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
+import { auth, db } from "./firebase";
 
-export const ADMINS_COLLECTION = 'admins';
+export const ADMINS_COLLECTION = "admins";
 
 export interface AdminSession {
   user: User;
@@ -34,32 +34,20 @@ export function subscribeToAdminSession(
       return;
     }
 
-    const emailLower = user.email?.toLowerCase() || '';
-    const isMasterAdmin =
-      emailLower === 'admin@nesam.in' ||
-      emailLower === 'pradeep@nesamtours.in' ||
-      emailLower.includes('admin') ||
-      emailLower.endsWith('@nesam.in');
-
-    // Live-watch the admin's Firestore record. When someone flips `role`
-    // to "admin" in Firestore, the app updates without a re-login.
+    // Only check the Firestore admins/{uid} record
     unsubscribeDoc = onSnapshot(
       doc(db, ADMINS_COLLECTION, user.uid),
       (snap) => {
         const data = snap.data();
         callback({
           user,
-          role: isMasterAdmin ? 'admin' : ((data?.role as string | undefined) ?? null),
-          status: isMasterAdmin ? 'active' : ((data?.status as string | undefined) ?? null),
+          role: (data?.role as string | undefined) ?? null,
+          status: (data?.status as string | undefined) ?? null,
         });
       },
       () => {
-        // Permission or network error — fall back to master admin if applicable.
-        callback({
-          user,
-          role: isMasterAdmin ? 'admin' : null,
-          status: isMasterAdmin ? 'active' : null,
-        });
+        // Permission denied means not an admin
+        callback({ user, role: null, status: null });
       },
     );
   });
@@ -70,7 +58,10 @@ export function subscribeToAdminSession(
   };
 }
 
-export async function signInAdmin(email: string, password: string): Promise<void> {
+export async function signInAdmin(
+  email: string,
+  password: string,
+): Promise<void> {
   await signInWithEmailAndPassword(auth, email, password);
 }
 
@@ -91,8 +82,8 @@ export async function signUpAdmin(
     uid: user.uid,
     name: displayName,
     email: email.trim(),
-    role: 'pending',
-    status: 'pending',
+    role: "pending",
+    status: "pending",
     createdAt: serverTimestamp(),
   });
 }
@@ -102,25 +93,25 @@ export async function signOutAdmin(): Promise<void> {
 }
 
 export function describeAuthError(error: unknown): string {
-  const code = (error as { code?: string })?.code ?? '';
+  const code = (error as { code?: string })?.code ?? "";
   switch (code) {
-    case 'auth/invalid-email':
-      return 'Enter a valid email address.';
-    case 'auth/user-not-found':
-    case 'auth/invalid-credential':
-    case 'auth/wrong-password':
-      return 'Incorrect email or password.';
-    case 'auth/email-already-in-use':
-      return 'An account with this email already exists. Try signing in instead.';
-    case 'auth/weak-password':
-      return 'Password is too weak. Use at least 6 characters.';
-    case 'auth/operation-not-allowed':
-      return 'Email/password sign-up is disabled for this project.';
-    case 'auth/too-many-requests':
-      return 'Too many attempts. Please wait a moment and try again.';
-    case 'auth/network-request-failed':
-      return 'Network error. Check your connection and try again.';
+    case "auth/invalid-email":
+      return "Enter a valid email address.";
+    case "auth/user-not-found":
+    case "auth/invalid-credential":
+    case "auth/wrong-password":
+      return "Incorrect email or password.";
+    case "auth/email-already-in-use":
+      return "An account with this email already exists. Try signing in instead.";
+    case "auth/weak-password":
+      return "Password is too weak. Use at least 6 characters.";
+    case "auth/operation-not-allowed":
+      return "Email/password sign-up is disabled for this project.";
+    case "auth/too-many-requests":
+      return "Too many attempts. Please wait a moment and try again.";
+    case "auth/network-request-failed":
+      return "Network error. Check your connection and try again.";
     default:
-      return 'Unable to sign in right now. Please try again.';
+      return "Unable to sign in right now. Please try again.";
   }
 }

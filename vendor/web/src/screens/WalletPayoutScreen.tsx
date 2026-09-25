@@ -2,7 +2,10 @@ import React, { useState } from 'react';
 import { WalletDetails, PayoutRequest, TransactionRecord } from '../types';
 import { Wallet, ArrowUpRight, Clock, CheckCircle, History, AlertCircle } from 'lucide-react';
 
+import { subscribeToVendorWalletBalance } from '../services/vendorFirestoreService';
+
 interface WalletPayoutScreenProps {
+  vendorId: string;
   wallet: WalletDetails;
   payoutRequests: PayoutRequest[];
   transactions: TransactionRecord[];
@@ -10,20 +13,36 @@ interface WalletPayoutScreenProps {
 }
 
 export const WalletPayoutScreen: React.FC<WalletPayoutScreenProps> = ({
+  vendorId,
   wallet,
   payoutRequests,
   transactions,
   onRequestPayout
 }) => {
   const [showPayoutModal, setShowPayoutModal] = useState<boolean>(false);
-  const [payoutAmount, setPayoutAmount] = useState<number>(wallet.availableBalance);
+  const [walletBalance, setWalletBalance] = useState(0);
+  const [payoutAmount, setPayoutAmount] = useState<number>(0);
   const [payoutMethod, setPayoutMethod] = useState<'UPI' | 'Bank Transfer'>('Bank Transfer');
   const [targetDetails, setTargetDetails] = useState<string>(`${wallet.bankAccountName} - ${wallet.bankAccountNumber}`);
   const [payoutSuccess, setPayoutSuccess] = useState<boolean>(false);
+  const [error, setError] = useState('');
+
+  React.useEffect(() => {
+    if (!vendorId) return;
+    const unsub = subscribeToVendorWalletBalance(vendorId, setWalletBalance);
+    return () => unsub();
+  }, [vendorId]);
+
+  React.useEffect(() => {
+    setPayoutAmount(walletBalance);
+  }, [walletBalance]);
 
   const handleSubmitPayout = (e: React.FormEvent) => {
     e.preventDefault();
-    if (payoutAmount > wallet.availableBalance) return;
+    if (payoutAmount > walletBalance) {
+      setError('Requested amount exceeds available balance of ₹' + walletBalance.toLocaleString('en-IN'));
+      return;
+    }
 
     onRequestPayout(payoutAmount, payoutMethod, targetDetails);
     setShowPayoutModal(false);
@@ -45,7 +64,7 @@ export const WalletPayoutScreen: React.FC<WalletPayoutScreenProps> = ({
             </span>
             <p className="text-xs text-gray-400 mt-0.5">Available for instant corporate payout withdrawal</p>
             <div className="text-4xl font-black text-white mt-2">
-              ₹{wallet.availableBalance.toLocaleString('en-IN')}
+              ₹{walletBalance.toLocaleString('en-IN')}
             </div>
             <p className="text-xs text-amber-400 mt-1 font-medium">
               + ₹{wallet.pendingBalance.toLocaleString('en-IN')} pending trip completion
@@ -74,18 +93,19 @@ export const WalletPayoutScreen: React.FC<WalletPayoutScreenProps> = ({
           <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
             <div className="flex items-center justify-between border-b pb-3">
               <h2 className="text-base font-bold text-gray-900">Request Corporate Payout</h2>
-              <span className="text-xs text-gray-500 font-mono">Bal: ₹{wallet.availableBalance}</span>
+              <span className="text-xs text-gray-500 font-mono">Bal: ₹{walletBalance.toLocaleString('en-IN')}</span>
             </div>
+            {error && <div className="text-xs text-red-600 font-semibold">{error}</div>}
 
             <form onSubmit={handleSubmitPayout} className="space-y-4">
               <div>
                 <label className="text-xs font-bold text-gray-700 block mb-1">Withdrawal Amount (₹)</label>
                 <input
                   type="number"
-                  max={wallet.availableBalance}
+                  max={walletBalance}
                   min={1000}
                   value={payoutAmount}
-                  onChange={e => setPayoutAmount(Number(e.target.value))}
+                  onChange={e => { setPayoutAmount(Number(e.target.value)); setError(''); }}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-lg font-mono font-bold text-gray-900"
                   required
                 />

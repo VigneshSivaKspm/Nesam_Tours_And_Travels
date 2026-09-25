@@ -27,10 +27,14 @@ export default function Reviews() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("All");
   const [ratingFilter, setRatingFilter] = useState<string>("All");
-  const [sortBy, setSortBy] = useState<"newest" | "oldest" | "highest" | "lowest">("newest");
+  const [sortBy, setSortBy] = useState<
+    "newest" | "oldest" | "highest" | "lowest"
+  >("newest");
 
   // Selection & Modal States
-  const [selectedReview, setSelectedReview] = useState<CustomerReview | null>(null);
+  const [selectedReview, setSelectedReview] = useState<CustomerReview | null>(
+    null,
+  );
   const [showDetailDrawer, setShowDetailDrawer] = useState(false);
   const [showConfigModal, setShowConfigModal] = useState(false);
   const [showAddPresetModal, setShowAddPresetModal] = useState(false);
@@ -50,7 +54,9 @@ export default function Reviews() {
     });
     const unsubBookings = subscribeBookings((data) => setBookings(data || []));
     const unsubDrivers = subscribeDrivers((data) => setDrivers(data || []));
-    const unsubCustomers = subscribeCustomers((data) => setCustomers(data || []));
+    const unsubCustomers = subscribeCustomers((data) =>
+      setCustomers(data || []),
+    );
 
     return () => {
       unsubReviews();
@@ -73,10 +79,20 @@ export default function Reviews() {
     const pending = reviews.filter((r) => r.status === "Pending").length;
     const flagged = reviews.filter((r) => r.status === "Flagged").length;
 
-    const sumRating = published.reduce((sum, r) => sum + (r.overallRating || 0), 0);
-    const avgRating = published.length > 0 ? (sumRating / published.length).toFixed(1) : "0.0";
+    const sumRating = published.reduce(
+      (sum, r) => sum + (r.overallRating || 0),
+      0,
+    );
+    const avgRating =
+      published.length > 0 ? (sumRating / published.length).toFixed(1) : "0.0";
 
-    return { total, publishedCount: published.length, pending, flagged, avgRating };
+    return {
+      total,
+      publishedCount: published.length,
+      pending,
+      flagged,
+      avgRating,
+    };
   }, [reviews]);
 
   // Filtered & Sorted Reviews
@@ -101,7 +117,13 @@ export default function Reviews() {
           const matchText = rev.reviewText?.toLowerCase().includes(q);
           const matchService = rev.serviceName?.toLowerCase().includes(q);
 
-          if (!matchCustomer && !matchBooking && !matchDriver && !matchText && !matchService) {
+          if (
+            !matchCustomer &&
+            !matchBooking &&
+            !matchDriver &&
+            !matchText &&
+            !matchService
+          ) {
             return false;
           }
         }
@@ -109,8 +131,12 @@ export default function Reviews() {
         return true;
       })
       .sort((a, b) => {
-        const dateA = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : new Date(a.createdAt || 0).getTime();
-        const dateB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : new Date(b.createdAt || 0).getTime();
+        const dateA = a.createdAt?.toDate
+          ? a.createdAt.toDate().getTime()
+          : new Date(a.createdAt || 0).getTime();
+        const dateB = b.createdAt?.toDate
+          ? b.createdAt.toDate().getTime()
+          : new Date(b.createdAt || 0).getTime();
 
         if (sortBy === "newest") return dateB - dateA;
         if (sortBy === "oldest") return dateA - dateB;
@@ -130,7 +156,11 @@ export default function Reviews() {
   };
 
   // Perform status change moderation action
-  const handleUpdateStatus = async (reviewId: string, newStatus: ModerationStatus, reason?: string) => {
+  const handleUpdateStatus = async (
+    reviewId: string,
+    newStatus: ModerationStatus,
+    reason?: string,
+  ) => {
     const patchData: any = {
       status: newStatus,
       "moderation.moderatedAt": new Date().toISOString(),
@@ -150,7 +180,9 @@ export default function Reviews() {
     if (ok) {
       triggerToast(`Review status updated to ${newStatus}`);
       if (selectedReview?.id === reviewId) {
-        setSelectedReview((prev) => (prev ? { ...prev, status: newStatus } : null));
+        setSelectedReview((prev) =>
+          prev ? { ...prev, status: newStatus } : null,
+        );
       }
     } else {
       triggerToast("Failed to update review status");
@@ -179,42 +211,11 @@ export default function Reviews() {
 
     if (ok) {
       triggerToast("Official Admin Response published successfully!");
-      setSelectedReview((prev) => (prev ? { ...prev, adminResponse: adminResponseData } : null));
+      setSelectedReview((prev) =>
+        prev ? { ...prev, adminResponse: adminResponseData } : null,
+      );
     } else {
       triggerToast("Failed to save admin response");
-    }
-  };
-
-  // Helper to load real completed booking reviews for initial setup
-  const handleSeedCompletedBookingReview = async () => {
-    // Find completed bookings or create a verified review from first completed booking
-    const completedBooking = bookings.find((b) => b.status === "Completed") || bookings[0];
-    const customer = customers[0];
-    const driver = drivers[0];
-
-    const newReviewData: Partial<CustomerReview> = {
-      bookingId: completedBooking?.id || `BK-${Math.floor(100000 + Math.random() * 900000)}`,
-      customerId: customer?.id || "CUST-101",
-      customerName: customer?.name || "Senthil Kumar",
-      customerPhone: customer?.phone || "+91 98401 23456",
-      driverId: driver?.id || "DRV-101",
-      driverName: driver?.name || "Ramesh V",
-      vehicleNumber: driver?.assignedVehicleNumber || "TN 01 AB 1234",
-      serviceName: completedBooking?.service || "Outstation Round Trip",
-      overallRating: 5,
-      driverRating: 5,
-      serviceRating: 5,
-      reviewText: "Excellent driving and punctual service for our family trip to Kanchipuram. Highly recommend Nesam Travels!",
-      status: "Published",
-      createdAt: new Date().toISOString(),
-    };
-
-    const docId = await addFirestoreDocument("reviews", newReviewData);
-    if (docId) {
-      triggerToast("Sample verified customer review added to system!");
-      setShowAddPresetModal(false);
-    } else {
-      triggerToast("Failed to add verified review record.");
     }
   };
 
@@ -222,17 +223,41 @@ export default function Reviews() {
   const getStatusBadge = (status: ModerationStatus) => {
     switch (status) {
       case "Published":
-        return <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 border border-green-200">Published</span>;
+        return (
+          <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 border border-green-200">
+            Published
+          </span>
+        );
       case "Pending":
-        return <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800 border border-yellow-200">Pending Review</span>;
+        return (
+          <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800 border border-yellow-200">
+            Pending Review
+          </span>
+        );
       case "Flagged":
-        return <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 border border-red-200">Flagged</span>;
+        return (
+          <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 border border-red-200">
+            Flagged
+          </span>
+        );
       case "Hidden":
-        return <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-700 border border-gray-300">Hidden</span>;
+        return (
+          <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-700 border border-gray-300">
+            Hidden
+          </span>
+        );
       case "Archived":
-        return <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-purple-100 text-purple-800 border border-purple-200">Archived</span>;
+        return (
+          <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-purple-100 text-purple-800 border border-purple-200">
+            Archived
+          </span>
+        );
       default:
-        return <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800">{status}</span>;
+        return (
+          <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800">
+            {status}
+          </span>
+        );
     }
   };
 
@@ -258,7 +283,9 @@ export default function Reviews() {
       <div className="p-8 flex items-center justify-center min-h-[400px]">
         <div className="flex flex-col items-center gap-3">
           <div className="w-8 h-8 border-4 border-red-600 border-t-transparent rounded-full animate-spin"></div>
-          <p className="text-gray-500 font-medium text-sm">Loading Reviews & Ratings Data...</p>
+          <p className="text-gray-500 font-medium text-sm">
+            Loading Reviews & Ratings Data...
+          </p>
         </div>
       </div>
     );
@@ -284,9 +311,12 @@ export default function Reviews() {
             <span>/</span>
             <span className="font-semibold text-gray-800">Reviews</span>
           </nav>
-          <h1 className="text-2xl font-bold text-gray-900">Reviews & Ratings</h1>
+          <h1 className="text-2xl font-bold text-gray-900">
+            Reviews & Ratings
+          </h1>
           <p className="text-sm text-gray-500 mt-0.5">
-            Moderate verified customer reviews, monitor driver ratings, flag abuse, and publish official responses.
+            Moderate verified customer reviews, monitor driver ratings, flag
+            abuse, and publish official responses.
           </p>
         </div>
 
@@ -295,21 +325,26 @@ export default function Reviews() {
             onClick={() => setShowConfigModal(true)}
             className="px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 shadow-sm flex items-center gap-2"
           >
-            <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            <svg
+              className="w-4 h-4 text-gray-500"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
+              />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+              />
             </svg>
             Review Settings
-          </button>
-          <button
-            onClick={() => setShowAddPresetModal(true)}
-            className="px-4 py-2 rounded-lg text-sm font-semibold text-white shadow-sm flex items-center gap-2 transition-all hover:opacity-95"
-            style={{ backgroundColor: "#E21B23" }}
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-            </svg>
-            Record Booking Review
           </button>
         </div>
       </div>
@@ -319,13 +354,29 @@ export default function Reviews() {
         {/* Card 1: Total Reviews */}
         <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex items-center justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Total Reviews</p>
-            <h3 className="text-2xl font-bold text-gray-900 mt-1">{metrics.total}</h3>
-            <p className="text-xs text-gray-500 mt-1">{metrics.publishedCount} Published on Site</p>
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+              Total Reviews
+            </p>
+            <h3 className="text-2xl font-bold text-gray-900 mt-1">
+              {metrics.total}
+            </h3>
+            <p className="text-xs text-gray-500 mt-1">
+              {metrics.publishedCount} Published on Site
+            </p>
           </div>
           <div className="w-12 h-12 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center">
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+            <svg
+              className="w-6 h-6"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"
+              />
             </svg>
           </div>
         </div>
@@ -333,12 +384,18 @@ export default function Reviews() {
         {/* Card 2: Average Published Rating */}
         <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex items-center justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Average Rating</p>
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+              Average Rating
+            </p>
             <div className="flex items-center gap-2 mt-1">
-              <h3 className="text-2xl font-bold text-gray-900">{metrics.avgRating}</h3>
+              <h3 className="text-2xl font-bold text-gray-900">
+                {metrics.avgRating}
+              </h3>
               <span className="text-sm font-semibold text-gray-500">/ 5.0</span>
             </div>
-            <div className="mt-1">{renderStars(Math.round(parseFloat(metrics.avgRating)))}</div>
+            <div className="mt-1">
+              {renderStars(Math.round(parseFloat(metrics.avgRating)))}
+            </div>
           </div>
           <div className="w-12 h-12 rounded-full bg-amber-50 text-amber-500 flex items-center justify-center">
             <svg className="w-6 h-6 fill-current" viewBox="0 0 20 20">
@@ -350,13 +407,27 @@ export default function Reviews() {
         {/* Card 3: Pending Moderation */}
         <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex items-center justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Pending Moderation</p>
-            <h3 className="text-2xl font-bold text-yellow-700 mt-1">{metrics.pending}</h3>
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+              Pending Moderation
+            </p>
+            <h3 className="text-2xl font-bold text-yellow-700 mt-1">
+              {metrics.pending}
+            </h3>
             <p className="text-xs text-gray-500 mt-1">Requires Admin Action</p>
           </div>
           <div className="w-12 h-12 rounded-full bg-yellow-50 text-yellow-600 flex items-center justify-center">
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <svg
+              className="w-6 h-6"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"
+              />
             </svg>
           </div>
         </div>
@@ -364,13 +435,29 @@ export default function Reviews() {
         {/* Card 4: Flagged Abuse */}
         <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex items-center justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Flagged Reviews</p>
-            <h3 className="text-2xl font-bold text-red-700 mt-1">{metrics.flagged}</h3>
-            <p className="text-xs text-gray-500 mt-1">Abuse & Policy Warnings</p>
+            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
+              Flagged Reviews
+            </p>
+            <h3 className="text-2xl font-bold text-red-700 mt-1">
+              {metrics.flagged}
+            </h3>
+            <p className="text-xs text-gray-500 mt-1">
+              Abuse & Policy Warnings
+            </p>
           </div>
           <div className="w-12 h-12 rounded-full bg-red-50 text-red-600 flex items-center justify-center">
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 6 3 6h-8.5l-1-1H5a2 2 0 00-2 2zm9-13.5V9" />
+            <svg
+              className="w-6 h-6"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M3 21v-4m0 0V5a2 2 0 012-2h6.5l1 1H21l-3 6 3 6h-8.5l-1-1H5a2 2 0 00-2 2zm9-13.5V9"
+              />
             </svg>
           </div>
         </div>
@@ -378,24 +465,29 @@ export default function Reviews() {
 
       {/* Main Reviews Management View */}
       {reviews.length === 0 ? (
-        /* PROMPT EXACT EMPTY STATE DISPLAY */
         <div className="bg-white rounded-xl border border-gray-200 p-12 text-center max-w-2xl mx-auto my-8 shadow-sm">
           <div className="w-16 h-16 bg-red-50 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4">
-            <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888" />
+            <svg
+              className="w-8 h-8"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888"
+              />
             </svg>
           </div>
-          <h2 className="text-xl font-bold text-gray-900 mb-2">Reviews & Ratings</h2>
+          <h2 className="text-xl font-bold text-gray-900 mb-2">
+            Reviews & Ratings
+          </h2>
           <p className="text-sm text-gray-600 mb-6 max-w-md mx-auto leading-relaxed">
-            Moderate customer reviews and ratings for drivers and overall service quality. Flag abuse and respond to negative feedback.
+            Moderate customer reviews and ratings for drivers and overall
+            service quality. Flag abuse and respond to negative feedback.
           </p>
-          <button
-            onClick={() => setShowAddPresetModal(true)}
-            className="px-6 py-2.5 text-sm font-medium text-white rounded-lg shadow-sm transition-all hover:opacity-95"
-            style={{ backgroundColor: "#E21B23" }}
-          >
-            Get Started
-          </button>
         </div>
       ) : (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -410,8 +502,18 @@ export default function Reviews() {
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full pl-10 pr-4 py-2 bg-white border border-gray-300 rounded-lg text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
               />
-              <svg className="w-4 h-4 text-gray-400 absolute left-3 top-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              <svg
+                className="w-4 h-4 text-gray-400 absolute left-3 top-3"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                />
               </svg>
             </div>
 
@@ -481,29 +583,46 @@ export default function Reviews() {
                   </tr>
                 ) : (
                   filteredReviews.map((rev) => (
-                    <tr key={rev.id} className="hover:bg-gray-50 transition-colors">
+                    <tr
+                      key={rev.id}
+                      className="hover:bg-gray-50 transition-colors"
+                    >
                       {/* Customer */}
                       <td className="py-3.5 px-4 font-medium">
-                        <div className="font-semibold text-gray-900">{rev.customerName || "Anonymous Customer"}</div>
-                        <div className="text-xs text-gray-500">{rev.customerPhone || rev.customerId}</div>
+                        <div className="font-semibold text-gray-900">
+                          {rev.customerName || "Anonymous Customer"}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {rev.customerPhone || rev.customerId}
+                        </div>
                       </td>
 
                       {/* Booking & Service */}
                       <td className="py-3.5 px-4">
-                        <div className="font-mono text-xs text-blue-600 font-semibold">{rev.bookingId}</div>
-                        <div className="text-xs text-gray-600">{rev.serviceName || "Taxi Ride"}</div>
+                        <div className="font-mono text-xs text-blue-600 font-semibold">
+                          {rev.bookingId}
+                        </div>
+                        <div className="text-xs text-gray-600">
+                          {rev.serviceName || "Taxi Ride"}
+                        </div>
                       </td>
 
                       {/* Driver */}
                       <td className="py-3.5 px-4">
-                        <div className="font-medium text-gray-900">{rev.driverName || "Unassigned"}</div>
-                        <div className="text-xs text-gray-500">{rev.vehicleNumber || "Cab N/A"}</div>
+                        <div className="font-medium text-gray-900">
+                          {rev.driverName || "Unassigned"}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {rev.vehicleNumber || "Cab N/A"}
+                        </div>
                       </td>
 
                       {/* Rating */}
                       <td className="py-3.5 px-4">
                         <div className="flex items-center gap-1.5">
-                          <span className="font-bold text-gray-900">{rev.overallRating}.0</span>
+                          <span className="font-bold text-gray-900">
+                            {rev.overallRating}.0
+                          </span>
                           {renderStars(rev.overallRating)}
                         </div>
                       </td>
@@ -511,12 +630,28 @@ export default function Reviews() {
                       {/* Review Content */}
                       <td className="py-3.5 px-4 max-w-xs">
                         <p className="text-xs text-gray-700 line-clamp-2">
-                          {rev.reviewText ? `"${rev.reviewText}"` : <span className="italic text-gray-400">No written text provided</span>}
+                          {rev.reviewText ? (
+                            `"${rev.reviewText}"`
+                          ) : (
+                            <span className="italic text-gray-400">
+                              No written text provided
+                            </span>
+                          )}
                         </p>
                         {rev.adminResponse && (
                           <div className="mt-1 text-[11px] text-green-700 font-medium flex items-center gap-1">
-                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+                            <svg
+                              className="w-3 h-3"
+                              fill="none"
+                              stroke="currentColor"
+                              viewBox="0 0 24 24"
+                            >
+                              <path
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                strokeWidth="2"
+                                d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
+                              />
                             </svg>
                             Responded
                           </div>
@@ -524,7 +659,9 @@ export default function Reviews() {
                       </td>
 
                       {/* Status */}
-                      <td className="py-3.5 px-4">{getStatusBadge(rev.status)}</td>
+                      <td className="py-3.5 px-4">
+                        {getStatusBadge(rev.status)}
+                      </td>
 
                       {/* Actions */}
                       <td className="py-3.5 px-4 text-right">
@@ -537,7 +674,9 @@ export default function Reviews() {
                           </button>
                           {rev.status !== "Published" && (
                             <button
-                              onClick={() => handleUpdateStatus(rev.id, "Published")}
+                              onClick={() =>
+                                handleUpdateStatus(rev.id, "Published")
+                              }
                               className="px-2.5 py-1.5 text-xs font-semibold text-green-700 bg-green-50 hover:bg-green-100 rounded-md transition-colors"
                               title="Publish Review"
                             >
@@ -546,7 +685,9 @@ export default function Reviews() {
                           )}
                           {rev.status !== "Hidden" && (
                             <button
-                              onClick={() => handleUpdateStatus(rev.id, "Hidden")}
+                              onClick={() =>
+                                handleUpdateStatus(rev.id, "Hidden")
+                              }
                               className="px-2.5 py-1.5 text-xs font-semibold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-md transition-colors"
                               title="Hide from public display"
                             >
@@ -573,17 +714,34 @@ export default function Reviews() {
               <div className="p-6 border-b border-gray-200 flex items-center justify-between bg-gray-50">
                 <div>
                   <div className="flex items-center gap-2">
-                    <h2 className="text-lg font-bold text-gray-900">Review Moderation</h2>
+                    <h2 className="text-lg font-bold text-gray-900">
+                      Review Moderation
+                    </h2>
                     {getStatusBadge(selectedReview.status)}
                   </div>
-                  <p className="text-xs text-gray-500 mt-0.5">Booking Ref: <span className="font-mono font-semibold">{selectedReview.bookingId}</span></p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    Booking Ref:{" "}
+                    <span className="font-mono font-semibold">
+                      {selectedReview.bookingId}
+                    </span>
+                  </p>
                 </div>
                 <button
                   onClick={() => setShowDetailDrawer(false)}
                   className="p-2 text-gray-400 hover:text-gray-600 rounded-full hover:bg-gray-200 transition-colors"
                 >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                  <svg
+                    className="w-5 h-5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth="2"
+                      d="M6 18L18 6M6 6l12 12"
+                    />
                   </svg>
                 </button>
               </div>
@@ -594,36 +752,67 @@ export default function Reviews() {
                 <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
-                      <h4 className="font-bold text-gray-900 text-sm">{selectedReview.customerName}</h4>
-                      <p className="text-xs text-gray-500">{selectedReview.customerPhone || selectedReview.customerId}</p>
+                      <h4 className="font-bold text-gray-900 text-sm">
+                        {selectedReview.customerName}
+                      </h4>
+                      <p className="text-xs text-gray-500">
+                        {selectedReview.customerPhone ||
+                          selectedReview.customerId}
+                      </p>
                     </div>
                     <div className="text-right">
-                      <div className="flex items-center gap-1 justify-end">{renderStars(selectedReview.overallRating)}</div>
-                      <span className="text-xs font-bold text-gray-800">{selectedReview.overallRating}.0 / 5.0 Rating</span>
+                      <div className="flex items-center gap-1 justify-end">
+                        {renderStars(selectedReview.overallRating)}
+                      </div>
+                      <span className="text-xs font-bold text-gray-800">
+                        {selectedReview.overallRating}.0 / 5.0 Rating
+                      </span>
                     </div>
                   </div>
 
                   <div className="pt-2 border-t border-gray-200">
-                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Customer Voice (Authentic & Immutable)</p>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                      Customer Voice (Authentic & Immutable)
+                    </p>
                     <p className="text-sm text-gray-800 italic mt-1 bg-white p-3 rounded-lg border border-gray-200">
-                      {selectedReview.reviewText ? `"${selectedReview.reviewText}"` : "No review message entered."}
+                      {selectedReview.reviewText
+                        ? `"${selectedReview.reviewText}"`
+                        : "No review message entered."}
                     </p>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2 text-xs text-gray-600 pt-2 border-t border-gray-200">
-                    <div><span className="font-semibold">Driver:</span> {selectedReview.driverName || "N/A"}</div>
-                    <div><span className="font-semibold">Vehicle:</span> {selectedReview.vehicleNumber || "N/A"}</div>
-                    <div><span className="font-semibold">Service:</span> {selectedReview.serviceName || "N/A"}</div>
-                    <div><span className="font-semibold">Date:</span> {new Date(selectedReview.createdAt || Date.now()).toLocaleDateString()}</div>
+                    <div>
+                      <span className="font-semibold">Driver:</span>{" "}
+                      {selectedReview.driverName || "N/A"}
+                    </div>
+                    <div>
+                      <span className="font-semibold">Vehicle:</span>{" "}
+                      {selectedReview.vehicleNumber || "N/A"}
+                    </div>
+                    <div>
+                      <span className="font-semibold">Service:</span>{" "}
+                      {selectedReview.serviceName || "N/A"}
+                    </div>
+                    <div>
+                      <span className="font-semibold">Date:</span>{" "}
+                      {new Date(
+                        selectedReview.createdAt || Date.now(),
+                      ).toLocaleDateString()}
+                    </div>
                   </div>
                 </div>
 
                 {/* Section 2: Quick Moderation Actions */}
                 <div className="space-y-3">
-                  <h4 className="text-xs font-bold text-gray-700 uppercase tracking-wider">Moderation Status Actions</h4>
+                  <h4 className="text-xs font-bold text-gray-700 uppercase tracking-wider">
+                    Moderation Status Actions
+                  </h4>
                   <div className="grid grid-cols-4 gap-2">
                     <button
-                      onClick={() => handleUpdateStatus(selectedReview.id, "Published")}
+                      onClick={() =>
+                        handleUpdateStatus(selectedReview.id, "Published")
+                      }
                       className={`py-2 px-3 text-xs font-semibold rounded-lg border transition-all ${
                         selectedReview.status === "Published"
                           ? "bg-green-600 text-white border-green-600 shadow-xs"
@@ -633,7 +822,9 @@ export default function Reviews() {
                       Publish
                     </button>
                     <button
-                      onClick={() => handleUpdateStatus(selectedReview.id, "Hidden")}
+                      onClick={() =>
+                        handleUpdateStatus(selectedReview.id, "Hidden")
+                      }
                       className={`py-2 px-3 text-xs font-semibold rounded-lg border transition-all ${
                         selectedReview.status === "Hidden"
                           ? "bg-gray-800 text-white border-gray-800 shadow-xs"
@@ -643,7 +834,13 @@ export default function Reviews() {
                       Hide
                     </button>
                     <button
-                      onClick={() => handleUpdateStatus(selectedReview.id, "Flagged", flagReason)}
+                      onClick={() =>
+                        handleUpdateStatus(
+                          selectedReview.id,
+                          "Flagged",
+                          flagReason,
+                        )
+                      }
                       className={`py-2 px-3 text-xs font-semibold rounded-lg border transition-all ${
                         selectedReview.status === "Flagged"
                           ? "bg-red-600 text-white border-red-600 shadow-xs"
@@ -653,7 +850,9 @@ export default function Reviews() {
                       Flag Abuse
                     </button>
                     <button
-                      onClick={() => handleUpdateStatus(selectedReview.id, "Pending")}
+                      onClick={() =>
+                        handleUpdateStatus(selectedReview.id, "Pending")
+                      }
                       className={`py-2 px-3 text-xs font-semibold rounded-lg border transition-all ${
                         selectedReview.status === "Pending"
                           ? "bg-yellow-600 text-white border-yellow-600 shadow-xs"
@@ -667,25 +866,37 @@ export default function Reviews() {
 
                 {/* Section 3: Flag Reason & Internal Notes */}
                 <div className="space-y-3 bg-red-50/50 p-4 rounded-xl border border-red-100">
-                  <h4 className="text-xs font-bold text-red-900 uppercase tracking-wider">Abuse & Moderation Context</h4>
+                  <h4 className="text-xs font-bold text-red-900 uppercase tracking-wider">
+                    Abuse & Moderation Context
+                  </h4>
                   <div className="grid grid-cols-1 gap-3">
                     <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Flag Reason (Internal Only)</label>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Flag Reason (Internal Only)
+                      </label>
                       <select
                         value={flagReason}
-                        onChange={(e) => setFlagReason(e.target.value as FlagReason)}
+                        onChange={(e) =>
+                          setFlagReason(e.target.value as FlagReason)
+                        }
                         className="w-full px-3 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium focus:ring-2 focus:ring-red-500"
                       >
                         <option value="Spam">Spam / Promotion</option>
-                        <option value="Abusive Content">Abusive / Profane Content</option>
+                        <option value="Abusive Content">
+                          Abusive / Profane Content
+                        </option>
                         <option value="Irrelevant">Irrelevant to Trip</option>
                         <option value="Duplicate">Duplicate Review</option>
-                        <option value="Privacy Concern">Privacy Violation</option>
+                        <option value="Privacy Concern">
+                          Privacy Violation
+                        </option>
                         <option value="Other">Other Operational Concern</option>
                       </select>
                     </div>
                     <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Internal Admin Notes</label>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Internal Admin Notes
+                      </label>
                       <textarea
                         rows={2}
                         value={internalNotes}
@@ -701,7 +912,11 @@ export default function Reviews() {
                 <form onSubmit={handleSaveResponse} className="space-y-3">
                   <h4 className="text-xs font-bold text-gray-700 uppercase tracking-wider flex items-center justify-between">
                     <span>Official Nesam Response</span>
-                    {selectedReview.adminResponse && <span className="text-green-600 font-normal">Active Response On Record</span>}
+                    {selectedReview.adminResponse && (
+                      <span className="text-green-600 font-normal">
+                        Active Response On Record
+                      </span>
+                    )}
                   </h4>
                   <textarea
                     rows={3}
@@ -736,81 +951,77 @@ export default function Reviews() {
         </div>
       )}
 
-      {/* MODAL: Record Verified Booking Review */}
-      {showAddPresetModal && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-5 animate-scale-up">
-            <div className="flex items-center justify-between border-b border-gray-200 pb-3">
-              <h3 className="text-lg font-bold text-gray-900">Record Verified Customer Review</h3>
-              <button onClick={() => setShowAddPresetModal(false)} className="text-gray-400 hover:text-gray-600">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-
-            <p className="text-xs text-gray-600 leading-relaxed">
-              Genuine customer reviews are collected directly after completed bookings. Click below to verify and record a real trip review into Firestore for moderation.
-            </p>
-
-            <div className="bg-blue-50 border border-blue-200 p-4 rounded-lg space-y-2">
-              <div className="text-xs font-bold text-blue-900">Verified Booking Integration Rule</div>
-              <div className="text-xs text-blue-700">
-                Review will link directly to a completed booking reference (<span className="font-mono">BK-789234</span>) and driver (<span className="font-semibold">Ramesh V</span>).
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-3 pt-2">
-              <button
-                onClick={() => setShowAddPresetModal(false)}
-                className="px-4 py-2 border border-gray-300 rounded-lg text-xs font-semibold text-gray-700 bg-white hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSeedCompletedBookingReview}
-                className="px-4 py-2 text-xs font-semibold text-white rounded-lg shadow-sm"
-                style={{ backgroundColor: "#E21B23" }}
-              >
-                Record Verified Review
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* MODAL: Review Settings */}
       {showConfigModal && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-xl max-w-md w-full p-6 shadow-2xl space-y-5">
             <div className="flex items-center justify-between border-b border-gray-200 pb-3">
-              <h3 className="text-lg font-bold text-gray-900">System Review Settings</h3>
-              <button onClick={() => setShowConfigModal(false)} className="text-gray-400 hover:text-gray-600">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+              <h3 className="text-lg font-bold text-gray-900">
+                System Review Settings
+              </h3>
+              <button
+                onClick={() => setShowConfigModal(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <svg
+                  className="w-5 h-5"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                    d="M6 18L18 6M6 6l12 12"
+                  />
                 </svg>
               </button>
             </div>
 
             <div className="space-y-4 text-xs text-gray-700">
               <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked className="w-4 h-4 text-red-600 rounded border-gray-300 focus:ring-red-500" />
-                <span className="font-medium">Require Completed Booking status for reviews</span>
+                <input
+                  type="checkbox"
+                  defaultChecked
+                  className="w-4 h-4 text-red-600 rounded border-gray-300 focus:ring-red-500"
+                />
+                <span className="font-medium">
+                  Require Completed Booking status for reviews
+                </span>
               </label>
 
               <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked className="w-4 h-4 text-red-600 rounded border-gray-300 focus:ring-red-500" />
-                <span className="font-medium">Auto-publish 4 & 5 star reviews without flag</span>
+                <input
+                  type="checkbox"
+                  defaultChecked
+                  className="w-4 h-4 text-red-600 rounded border-gray-300 focus:ring-red-500"
+                />
+                <span className="font-medium">
+                  Auto-publish 4 & 5 star reviews without flag
+                </span>
               </label>
 
               <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked className="w-4 h-4 text-red-600 rounded border-gray-300 focus:ring-red-500" />
-                <span className="font-medium">Notify admin on 1-star & 2-star reviews</span>
+                <input
+                  type="checkbox"
+                  defaultChecked
+                  className="w-4 h-4 text-red-600 rounded border-gray-300 focus:ring-red-500"
+                />
+                <span className="font-medium">
+                  Notify admin on 1-star & 2-star reviews
+                </span>
               </label>
 
               <label className="flex items-center gap-3">
-                <input type="checkbox" defaultChecked className="w-4 h-4 text-red-600 rounded border-gray-300 focus:ring-red-500" />
-                <span className="font-medium">Allow official company response on public site</span>
+                <input
+                  type="checkbox"
+                  defaultChecked
+                  className="w-4 h-4 text-red-600 rounded border-gray-300 focus:ring-red-500"
+                />
+                <span className="font-medium">
+                  Allow official company response on public site
+                </span>
               </label>
             </div>
 
