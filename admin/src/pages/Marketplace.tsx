@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { MarketplaceTrip } from "../types";
-import { subscribeMarketplace, updateFirestoreDocument, COLLECTIONS, subscribeDrivers } from "../services/adminFirestoreService";
+import { subscribeMarketplace, updateFirestoreDocument, setFirestoreDocument, COLLECTIONS, subscribeDrivers } from "../services/adminFirestoreService";
 
 const statusConfig: Record<string, { badge: string; label: string }> = {
   Open: { badge: "bg-blue-50 text-blue-700 border-blue-200", label: "Open" },
@@ -32,6 +32,41 @@ export default function Marketplace() {
     const unsub2 = subscribeDrivers(setLiveDrivers);
     return () => { unsub(); unsub2(); };
   }, []);
+
+  const handlePostTrip = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newPost.bookingId.trim()) {
+      alert("Booking ID is required.");
+      return;
+    }
+    const id = 'MKT-' + Date.now();
+    const createdTrip: MarketplaceTrip = {
+      id,
+      bookingId: newPost.bookingId.trim(),
+      date: newPost.date,
+      time: newPost.time,
+      pickup: newPost.pickup.trim() || "Chennai",
+      drop: newPost.drop.trim() || "Destination",
+      vehicleType: newPost.vehicleType,
+      distance: newPost.distance.trim() || "50 km",
+      offeredPayout: '₹' + (newPost.offeredPayout || 1000),
+      status: 'Open',
+      bids: [],
+      postedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+
+    // Optimistically update live trips immediately
+    setLiveTrips((prev) => [createdTrip, ...prev]);
+    setShowPostModal(false);
+    setNewPost({ bookingId: '', date: '', time: '', pickup: '', drop: '', vehicleType: 'Sedan', distance: '50 km', offeredPayout: 1000 });
+
+    // Save to Firestore
+    try {
+      await setFirestoreDocument(COLLECTIONS.MARKETPLACE, id, createdTrip);
+    } catch (err) {
+      console.warn("Error saving marketplace trip to Firestore:", err);
+    }
+  };
 
   const filtered = liveTrips.filter((t) => statusFilter === "All" || t.status === statusFilter);
 
@@ -239,18 +274,13 @@ export default function Marketplace() {
               </select>
               <input placeholder="Distance (e.g. 50 km)" className="w-full p-2 border rounded text-xs" onChange={(e) => setNewPost({...newPost, distance: e.target.value})} />
               <input placeholder="Offered Payout (₹)" type="number" className="w-full p-2 border rounded text-xs" onChange={(e) => setNewPost({...newPost, offeredPayout: Number(e.target.value)})} />
-              <button onClick={() => {
-                import('../services/adminFirestoreService').then(({ setFirestoreDocument, COLLECTIONS }) => {
-                  const id = 'MKT-' + Date.now();
-                  setFirestoreDocument(COLLECTIONS.MARKETPLACE, id, {
-                    id, bookingId: newPost.bookingId, date: newPost.date, time: newPost.time, pickup: newPost.pickup,
-                    drop: newPost.drop, vehicleType: newPost.vehicleType, distance: newPost.distance,
-                    offeredPayout: '₹' + newPost.offeredPayout, status: 'Open', bids: [],
-                    postedAt: new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
-                  });
-                  setShowPostModal(false);
-                });
-              }} className="w-full p-2 bg-[#E21B23] text-white text-xs font-bold rounded mt-2">Post Trip</button>
+              <button
+                type="button"
+                onClick={handlePostTrip}
+                className="w-full p-2.5 bg-[#E21B23] hover:bg-[#c4151c] text-white text-xs font-bold rounded-lg mt-2 cursor-pointer transition-colors shadow"
+              >
+                Post Trip
+              </button>
             </div>
           </div>
         </div>

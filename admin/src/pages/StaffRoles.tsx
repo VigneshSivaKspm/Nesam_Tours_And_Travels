@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { StaffMember } from "../types";
 import { roles } from "../config/constants";
-import { subscribeStaff } from "../services/adminFirestoreService";
+import { subscribeStaff, setFirestoreDocument, updateFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
 
 const statusStyle: Record<string, string> = {
   Active: "text-green-700 bg-green-50 border-green-200",
@@ -27,6 +27,37 @@ export default function Staff() {
     const unsub = subscribeStaff(setStaffList);
     return () => unsub();
   }, []);
+
+  const handleAddStaff = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newStaff.name.trim() || !newStaff.email.trim()) {
+      alert("Staff Name and Email are required.");
+      return;
+    }
+    const id = 'STAFF-' + Date.now();
+    const createdStaff: StaffMember = {
+      id,
+      name: newStaff.name.trim(),
+      email: newStaff.email.trim(),
+      phone: newStaff.phone.trim(),
+      role: newStaff.role,
+      status: newStaff.status as "Active" | "Inactive",
+      permissions: roles.find(r => r.name === newStaff.role)?.permissions || [],
+      lastLogin: 'Never'
+    };
+
+    // Optimistically update staff list immediately
+    setStaffList((prev) => [createdStaff, ...prev]);
+    setShowAddModal(false);
+    setNewStaff({ name: '', email: '', phone: '', role: 'Booking Manager', status: 'Active' });
+
+    // Save to Firestore
+    try {
+      await setFirestoreDocument(COLLECTIONS.STAFF, id, createdStaff);
+    } catch (err) {
+      console.warn("Error saving staff member to Firestore:", err);
+    }
+  };
 
   const filtered = staffList.filter((s) =>
     search === "" ||
@@ -232,17 +263,13 @@ export default function Staff() {
                 <option>Active</option><option>Inactive</option>
               </select>
               
-              <button onClick={() => {
-                import('../services/adminFirestoreService').then(({ setFirestoreDocument, COLLECTIONS }) => {
-                  const id = 'STAFF-' + Date.now();
-                  setFirestoreDocument(COLLECTIONS.STAFF, id, {
-                    id, name: newStaff.name, email: newStaff.email, phone: newStaff.phone,
-                    role: newStaff.role, status: newStaff.status, permissions: roles.find(r => r.name === newStaff.role)?.permissions || [],
-                    lastLogin: 'Never'
-                  });
-                  setShowAddModal(false);
-                });
-              }} className="w-full p-2 bg-[#E21B23] text-white text-xs font-bold rounded mt-2">Submit</button>
+              <button
+                type="button"
+                onClick={handleAddStaff}
+                className="w-full p-2.5 bg-[#E21B23] hover:bg-[#c4151c] text-white text-xs font-bold rounded-lg mt-2 cursor-pointer transition-colors shadow"
+              >
+                Create Staff Member
+              </button>
             </div>
           </div>
         </div>

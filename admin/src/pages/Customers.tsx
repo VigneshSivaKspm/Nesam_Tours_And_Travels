@@ -165,6 +165,7 @@ export default function Customers() {
       );
 
       if (docId) {
+        setCustomerList((prev) => [{ id: docId, ...customerPayload } as Customer, ...prev]);
         showToast(`Customer ${name.trim()} added successfully!`);
         setShowAddModal(false);
         resetAddForm();
@@ -203,6 +204,13 @@ export default function Customers() {
 
     setSavingEdit(false);
     if (ok) {
+      setCustomerList((prev) => prev.map((c) => c.id === selectedEditCustomer.id ? {
+        ...c,
+        name: editName.trim(),
+        email: editEmail.trim() || "N/A",
+        status: editStatus,
+        city: editCity.trim() || "Chennai",
+      } : c));
       showToast("Customer profile updated successfully!");
       setSelectedEditCustomer(null);
     } else {

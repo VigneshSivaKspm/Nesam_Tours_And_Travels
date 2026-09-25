@@ -11,6 +11,7 @@ import {
   getExistingDriverProfile,
   registerDriverProfile,
 } from '../services/driverFirestoreService';
+import { DEFAULT_DRIVER_PROFILE } from '../config/constants';
 
 interface DriverLoginScreenProps {
   onComplete: (profile: DriverProfile) => void;
@@ -27,11 +28,24 @@ export const DriverLoginScreen: React.FC<DriverLoginScreenProps> = ({ onComplete
   const [confirmation, setConfirmation] = useState<ConfirmationResult | null>(null);
 
   const handleOtpChange = (index: number, val: string) => {
-    if (val.length > 1) val = val[val.length - 1];
+    const digitsOnly = val.replace(/\D/g, '');
+    if (digitsOnly.length > 1) {
+      const pasted = digitsOnly.slice(0, 6);
+      const newOtp = [...otp];
+      for (let i = 0; i < 6; i++) {
+        newOtp[i] = pasted[i] || '';
+      }
+      setOtp(newOtp);
+      const focusTarget = Math.min(pasted.length, 5);
+      document.getElementById(`driver-otp-${focusTarget}`)?.focus();
+      return;
+    }
+
+    const singleChar = digitsOnly.slice(-1);
     const newOtp = [...otp];
-    newOtp[index] = val;
+    newOtp[index] = singleChar;
     setOtp(newOtp);
-    if (val && index < 5) {
+    if (singleChar && index < 5) {
       const nextInput = document.getElementById(`driver-otp-${index + 1}`);
       nextInput?.focus();
     }
@@ -43,6 +57,7 @@ export const DriverLoginScreen: React.FC<DriverLoginScreenProps> = ({ onComplete
       return;
     }
     setSendError('');
+    setOtpError('');
     setIsSending(true);
     try {
       const verifier = createRecaptchaVerifier('driver-recaptcha-container');
@@ -50,6 +65,7 @@ export const DriverLoginScreen: React.FC<DriverLoginScreenProps> = ({ onComplete
       setConfirmation(result);
       setStep('otp');
     } catch (error) {
+      console.error('Firebase SMS dispatch failed:', error);
       setSendError(describePhoneAuthError(error));
     } finally {
       setIsSending(false);
@@ -58,8 +74,12 @@ export const DriverLoginScreen: React.FC<DriverLoginScreenProps> = ({ onComplete
 
   const handleVerifyOtp = async () => {
     const entered = otp.join('');
-    if (entered.length < 6 || !confirmation) {
+    if (entered.length < 6) {
       setOtpError('Please enter the 6-digit OTP.');
+      return;
+    }
+    if (!confirmation) {
+      setOtpError('Authentication session expired. Please request a new OTP.');
       return;
     }
     setOtpError('');
@@ -86,6 +106,7 @@ export const DriverLoginScreen: React.FC<DriverLoginScreenProps> = ({ onComplete
       await registerDriverProfile(profile);
       onComplete(profile);
     } catch (error) {
+      console.error('Firebase OTP confirmation failed:', error);
       setOtpError(describePhoneAuthError(error));
     } finally {
       setIsVerifying(false);
@@ -134,9 +155,9 @@ export const DriverLoginScreen: React.FC<DriverLoginScreenProps> = ({ onComplete
               <button
                 onClick={handleSendOtp}
                 disabled={isSending}
-                className="w-full bg-[#E21E26] text-white py-3.5 rounded-2xl font-black text-sm hover:bg-[#C9141B] transition-colors shadow-sm disabled:opacity-60"
+                className="w-full bg-[#E21E26] text-white py-3.5 rounded-2xl font-black text-sm hover:bg-[#C9141B] transition-colors shadow-sm disabled:opacity-60 cursor-pointer"
               >
-                {isSending ? 'Sending OTP...' : 'Continue'}
+                {isSending ? 'Sending OTP...' : 'Continue with OTP'}
               </button>
             </div>
           </div>
@@ -146,8 +167,12 @@ export const DriverLoginScreen: React.FC<DriverLoginScreenProps> = ({ onComplete
           <div className="space-y-6">
             <div>
               <button
-                onClick={() => setStep('login')}
-                className="text-xs text-gray-400 hover:text-gray-700 mb-4 flex items-center gap-1 font-bold"
+                onClick={() => {
+                  setStep('login');
+                  setOtp(['', '', '', '', '', '']);
+                  setOtpError('');
+                }}
+                className="text-xs text-gray-400 hover:text-gray-700 mb-4 flex items-center gap-1 font-bold cursor-pointer"
               >
                 ← Change Number
               </button>

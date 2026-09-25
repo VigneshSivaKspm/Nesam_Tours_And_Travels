@@ -115,7 +115,7 @@ const defaultFormState = {
   fullDescription: "",
   icon: "✈️",
   imageUrl: "",
-  status: "Active" as const,
+  status: "Active" as "Active" | "Inactive",
   displayOrder: 1,
   featured: false,
   onlineBookingEnabled: true,
@@ -347,6 +347,11 @@ export default function Services() {
 
       const ok = await setFirestoreDocument(COLLECTIONS.SERVICES, docId, payload);
       if (ok) {
+        if (isEditing) {
+          setServices((prev) => prev.map((s) => (s.id === docId ? payload : s)));
+        } else {
+          setServices((prev) => [payload, ...prev]);
+        }
         setShowModal(false);
         showToast(
           isEditing

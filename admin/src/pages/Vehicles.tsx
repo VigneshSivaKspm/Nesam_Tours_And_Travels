@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Vehicle, VehicleCategory } from "../types";
-import { subscribeVehicles, subscribeVehicleCategories, updateFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
+import { subscribeVehicles, subscribeVehicleCategories, updateFirestoreDocument, setFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
 
 const statusStyle: Record<string, string> = {
   Available: "bg-green-50 text-green-700 border-green-200",
@@ -26,6 +26,40 @@ export default function Vehicles() {
       unsubC();
     };
   }, []);
+
+  const handleAddVehicle = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newVehicle.number.trim()) {
+      alert("Vehicle Registration Number is required.");
+      return;
+    }
+    const id = 'VEH-' + Date.now();
+    const vehicleName = `${newVehicle.make.trim()} ${newVehicle.model.trim()}`.trim() || newVehicle.category;
+    const createdVehicle: Vehicle = {
+      id,
+      name: vehicleName,
+      number: newVehicle.number.trim().toUpperCase(),
+      category: newVehicle.category,
+      seats: Number(newVehicle.seats) || 4,
+      driver: 'Unassigned',
+      status: 'Available',
+      rate: '₹12/km',
+      docStatus: 'Approved',
+      fuel: newVehicle.fuel
+    };
+
+    // Optimistically update vehicle list immediately
+    setVehicleList((prev) => [createdVehicle, ...prev]);
+    setShowAddModal(false);
+    setNewVehicle({ number: '', category: 'Sedan', make: '', model: '', year: '', seats: '', fuel: 'Diesel' });
+
+    // Save to Firestore
+    try {
+      await setFirestoreDocument(COLLECTIONS.VEHICLES, id, createdVehicle);
+    } catch (err) {
+      console.warn("Error saving vehicle to Firestore:", err);
+    }
+  };
 
   return (
     <div className="p-6 space-y-5">
@@ -204,17 +238,13 @@ export default function Vehicles() {
               <select className="w-full p-2 border rounded text-xs" onChange={(e) => setNewVehicle({...newVehicle, fuel: e.target.value})}>
                 <option>Diesel</option><option>Petrol</option><option>CNG</option><option>EV</option>
               </select>
-              <button onClick={() => {
-                import('../services/adminFirestoreService').then(({ setFirestoreDocument, COLLECTIONS }) => {
-                  const id = 'VEH-' + Date.now();
-                  setFirestoreDocument(COLLECTIONS.VEHICLES, id, {
-                    id, name: `${newVehicle.make} ${newVehicle.model}`, number: newVehicle.number,
-                    category: newVehicle.category, seats: newVehicle.seats, driver: 'Unassigned',
-                    status: 'Inactive', rate: '₹12/km', docStatus: 'Pending', fuel: newVehicle.fuel
-                  });
-                  setShowAddModal(false);
-                });
-              }} className="w-full p-2 bg-[#E21B23] text-white text-xs font-bold rounded">Submit</button>
+              <button
+                type="button"
+                onClick={handleAddVehicle}
+                className="w-full p-2.5 bg-[#E21B23] hover:bg-[#c4151c] text-white text-xs font-bold rounded-lg cursor-pointer transition-colors shadow"
+              >
+                Register Vehicle
+              </button>
             </div>
           </div>
         </div>

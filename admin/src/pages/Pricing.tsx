@@ -510,16 +510,22 @@ export default function Pricing() {
     };
 
     let ok = false;
+    let newDocId: string | null = null;
     if (editingRule) {
       ok = await setFirestoreDocument(COLLECTIONS.FARE_RULES, editingRule.id, payload);
     } else {
-      const id = await addFirestoreDocument(COLLECTIONS.FARE_RULES, payload);
-      ok = !!id;
+      newDocId = await addFirestoreDocument(COLLECTIONS.FARE_RULES, payload);
+      ok = !!newDocId;
     }
 
     setIsSubmitting(false);
 
     if (ok) {
+      if (editingRule) {
+        setFareRules((prev) => prev.map((r) => (r.id === editingRule.id ? ({ ...r, ...payload } as FareRule) : r)));
+      } else {
+        setFareRules((prev) => [{ id: newDocId || `FARE-${Date.now()}`, ...payload } as FareRule, ...prev]);
+      }
       setShowModal(false);
       showToast(
         editingRule

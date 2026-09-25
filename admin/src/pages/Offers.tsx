@@ -384,16 +384,22 @@ export default function Offers() {
     };
 
     let ok = false;
+    let newDocId: string | null = null;
     if (editingCoupon) {
       ok = await setFirestoreDocument(COLLECTIONS.COUPONS, editingCoupon.id, payload);
     } else {
-      const id = await addFirestoreDocument(COLLECTIONS.COUPONS, payload);
-      ok = !!id;
+      newDocId = await addFirestoreDocument(COLLECTIONS.COUPONS, payload);
+      ok = !!newDocId;
     }
 
     setIsSubmitting(false);
 
     if (ok) {
+      if (editingCoupon) {
+        setCoupons((prev) => prev.map((c) => (c.id === editingCoupon.id ? ({ ...c, ...payload } as MasterCoupon) : c)));
+      } else {
+        setCoupons((prev) => [{ id: newDocId || `CPN-${Date.now()}`, ...payload } as MasterCoupon, ...prev]);
+      }
       setShowModal(false);
       showToast(
         editingCoupon

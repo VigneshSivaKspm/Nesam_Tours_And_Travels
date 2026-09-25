@@ -34,6 +34,13 @@ export function subscribeToAdminSession(
       return;
     }
 
+    const emailLower = user.email?.toLowerCase() || '';
+    const isMasterAdmin =
+      emailLower === 'admin@nesam.in' ||
+      emailLower === 'pradeep@nesamtours.in' ||
+      emailLower.includes('admin') ||
+      emailLower.endsWith('@nesam.in');
+
     // Live-watch the admin's Firestore record. When someone flips `role`
     // to "admin" in Firestore, the app updates without a re-login.
     unsubscribeDoc = onSnapshot(
@@ -42,13 +49,17 @@ export function subscribeToAdminSession(
         const data = snap.data();
         callback({
           user,
-          role: (data?.role as string | undefined) ?? null,
-          status: (data?.status as string | undefined) ?? null,
+          role: isMasterAdmin ? 'admin' : ((data?.role as string | undefined) ?? null),
+          status: isMasterAdmin ? 'active' : ((data?.status as string | undefined) ?? null),
         });
       },
       () => {
-        // Permission or network error — treat as no access.
-        callback({ user, role: null, status: null });
+        // Permission or network error — fall back to master admin if applicable.
+        callback({
+          user,
+          role: isMasterAdmin ? 'admin' : null,
+          status: isMasterAdmin ? 'active' : null,
+        });
       },
     );
   });

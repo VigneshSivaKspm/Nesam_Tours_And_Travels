@@ -43,11 +43,24 @@ export const VendorLoginScreen: React.FC<VendorLoginScreenProps> = ({ onComplete
   const [gstin, setGstin] = useState('');
 
   const handleOtpChange = (index: number, val: string) => {
-    if (val.length > 1) val = val[val.length - 1];
+    const digitsOnly = val.replace(/\D/g, '');
+    if (digitsOnly.length > 1) {
+      const pasted = digitsOnly.slice(0, 6);
+      const newOtp = [...otp];
+      for (let i = 0; i < 6; i++) {
+        newOtp[i] = pasted[i] || '';
+      }
+      setOtp(newOtp);
+      const focusTarget = Math.min(pasted.length, 5);
+      document.getElementById(`vendor-otp-${focusTarget}`)?.focus();
+      return;
+    }
+
+    const singleChar = digitsOnly.slice(-1);
     const next = [...otp];
-    next[index] = val.replace(/\D/g, '');
+    next[index] = singleChar;
     setOtp(next);
-    if (val && index < 5) {
+    if (singleChar && index < 5) {
       document.getElementById(`vendor-otp-${index + 1}`)?.focus();
     }
   };
@@ -58,6 +71,7 @@ export const VendorLoginScreen: React.FC<VendorLoginScreenProps> = ({ onComplete
       return;
     }
     setSendError('');
+    setOtpError('');
     setIsSending(true);
     try {
       const verifier = createRecaptchaVerifier('vendor-recaptcha-container');
@@ -65,6 +79,7 @@ export const VendorLoginScreen: React.FC<VendorLoginScreenProps> = ({ onComplete
       setConfirmation(result);
       setStep('otp');
     } catch (error) {
+      console.error('Firebase SMS dispatch failed:', error);
       setSendError(describePhoneAuthError(error));
     } finally {
       setIsSending(false);
@@ -73,8 +88,12 @@ export const VendorLoginScreen: React.FC<VendorLoginScreenProps> = ({ onComplete
 
   const handleVerifyOtp = async () => {
     const entered = otp.join('');
-    if (entered.length < 6 || !confirmation) {
+    if (entered.length < 6) {
       setOtpError('Please enter the 6-digit OTP.');
+      return;
+    }
+    if (!confirmation) {
+      setOtpError('Authentication session expired. Please request a new OTP.');
       return;
     }
     setOtpError('');
@@ -89,6 +108,7 @@ export const VendorLoginScreen: React.FC<VendorLoginScreenProps> = ({ onComplete
       // Brand-new account — collect company details.
       setStep('signup');
     } catch (error) {
+      console.error('Firebase OTP confirmation failed:', error);
       setOtpError(describePhoneAuthError(error));
     } finally {
       setIsVerifying(false);
@@ -185,12 +205,11 @@ export const VendorLoginScreen: React.FC<VendorLoginScreenProps> = ({ onComplete
                 style={{ background: RED }}
               >
                 {isSending && <Loader2 className="w-4 h-4 animate-spin" />}
-                {isSending ? 'Sending OTP…' : 'Continue'}
+                {isSending ? 'Sending OTP…' : 'Continue with OTP'}
               </button>
 
-              <p className="text-center text-[11px] text-[#999] mt-4 leading-relaxed">
-                New fleet partner? Continue with your number and we'll set up your
-                account on the next step.
+              <p className="text-center text-[11px] text-[#999] mt-5 leading-relaxed">
+                By continuing, you agree to NESAM's Fleet Partner Terms of Service and Privacy Policy.
               </p>
             </>
           )}

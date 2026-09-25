@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Booking } from "../types";
-import { subscribeBookings } from "../services/adminFirestoreService";
+import { subscribeBookings, updateFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
 
 const statusConfig: Record<string, { color: string; bg: string; dot: string }> =
   {
@@ -440,9 +440,7 @@ export default function LiveTrips() {
               <button
                 onClick={async () => {
                   if (window.confirm(`Are you sure you want to trigger an Emergency Cancel for booking ${trip.bookingId}?`)) {
-                    import('../services/adminFirestoreService').then(({ updateFirestoreDocument, COLLECTIONS }) => {
-                      updateFirestoreDocument(COLLECTIONS.BOOKINGS, trip.bookingId, { status: "Cancelled" });
-                    });
+                    await updateFirestoreDocument(COLLECTIONS.BOOKINGS, trip.bookingId, { status: "Cancelled" });
                     setLiveTripsList(prev => prev.filter(t => t.id !== trip.id));
                     alert(`Trip ${trip.bookingId} cancelled.`);
                   }

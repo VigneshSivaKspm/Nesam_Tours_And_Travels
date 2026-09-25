@@ -68,15 +68,36 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
   }, [step]);
 
   const handleOtpChange = (index: number, val: string) => {
-    if (val.length > 1) val = val[val.length - 1];
+    // If multiple characters pasted (e.g. copied 6-digit OTP from SMS)
+    const digitsOnly = val.replace(/\D/g, "");
+    if (digitsOnly.length > 1) {
+      const pasted = digitsOnly.slice(0, 6);
+      const newOtp = [...otp];
+      for (let i = 0; i < 6; i++) {
+        newOtp[i] = pasted[i] || "";
+      }
+      setOtp(newOtp);
+      const focusTarget = Math.min(pasted.length, 5);
+      document.getElementById(`otp-${focusTarget}`)?.focus();
+      return;
+    }
+
+    const singleChar = digitsOnly.slice(-1);
     const newOtp = [...otp];
-    newOtp[index] = val;
+    newOtp[index] = singleChar;
     setOtp(newOtp);
 
-    // Auto focus next
-    if (val && index < 5) {
+    // Auto focus next input
+    if (singleChar && index < 5) {
       const nextInput = document.getElementById(`otp-${index + 1}`);
       nextInput?.focus();
+    }
+  };
+
+  const handleOtpKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Backspace" && !otp[index] && index > 0) {
+      const prevInput = document.getElementById(`otp-${index - 1}`);
+      prevInput?.focus();
     }
   };
 
@@ -86,6 +107,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
       return;
     }
     setSendError("");
+    setOtpError("");
     setIsSending(true);
     try {
       const verifier = createRecaptchaVerifier("recaptcha-container");
@@ -93,6 +115,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
       setConfirmation(result);
       setStep("otp");
     } catch (error) {
+      console.error("Firebase SMS dispatch failed:", error);
       setSendError(describePhoneAuthError(error));
     } finally {
       setIsSending(false);
@@ -101,8 +124,12 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
 
   const handleVerifyOtp = async () => {
     const entered = otp.join("");
-    if (entered.length < 6 || !confirmation) {
+    if (entered.length < 6) {
       setOtpError("Please enter the 6-digit OTP.");
+      return;
+    }
+    if (!confirmation) {
+      setOtpError("Authentication session expired. Please request a new OTP.");
       return;
     }
     setOtpError("");
@@ -117,6 +144,7 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
         setStep("profile");
       }
     } catch (error) {
+      console.error("Firebase OTP confirmation failed:", error);
       setOtpError(describePhoneAuthError(error));
     } finally {
       setIsVerifying(false);
@@ -285,9 +313,9 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
             <button
               onClick={handleSendOtp}
               disabled={isSending}
-              className="w-full bg-[#E31E24] text-white py-3.5 rounded-2xl font-black text-sm hover:bg-[#C41820] transition-colors shadow-lg disabled:opacity-60"
+              className="w-full bg-[#E31E24] text-white py-3.5 rounded-2xl font-black text-sm hover:bg-[#C41820] transition-colors shadow-lg disabled:opacity-60 cursor-pointer"
             >
-              {isSending ? "Sending OTP..." : "Continue"}
+              {isSending ? "Sending OTP..." : "Continue with OTP"}
             </button>
           </div>
 
@@ -310,8 +338,12 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
         <div className="flex-1 flex flex-col justify-between py-4">
           <div>
             <button
-              onClick={() => setStep("login")}
-              className="text-xs text-gray-400 hover:text-gray-700 mb-4 flex items-center gap-1 font-bold"
+              onClick={() => {
+                setStep("login");
+                setOtp(["", "", "", "", "", ""]);
+                setOtpError("");
+              }}
+              className="text-xs text-gray-400 hover:text-gray-700 mb-4 flex items-center gap-1 font-bold cursor-pointer"
             >
               ← Change Number
             </button>
@@ -334,9 +366,10 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
                   id={`otp-${idx}`}
                   type="text"
                   inputMode="numeric"
-                  maxLength={1}
+                  maxLength={6}
                   value={digit}
                   onChange={(e) => handleOtpChange(idx, e.target.value)}
+                  onKeyDown={(e) => handleOtpKeyDown(idx, e)}
                   className={`w-full aspect-square text-center bg-gray-50 border ${
                     otpError ? "border-red-500" : "border-gray-300"
                   } rounded-xl text-lg font-black text-gray-900 focus:border-[#E31E24] focus:bg-white focus:outline-none transition-colors`}
@@ -353,18 +386,30 @@ export const OnboardingFlow: React.FC<OnboardingFlowProps> = ({
             <button
               onClick={handleVerifyOtp}
               disabled={isVerifying}
-              className="w-full bg-[#E31E24] text-white py-3.5 rounded-2xl font-black text-sm hover:bg-[#C41820] transition-colors shadow-lg disabled:opacity-60"
+              className="w-full bg-[#E31E24] text-white py-3.5 rounded-2xl font-black text-sm hover:bg-[#C41820] transition-colors shadow-lg disabled:opacity-60 cursor-pointer"
             >
               {isVerifying ? "Verifying..." : "Verify & Continue"}
             </button>
 
-            <div className="flex justify-end items-center text-xs text-gray-400 px-1">
+            <div className="flex justify-between items-center text-xs text-gray-400 px-1">
               <button
+                type="button"
+                onClick={() => {
+                  setStep("login");
+                  setOtp(["", "", "", "", "", ""]);
+                  setOtpError("");
+                }}
+                className="text-gray-500 hover:text-gray-800 font-semibold cursor-pointer"
+              >
+                Change number
+              </button>
+              <button
+                type="button"
                 onClick={handleSendOtp}
                 disabled={isSending}
-                className="text-[#E31E24] font-bold hover:underline disabled:opacity-60"
+                className="text-[#E31E24] font-bold hover:underline disabled:opacity-60 cursor-pointer"
               >
-                Resend OTP
+                {isSending ? "Resending..." : "Resend OTP"}
               </button>
             </div>
           </div>

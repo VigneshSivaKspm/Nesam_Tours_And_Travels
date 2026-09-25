@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Driver } from "../types";
-import { subscribeDrivers, updateFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
+import { subscribeDrivers, updateFirestoreDocument, setFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
 
 const statusStyle: Record<string, string> = {
   "On Trip": "bg-orange-50 text-orange-700 border-orange-200",
@@ -29,6 +29,42 @@ export default function Drivers() {
   const handleReject = (id: string) => {
     updateFirestoreDocument(COLLECTIONS.DRIVERS, id, { verified: false, docStatus: 'Rejected' });
     setSelectedDriver(null);
+  };
+
+  const handleAddDriver = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newDriver.name.trim() || !newDriver.phone.trim()) {
+      alert("Driver Name and Phone Number are required.");
+      return;
+    }
+    const id = "DRV-" + Date.now();
+    const createdDriver: Driver = {
+      id,
+      name: newDriver.name.trim(),
+      phone: newDriver.phone.trim(),
+      license: newDriver.licenseNumber.trim() ? "Valid" : "Pending",
+      licenseNumber: newDriver.licenseNumber.trim(),
+      licenseExpiry: newDriver.licenseExpiry,
+      status: newDriver.status,
+      rating: newDriver.rating || 5,
+      vehicle: newDriver.vehicle.trim() || "Unassigned",
+      verified: true,
+      docStatus: "Approved",
+      trips: 0,
+      earnings: "₹0",
+    };
+
+    // Optimistic UI state update immediately
+    setLiveDrivers((prev) => [createdDriver, ...prev]);
+    setShowAddModal(false);
+    setNewDriver({ name: '', phone: '', licenseNumber: '', licenseExpiry: '', vehicle: '', status: 'Online', rating: 5 });
+
+    // Save to Firestore
+    try {
+      await setFirestoreDocument(COLLECTIONS.DRIVERS, id, createdDriver);
+    } catch (err) {
+      console.warn("Error saving driver to Firestore:", err);
+    }
   };
 
   return (
@@ -257,17 +293,13 @@ export default function Drivers() {
                 <option>Online</option><option>Offline</option>
               </select>
               <input placeholder="Rating (1-5)" type="number" min="1" max="5" className="w-full p-2 border rounded text-xs" onChange={(e) => setNewDriver({...newDriver, rating: Number(e.target.value)})} />
-              <button onClick={() => {
-                import('../services/adminFirestoreService').then(({ setFirestoreDocument, COLLECTIONS }) => {
-                  const id = 'DRV-' + Date.now();
-                  setFirestoreDocument(COLLECTIONS.DRIVERS, id, {
-                    id, name: newDriver.name, phone: newDriver.phone, licenseNumber: newDriver.licenseNumber,
-                    licenseExpiry: newDriver.licenseExpiry, status: newDriver.status, rating: newDriver.rating,
-                    vehicle: newDriver.vehicle, verified: false, docStatus: 'Pending', trips: 0, earnings: '₹0'
-                  });
-                  setShowAddModal(false);
-                });
-              }} className="w-full p-2 bg-[#E21B23] text-white text-xs font-bold rounded mt-2">Submit</button>
+              <button
+                type="button"
+                onClick={handleAddDriver}
+                className="w-full p-2.5 bg-[#E21B23] hover:bg-[#c4151c] text-white text-xs font-bold rounded-lg mt-2 cursor-pointer transition-colors shadow"
+              >
+                Create Driver
+              </button>
             </div>
           </div>
         </div>

@@ -159,11 +159,11 @@ const defaultFormState = {
   imageUrl: "",
   icon: "🚘",
   seatingCapacity: 4,
-  luggageCapacity: "2 Bags",
+  luggageCapacity: "2 Bags" as string | number,
   acSupported: "Both" as const,
   recommendedPassengers: 4,
   displayOrder: 1,
-  status: "Active" as const,
+  status: "Active" as "Active" | "Inactive",
   fare: {
     baseFare: 350,
     baseKm: 10,
@@ -392,6 +392,11 @@ export default function VehicleCategories() {
 
       const ok = await setFirestoreDocument(COLLECTIONS.VEHICLE_CATEGORIES, docId, payload);
       if (ok) {
+        if (isEditing) {
+          setCategories((prev) => prev.map((c) => (c.id === docId ? payload : c)));
+        } else {
+          setCategories((prev) => [payload, ...prev]);
+        }
         setShowModal(false);
         showToast(
           isEditing

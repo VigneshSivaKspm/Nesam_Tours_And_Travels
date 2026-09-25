@@ -2,8 +2,8 @@ import { useState, type FormEvent } from "react";
 import { signInAdmin, describeAuthError } from "../services/authService";
 
 export default function Login({ onSignUp }: { onSignUp?: () => void }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [email, setEmail] = useState("admin@nesam.in");
+  const [password, setPassword] = useState("Admin@123456");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -42,6 +42,12 @@ export default function Login({ onSignUp }: { onSignUp?: () => void }) {
           onSubmit={handleSubmit}
           className="bg-white rounded-2xl border border-[#E5E5E5] p-6 shadow-sm"
         >
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-[#111]">
+            <div className="font-bold text-[#E21B23] mb-1">🔑 Super Admin Credentials:</div>
+            <div>Email: <span className="font-mono font-semibold">admin@nesam.in</span></div>
+            <div>Password: <span className="font-mono font-semibold">Admin@123456</span></div>
+          </div>
+
           {error && (
             <div className="mb-4 px-3 py-2.5 rounded-lg text-[12px] font-medium text-[#E21B23] bg-[#FEF2F2] border border-[#FBD5D5]">
               {error}

@@ -93,6 +93,56 @@ export default function Bookings({
     };
   }, []);
 
+  const handleCreateBooking = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newBooking.name.trim()) {
+      alert("Customer Name is required.");
+      return;
+    }
+    const id = "NTT-" + Date.now();
+    const createdBooking: Booking = {
+      id,
+      customer: newBooking.name.trim(),
+      customerName: newBooking.name.trim(),
+      customerPhone: newBooking.phone.trim(),
+      phone: newBooking.phone.trim(),
+      service: newBooking.service,
+      pickup: newBooking.pickup.trim() || "Pickup Location",
+      drop: newBooking.drop.trim() || "Drop Location",
+      date: newBooking.date || new Date().toISOString().split("T")[0],
+      time: newBooking.time || "10:00 AM",
+      vehicle: newBooking.vehicle,
+      fare: "₹" + (newBooking.fare || 0),
+      payment: newBooking.payment,
+      paymentStatus: "Pending",
+      status: "Confirmed",
+      boardingOTP: String(Math.floor(1000 + Math.random() * 9000)),
+    };
+
+    // Optimistically update bookings list immediately
+    setLiveBookings((prev) => [createdBooking, ...prev]);
+    setShowAddModal(false);
+    setNewBooking({
+      name: "",
+      phone: "",
+      service: "Airport Taxi",
+      pickup: "",
+      drop: "",
+      date: "",
+      time: "",
+      vehicle: "Sedan",
+      fare: 0,
+      payment: "Cash",
+    });
+
+    // Save to Firestore
+    try {
+      await setFirestoreDocument(COLLECTIONS.BOOKINGS, id, createdBooking);
+    } catch (err) {
+      console.warn("Error saving booking to Firestore:", err);
+    }
+  };
+
   const statuses = [
     "All",
     "Pending",
@@ -174,19 +224,13 @@ export default function Bookings({
 
   const handleSaveEdit = async () => {
     if (!editingBooking) return;
+    setLiveBookings((prev) =>
+      prev.map((b) => (b.id === editingBooking.id ? editingBooking : b))
+    );
     await setFirestoreDocument(
       COLLECTIONS.BOOKINGS,
       editingBooking.id,
       editingBooking,
-    );
-    import("../services/adminFirestoreService").then(
-      ({ updateFirestoreDocument }) => {
-        updateFirestoreDocument(
-          COLLECTIONS.BOOKINGS,
-          editingBooking.id,
-          editingBooking,
-        );
-      },
     );
     setEditingBooking(null);
   };
@@ -803,26 +847,9 @@ export default function Bookings({
               </select>
 
               <button
-                onClick={() => {
-                  if (!newBooking.name) return;
-                  const id = "NTT-" + Date.now();
-                  setFirestoreDocument(COLLECTIONS.BOOKINGS, id, {
-                    id,
-                    customer: newBooking.name,
-                    phone: newBooking.phone,
-                    service: newBooking.service,
-                    pickup: newBooking.pickup,
-                    drop: newBooking.drop,
-                    date: newBooking.date,
-                    time: newBooking.time,
-                    vehicle: newBooking.vehicle,
-                    fare: "₹" + newBooking.fare,
-                    payment: newBooking.payment,
-                    status: "Confirmed",
-                  });
-                  setShowAddModal(false);
-                }}
-                className="col-span-2 w-full p-2 bg-[#E21B23] text-white text-xs font-bold rounded mt-2 cursor-pointer"
+                type="button"
+                onClick={handleCreateBooking}
+                className="col-span-2 w-full p-2.5 bg-[#E21B23] hover:bg-[#c4151c] text-white text-xs font-bold rounded-lg mt-2 cursor-pointer transition-colors shadow"
               >
                 Create Booking
               </button>

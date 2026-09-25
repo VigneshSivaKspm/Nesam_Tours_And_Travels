@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { PenaltyRecord } from "../types";
 import { penaltyRules } from "../config/constants";
-import { subscribePenalties, updateFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
+import { subscribePenalties, updateFirestoreDocument, setFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
 
 const penaltyTypeStyle: Record<string, string> = {
   Driver: "bg-blue-50 text-blue-700 border-blue-200",
@@ -25,6 +25,37 @@ export default function Penalties() {
     const unsub = subscribePenalties(setPenaltyList);
     return () => unsub();
   }, []);
+
+  const handleAddPenalty = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!newPenalty.entityId.trim()) {
+      alert("Entity ID (Driver/Vendor ID) is required.");
+      return;
+    }
+    const id = 'PEN-' + Date.now();
+    const createdPenalty: PenaltyRecord = {
+      id,
+      entityType: newPenalty.entityType as "Driver" | "Vendor",
+      entityName: newPenalty.entityId.trim(),
+      type: newPenalty.type,
+      reason: newPenalty.reason.trim() || `${newPenalty.type} Violation`,
+      amount: '₹' + (newPenalty.amount || 500),
+      date: new Date().toISOString().split('T')[0],
+      status: 'Applied'
+    };
+
+    // Optimistically update penalty list immediately
+    setPenaltyList((prev) => [createdPenalty, ...prev]);
+    setShowAddModal(false);
+    setNewPenalty({ type: 'Cancellation', entityType: 'Driver', entityId: '', reason: '', amount: 500 });
+
+    // Save to Firestore
+    try {
+      await setFirestoreDocument(COLLECTIONS.PENALTIES, id, createdPenalty);
+    } catch (err) {
+      console.warn("Error saving penalty to Firestore:", err);
+    }
+  };
 
   const disputed = penaltyList.filter((p) => p.status === "Disputed");
   const pending = penaltyList.filter((p) => p.status === "Pending");
@@ -271,17 +302,13 @@ export default function Penalties() {
               <input placeholder="Reason" className="w-full p-2 border rounded text-xs" onChange={(e) => setNewPenalty({...newPenalty, reason: e.target.value})} />
               <input placeholder="Amount (₹)" type="number" className="w-full p-2 border rounded text-xs" onChange={(e) => setNewPenalty({...newPenalty, amount: Number(e.target.value)})} />
               
-              <button onClick={() => {
-                import('../services/adminFirestoreService').then(({ setFirestoreDocument, COLLECTIONS }) => {
-                  const id = 'PEN-' + Date.now();
-                  setFirestoreDocument(COLLECTIONS.PENALTIES, id, {
-                    id, entityType: newPenalty.entityType, entityName: newPenalty.entityId, type: newPenalty.type,
-                    reason: newPenalty.reason, amount: '₹' + newPenalty.amount, date: new Date().toISOString().split('T')[0],
-                    status: 'Applied'
-                  });
-                  setShowAddModal(false);
-                });
-              }} className="w-full p-2 bg-[#E21B23] text-white text-xs font-bold rounded mt-2">Submit Penalty</button>
+              <button
+                type="button"
+                onClick={handleAddPenalty}
+                className="w-full p-2.5 bg-[#E21B23] hover:bg-[#c4151c] text-white text-xs font-bold rounded-lg mt-2 cursor-pointer transition-colors shadow"
+              >
+                Submit Penalty
+              </button>
             </div>
           </div>
         </div>

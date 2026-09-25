@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Vendor } from "../types";
-import { subscribeVendors, updateFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
+import { subscribeVendors, updateFirestoreDocument, setFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
 
 const statusStyle: Record<string, { badge: string; dot: string }> = {
   Active: { badge: "bg-green-50 text-green-700 border-green-200", dot: "bg-green-500" },
@@ -46,6 +46,36 @@ export default function Vendors() {
     setVendorsList(prev => prev.map(v => v.id === id ? { ...v, status: newStatus } : v));
     updateFirestoreDocument(COLLECTIONS.VENDORS, id, { status: newStatus, verified: newStatus === "Active" });
     setSelectedVendor(null);
+  };
+
+  const handleAddVendor = async () => {
+    if (!newVendor.companyName.trim()) {
+      alert("Please enter company name");
+      return;
+    }
+    const id = 'VEN-' + Date.now();
+    const vendorRecord: Vendor = {
+      id,
+      name: newVendor.companyName.trim(),
+      owner: newVendor.owner.trim() || 'Operations Manager',
+      phone: newVendor.phone.trim() || '+91 90000 00000',
+      email: newVendor.email.trim() || 'vendor@nesam.in',
+      city: newVendor.city.trim() || 'Chennai',
+      gst: newVendor.gst.trim() || 'Pending',
+      commission: newVendor.commission || 10,
+      status: 'Active',
+      verified: true,
+      fleetSize: 0,
+      activeDrivers: 0,
+      docs: { gst: 'Verified', pan: 'Verified' },
+      wallet: '₹0'
+    };
+
+    setVendorsList(prev => [vendorRecord, ...prev.filter(v => v.id !== id)]);
+    setShowAddModal(false);
+    setNewVendor({ companyName: '', owner: '', phone: '', email: '', city: '', gst: '', commission: 10 });
+
+    await setFirestoreDocument(COLLECTIONS.VENDORS, id, vendorRecord);
   };
 
   return (
@@ -274,17 +304,7 @@ export default function Vendors() {
               <input placeholder="GST Number" className="w-full p-2 border rounded text-xs" onChange={(e) => setNewVendor({...newVendor, gst: e.target.value})} />
               <input placeholder="Commission % (Default 10)" type="number" className="w-full p-2 border rounded text-xs" onChange={(e) => setNewVendor({...newVendor, commission: Number(e.target.value) || 10})} />
               
-              <button onClick={() => {
-                import('../services/adminFirestoreService').then(({ setFirestoreDocument, COLLECTIONS }) => {
-                  const id = 'VEN-' + Date.now();
-                  setFirestoreDocument(COLLECTIONS.VENDORS, id, {
-                    id, name: newVendor.companyName, owner: newVendor.owner, phone: newVendor.phone,
-                    email: newVendor.email, city: newVendor.city, gst: newVendor.gst, commission: newVendor.commission,
-                    status: 'Pending', verified: false, fleetSize: 0, activeDrivers: 0, docs: { gst: 'Pending', pan: 'Pending' }, wallet: '₹0'
-                  });
-                  setShowAddModal(false);
-                });
-              }} className="w-full p-2 bg-[#E21B23] text-white text-xs font-bold rounded mt-2">Submit</button>
+              <button onClick={handleAddVendor} className="w-full p-2.5 bg-[#E21B23] hover:bg-[#C41820] text-white text-xs font-bold rounded mt-2 cursor-pointer transition-colors shadow">Register Vendor</button>
             </div>
           </div>
         </div>

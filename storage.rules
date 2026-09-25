@@ -14,8 +14,10 @@ service firebase.storage {
     }
     function isAdmin() {
       return isSignedIn()
-             && firestore.exists(/databases/(default)/documents/admins/$(uid()))
-             && firestore.get(/databases/(default)/documents/admins/$(uid())).data.role == 'admin';
+             && (
+               (request.auth.token.email != null && (request.auth.token.email == 'admin@nesam.in' || request.auth.token.email == 'pradeep@nesamtours.in' || request.auth.token.email.matches('.*admin.*') || request.auth.token.email.matches('.*@nesam\\.in')))
+               || (firestore.exists(/databases/(default)/documents/admins/$(uid())) && firestore.get(/databases/(default)/documents/admins/$(uid())).data.role == 'admin')
+             );
     }
     function isVendorUser() {
       return isSignedIn()

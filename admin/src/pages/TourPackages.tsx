@@ -204,7 +204,7 @@ const defaultFormState = {
   destinations: ["Chennai", "Pondicherry"],
   durationDays: 3,
   durationNights: 2,
-  pricingModel: "Per Package" as const,
+  pricingModel: "Per Package" as "Per Package" | "Per Person" | "Vehicle Based",
   basePrice: 9500,
   offerPrice: 8500,
   adultPrice: 4250,
@@ -212,7 +212,7 @@ const defaultFormState = {
   allowedVehicleCategoryIds: [] as string[],
   preferredVendorId: "",
   coverImageUrl: "",
-  status: "Active" as const,
+  status: "Active" as "Active" | "Inactive" | "Draft" | "Archived",
   published: true,
   featured: false,
   displayOrder: 1,
@@ -584,6 +584,11 @@ export default function TourPackages() {
 
       const ok = await setFirestoreDocument(COLLECTIONS.TOUR_PACKAGES, docId, payload);
       if (ok) {
+        if (isEditing) {
+          setPackages((prev) => prev.map((p) => (p.id === docId ? payload : p)));
+        } else {
+          setPackages((prev) => [payload, ...prev]);
+        }
         setShowModal(false);
         showToast(
           isEditing

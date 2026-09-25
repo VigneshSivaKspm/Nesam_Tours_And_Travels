@@ -485,7 +485,7 @@ export default function Locations() {
     const generatedCode =
       formData.code.trim().toUpperCase() ||
       nameTrim
-        .replace(/[^a-[#111111]0-9]/gi, "")
+        .replace(/[^a-z0-9]/gi, "")
         .substring(0, 8)
         .toUpperCase();
 
@@ -517,16 +517,22 @@ export default function Locations() {
     };
 
     let success = false;
+    let newDocId: string | null = null;
     if (editingLocation) {
       success = await setFirestoreDocument(COLLECTIONS.LOCATIONS, editingLocation.id, payload);
     } else {
-      const docId = await addFirestoreDocument(COLLECTIONS.LOCATIONS, payload);
-      success = !!docId;
+      newDocId = await addFirestoreDocument(COLLECTIONS.LOCATIONS, payload);
+      success = !!newDocId;
     }
 
     setIsSubmitting(false);
 
     if (success) {
+      if (editingLocation) {
+        setLocations((prev) => prev.map((l) => (l.id === editingLocation.id ? ({ ...l, ...payload } as MasterLocation) : l)));
+      } else {
+        setLocations((prev) => [{ id: newDocId || `LOC-${Date.now()}`, ...payload } as MasterLocation, ...prev]);
+      }
       setShowModal(false);
       showToast(
         editingLocation
