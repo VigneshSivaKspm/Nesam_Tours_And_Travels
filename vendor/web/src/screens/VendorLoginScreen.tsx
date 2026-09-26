@@ -11,6 +11,7 @@ import {
   confirmOtpCode,
   createRecaptchaVerifier,
   describePhoneAuthError,
+  resetRecaptchaVerifier,
   sendOtpToPhone,
   setAuthIntent,
   type AuthIntent,
@@ -64,6 +65,8 @@ export const VendorLoginScreen: React.FC = () => {
     const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
     return () => clearTimeout(t);
   }, [cooldown]);
+
+  useEffect(() => () => resetRecaptchaVerifier(), []);
 
   const choose = (m: AuthIntent) => {
     setMode(m);

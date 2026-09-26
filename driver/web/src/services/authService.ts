@@ -5,8 +5,8 @@ import {
   signOut as firebaseSignOut,
   type ConfirmationResult,
   type User,
-} from 'firebase/auth';
-import { auth } from './firebase';
+} from "firebase/auth";
+import { auth } from "./firebase";
 
 // Firebase's documented pattern is to keep a single RecaptchaVerifier alive and
 // reuse it. Creating a new one on every "Send OTP" / "Resend" click throws
@@ -14,10 +14,12 @@ import { auth } from './firebase';
 let recaptchaVerifier: RecaptchaVerifier | null = null;
 let recaptchaContainerId: string | null = null;
 
-export function createRecaptchaVerifier(containerId: string = 'driver-recaptcha-container'): RecaptchaVerifier {
+export function createRecaptchaVerifier(
+  containerId: string = "driver-recaptcha-container",
+): RecaptchaVerifier {
   let container = document.getElementById(containerId);
   if (!container) {
-    container = document.createElement('div');
+    container = document.createElement("div");
     container.id = containerId;
     document.body.appendChild(container);
   }
@@ -28,11 +30,11 @@ export function createRecaptchaVerifier(containerId: string = 'driver-recaptcha-
 
   resetRecaptchaVerifier();
   recaptchaVerifier = new RecaptchaVerifier(auth, container, {
-    size: 'invisible',
+    size: "invisible",
     callback: () => {
       // reCAPTCHA solved
     },
-    'expired-callback': () => {
+    "expired-callback": () => {
       resetRecaptchaVerifier();
     },
   });
@@ -80,36 +82,36 @@ export async function signOutUser(): Promise<void> {
 }
 
 export function describePhoneAuthError(error: unknown): string {
-  const code = (error as { code?: string })?.code ?? '';
-  const message = (error as { message?: string })?.message ?? '';
-  console.error('[Firebase Phone Auth - Driver]', code, message, error);
+  const code = (error as { code?: string })?.code ?? "";
+  const message = (error as { message?: string })?.message ?? "";
+  console.error("[Firebase Phone Auth - Driver]", code, message, error);
   switch (code) {
-    case 'auth/invalid-phone-number':
-      return 'Enter a valid 10-digit mobile number (+91).';
-    case 'auth/missing-phone-number':
-      return 'Please enter your mobile number.';
-    case 'auth/too-many-requests':
-      return 'Too many attempts. Please wait a few minutes and try again.';
-    case 'auth/invalid-verification-code':
-      return 'Incorrect OTP entered. Please check your SMS and try again.';
-    case 'auth/code-expired':
+    case "auth/invalid-phone-number":
+      return "Enter a valid 10-digit mobile number (+91).";
+    case "auth/missing-phone-number":
+      return "Please enter your mobile number.";
+    case "auth/too-many-requests":
+      return "Too many attempts. Please wait a few minutes and try again.";
+    case "auth/invalid-verification-code":
+      return "Incorrect OTP entered. Please check your SMS and try again.";
+    case "auth/code-expired":
       return 'This OTP has expired. Please tap "Resend OTP" to get a new code.';
-    case 'auth/missing-verification-code':
-      return 'Please enter the 6-digit OTP code.';
-    case 'auth/network-request-failed':
-      return 'Network connection failed. Please check your internet.';
-    case 'auth/quota-exceeded':
-      return 'SMS quota exceeded for today. Please contact support or try again later.';
-    case 'auth/operation-not-allowed':
-      return 'Phone sign-in is not enabled in Firebase Console. Please enable it under Authentication > Sign-in method.';
-    case 'auth/unauthorized-domain':
-      return 'This domain is not authorised in Firebase Authentication settings.';
-    case 'auth/captcha-check-failed':
-    case 'auth/invalid-app-credential':
-      return 'reCAPTCHA security check failed. Please refresh the page and try again.';
-    case 'auth/billing-not-enabled':
-      return 'SMS verification requires Firebase Blaze plan. Please contact admin.';
+    case "auth/missing-verification-code":
+      return "Please enter the 6-digit OTP code.";
+    case "auth/network-request-failed":
+      return "Network connection failed. Please check your internet.";
+    case "auth/quota-exceeded":
+      return "SMS quota exceeded for today. Please contact support or try again later.";
+    case "auth/operation-not-allowed":
+      return "Phone sign-in is not enabled in Firebase Console. Please enable it under Authentication > Sign-in method.";
+    case "auth/unauthorized-domain":
+      return "This domain is not authorised in Firebase Authentication settings.";
+    case "auth/captcha-check-failed":
+    case "auth/invalid-app-credential":
+      return "reCAPTCHA security check failed. Please refresh the page and try again.";
+    case "auth/billing-not-enabled":
+      return "SMS verification requires Firebase Blaze plan. Please contact admin.";
     default:
-      return message || 'Unable to complete verification. Please try again.';
+      return message || "Unable to complete verification. Please try again.";
   }
 }

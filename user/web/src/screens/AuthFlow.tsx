@@ -1,9 +1,18 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { ConfirmationResult } from "firebase/auth";
 import {
+  AlertTriangle,
+  ArrowLeft,
+  Loader2,
+  LogIn,
+  ShieldCheck,
+  UserPlus,
+} from "lucide-react";
+import {
   confirmOtpCode,
   createRecaptchaVerifier,
   describePhoneAuthError,
+  resetRecaptchaVerifier,
   sendOtpToPhone,
   signOutUser,
 } from "../services/authService";
@@ -21,14 +30,6 @@ import {
 } from "../utils/format";
 import { describeError } from "../utils/retry";
 import { useNetworkStatus } from "../hooks/useNetworkStatus";
-import {
-  ErrorNotice,
-  Spinner,
-  inputCls,
-  labelCls,
-  primaryBtn,
-  secondaryBtn,
-} from "../components/ui";
 
 type Intent = "login" | "signup";
 const INTENT_KEY = "nt-auth-intent";
@@ -46,7 +47,7 @@ function writeIntent(v: Intent) {
   try {
     sessionStorage.setItem(INTENT_KEY, v);
   } catch {
-    /* storage unavailable — message wording only */
+    /* storage unavailable */
   }
 }
 
@@ -57,10 +58,40 @@ interface AuthFlowProps {
   phone?: string;
 }
 
-const Shell: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-  <div className="min-h-screen bg-[#F7F7F7] flex items-center justify-center p-4">
-    <div className="w-full max-w-md bg-white rounded-3xl shadow-xl border border-gray-200 p-6 sm:p-8 min-h-[560px] flex flex-col">
-      {children}
+const Shell: React.FC<{
+  title?: string;
+  subtitle?: string;
+  children: React.ReactNode;
+}> = ({
+  title = "Nesam Tours & Travels",
+  subtitle = "Safe Journey, Happy Memories",
+  children,
+}) => (
+  <div
+    className="min-h-screen w-full flex items-center justify-center px-4 py-10 font-sans antialiased"
+    style={{ background: "#F5F5F5" }}
+  >
+    <div id="recaptcha-container" />
+
+    <div className="w-full max-w-sm">
+      <div className="text-center mb-7">
+        <img
+          src="/icons/logo.png"
+          alt="NESAM Tours & Travels"
+          className="w-16 h-16 rounded-2xl object-contain bg-white border border-[#E5E5E5] p-2 mx-auto mb-4 shadow-sm"
+        />
+        <h1 className="text-[19px] font-bold text-[#111111]">{title}</h1>
+        <p className="text-[13px] text-[#999] mt-1">{subtitle}</p>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-[#E5E5E5] p-6 shadow-sm">
+        {children}
+      </div>
+
+      <div className="text-center mt-6 flex items-center justify-center gap-2 text-[11px] text-[#AAA]">
+        <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+        <span>Official NESAM Tours & Travels Customer Portal</span>
+      </div>
     </div>
   </div>
 );
@@ -103,6 +134,8 @@ const PhoneLogin: React.FC = () => {
     return () => clearTimeout(t);
   }, [cooldown]);
 
+  useEffect(() => () => resetRecaptchaVerifier(), []);
+
   const start = (i: Intent) => {
     setIntent(i);
     writeIntent(i);
@@ -112,9 +145,7 @@ const PhoneLogin: React.FC = () => {
 
   const sendOtp = async () => {
     if (!isValidIndianMobile(mobile)) {
-      setError(
-        "Enter a valid 10-digit Indian mobile number starting with 6, 7, 8 or 9.",
-      );
+      setError("Enter a valid 10-digit Indian mobile number.");
       return;
     }
     if (!online) {
@@ -151,7 +182,6 @@ const PhoneLogin: React.FC = () => {
     setError("");
     setVerifying(true);
     try {
-      // App's auth listener takes over from here (dashboard or profile setup).
       await confirmOtpCode(confirmation, code);
     } catch (e) {
       setError(describePhoneAuthError(e));
@@ -162,139 +192,206 @@ const PhoneLogin: React.FC = () => {
   };
 
   const onOtpChange = (index: number, raw: string) => {
-    let digits = raw.replace(/\D/g, "");
+    const digits = raw.replace(/\D/g, "");
     const next = [...otp];
-    // Typing over an already-filled first box yields "old+new": keep the new digit.
-    if (digits.length === 2 && otp[index]) digits = digits.slice(-1);
-    if (digits.length > 1) {
-      // Paste / SMS autofill of the whole code.
-      for (let i = 0; i < 6; i++) next[i] = digits[i] ?? "";
+    if (digits.length >= 6) {
+      const pasted = digits.slice(0, 6);
+      for (let i = 0; i < 6; i++) next[i] = pasted[i] || "";
       setOtp(next);
-      otpRefs.current[Math.min(digits.length, 5)]?.focus();
-      if (digits.length >= 6) void verify(next);
+      otpRefs.current[Math.min(pasted.length, 5)]?.focus();
+      void verify(next);
       return;
     }
-    next[index] = digits;
+    next[index] = digits.slice(-1);
     setOtp(next);
-    if (digits && index < 5) otpRefs.current[index + 1]?.focus();
-    if (digits && next.every((d) => d)) void verify(next);
+    if (next[index] && index < 5) otpRefs.current[index + 1]?.focus();
+    if (next.every((d) => d)) void verify(next);
   };
 
   if (step === "welcome") {
     return (
-      <Shell>
-        <div className="flex-1 flex flex-col items-center justify-center text-center gap-3">
-          <img
-            src="/icons/logo.png"
-            alt="NESAM Tours & Travels"
-            className="w-24 h-24 rounded-3xl object-contain bg-gray-50 border border-gray-200 p-2"
-          />
-          <h1 className="text-2xl font-black tracking-wide text-gray-900">
-            NESAM TOURS & TRAVELS
-          </h1>
-          <p className="text-xs font-bold tracking-widest uppercase text-[#E31E24]">
-            Safe Journey, Happy Memories
-          </p>
-          <p className="text-sm text-gray-500 max-w-xs mt-2">
-            Book verified cabs in minutes, track your driver live, and pay your
-            way.
-          </p>
-        </div>
+      <Shell
+        title="Nesam Tours & Travels"
+        subtitle="Safe Journey, Happy Memories"
+      >
         <div className="space-y-3">
-          <button onClick={() => start("login")} className={primaryBtn}>
-            Log in
+          <button
+            onClick={() => start("login")}
+            className="w-full flex items-center gap-3 p-4 rounded-xl border border-[#E5E5E5] hover:border-[#E21B23] hover:bg-[#FEF7F7] transition-colors text-left"
+          >
+            <span
+              className="w-10 h-10 rounded-lg flex items-center justify-center text-white shrink-0"
+              style={{ background: "#E21B23" }}
+            >
+              <LogIn className="w-5 h-5" />
+            </span>
+            <span>
+              <span className="block text-[14px] font-bold text-[#111]">
+                Login
+              </span>
+              <span className="block text-[12px] text-[#888]">
+                I already have an account
+              </span>
+            </span>
           </button>
-          <button onClick={() => start("signup")} className={secondaryBtn}>
-            Create an account
+
+          <button
+            onClick={() => start("signup")}
+            className="w-full flex items-center gap-3 p-4 rounded-xl border border-[#E5E5E5] hover:border-[#E21B23] hover:bg-[#FEF7F7] transition-colors text-left"
+          >
+            <span className="w-10 h-10 rounded-lg flex items-center justify-center bg-[#111] text-white shrink-0">
+              <UserPlus className="w-5 h-5" />
+            </span>
+            <span>
+              <span className="block text-[14px] font-bold text-[#111]">
+                Sign Up
+              </span>
+              <span className="block text-[12px] text-[#888]">
+                Create a new passenger account
+              </span>
+            </span>
           </button>
-          <p className="text-[11px] text-gray-400 text-center leading-snug pt-1">
-            By continuing you agree to NESAM’s Terms & Conditions and Privacy
-            Policy.
-          </p>
         </div>
+
+        <p className="text-[11px] text-[#999] text-center mt-5 leading-relaxed">
+          By continuing you agree to NESAM’s Terms &amp; Conditions and Privacy
+          Policy.
+        </p>
       </Shell>
     );
   }
 
   if (step === "phone") {
+    const isSignup = intent === "signup";
     return (
-      <Shell>
+      <Shell
+        title="Nesam Tours & Travels"
+        subtitle={
+          isSignup
+            ? "Create your passenger account"
+            : "Sign in with your mobile number"
+        }
+      >
         <button
-          onClick={() => setStep("welcome")}
-          className="self-start text-xs font-bold text-gray-500 hover:text-gray-900 mb-6"
+          onClick={() => {
+            setStep("welcome");
+            setError("");
+          }}
+          className="flex items-center gap-1 text-[12px] text-[#999] hover:text-[#111] mb-4 font-semibold"
         >
-          ← Back
+          <ArrowLeft className="w-3.5 h-3.5" /> Back
         </button>
-        <h2 className="text-xl font-black text-gray-900">
-          {intent === "login" ? "Welcome back" : "Create your account"}
-        </h2>
-        <p className="text-sm text-gray-500 mt-1">
-          We’ll text a 6-digit code to verify your number.
-        </p>
+
+        {typeof window !== "undefined" &&
+          /^(127\.0\.0\.1|\d+\.\d+\.\d+\.\d+)$/.test(
+            window.location.hostname,
+          ) && (
+            <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl text-[12px] text-amber-900 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold">
+                  Local IP Detected ({window.location.hostname}):
+                </span>{" "}
+                Firebase Phone Auth blocks IP addresses by default.
+                <div className="mt-1">
+                  Please use{" "}
+                  <a
+                    href={`http://localhost:${window.location.port || "3000"}`}
+                    className="font-bold text-[#E21B23] underline"
+                  >
+                    http://localhost:{window.location.port || "3000"}
+                  </a>{" "}
+                  for OTP to work smoothly.
+                </div>
+              </div>
+            </div>
+          )}
+
         <form
-          className="mt-8 space-y-4 flex-1 flex flex-col"
           onSubmit={(e) => {
             e.preventDefault();
             void sendOtp();
           }}
         >
-          <div>
-            <label htmlFor="mobile" className={labelCls}>
-              Mobile number
-            </label>
-            <div className="flex items-center bg-gray-50 border border-gray-300 rounded-xl px-4 py-3 focus-within:border-[#E31E24] focus-within:bg-white">
-              <span className="text-sm font-bold text-gray-700 mr-3">+91</span>
-              <input
-                id="mobile"
-                type="tel"
-                inputMode="numeric"
-                autoComplete="tel-national"
-                maxLength={10}
-                autoFocus
-                value={mobile}
-                onChange={(e) => {
-                  setMobile(e.target.value.replace(/\D/g, "").slice(0, 10));
-                  setError("");
-                }}
-                placeholder="98765 43210"
-                className="flex-1 bg-transparent text-base font-bold tracking-wider text-gray-900 focus:outline-none placeholder-gray-300"
-              />
-            </div>
+          <label
+            htmlFor="user-phone"
+            className="block text-[12px] font-semibold text-[#444] mb-1.5"
+          >
+            {isSignup ? "Mobile Number" : "Registered Mobile Number"}
+          </label>
+          <div className="flex items-center bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg px-3.5 py-2.5 focus-within:border-[#E21B23] focus-within:ring-1 focus-within:ring-[#E21B23]/20 transition-all">
+            <span className="text-[13px] font-bold text-[#E21B23] mr-2.5">
+              +91
+            </span>
+            <input
+              id="user-phone"
+              type="tel"
+              inputMode="numeric"
+              autoComplete="tel-national"
+              maxLength={10}
+              autoFocus
+              value={mobile}
+              onChange={(e) => {
+                setMobile(e.target.value.replace(/\D/g, "").slice(0, 10));
+                setError("");
+              }}
+              onKeyDown={(e) => e.key === "Enter" && void sendOtp()}
+              placeholder="98765 43210"
+              className="bg-transparent w-full text-[13px] font-semibold text-[#111] focus:outline-none placeholder-[#BBB]"
+            />
           </div>
-          {error && <ErrorNotice message={error} />}
-          <div className="flex-1" />
+
+          {isSignup && (
+            <p className="mt-1.5 text-[11px] text-[#999]">
+              This number becomes your login and primary contact for trips.
+            </p>
+          )}
+
+          {error && (
+            <div className="mt-3 px-3 py-2.5 rounded-lg text-[12px] font-medium text-[#E21B23] bg-[#FEF2F2] border border-[#FBD5D5]">
+              {error}
+            </div>
+          )}
+
           <button
             type="submit"
-            disabled={sending || mobile.length !== 10}
-            className={primaryBtn}
+            disabled={sending || mobile.length !== 10 || !online}
+            className="w-full mt-4 py-2.5 text-[13px] font-semibold text-white rounded-lg transition-all hover:opacity-90 active:scale-95 disabled:opacity-60 flex items-center justify-center gap-2"
+            style={{ background: "#E21B23" }}
           >
-            {sending ? <Spinner label="Sending OTP…" /> : "Send OTP"}
+            {sending && <Loader2 className="w-4 h-4 animate-spin" />}
+            {sending ? "Sending OTP…" : "Send OTP"}
           </button>
+
+          <p className="text-center text-[11px] text-[#999] mt-5 leading-relaxed">
+            By continuing, you agree to NESAM's Terms of Service and Privacy
+            Policy.
+          </p>
         </form>
       </Shell>
     );
   }
 
   return (
-    <Shell>
+    <Shell title="Nesam Tours & Travels" subtitle="Verify your mobile number">
       <button
         onClick={() => {
           setStep("phone");
+          setOtp(["", "", "", "", "", ""]);
           setError("");
         }}
-        className="self-start text-xs font-bold text-gray-500 hover:text-gray-900 mb-6"
+        disabled={verifying}
+        className="flex items-center gap-1 text-[12px] text-[#999] hover:text-[#111] mb-4 font-semibold disabled:opacity-50"
       >
-        ← Change number
+        <ArrowLeft className="w-3.5 h-3.5" /> Change number
       </button>
-      <h2 className="text-xl font-black text-gray-900">
-        Enter verification code
-      </h2>
-      <p className="text-sm text-gray-500 mt-1">
-        Sent to{" "}
-        <span className="font-bold text-gray-900">{formatPhone(mobile)}</span>
+
+      <p className="text-[13px] text-[#444] mb-4">
+        Enter the 6-digit OTP sent to{" "}
+        <span className="font-bold text-[#111]">{formatPhone(mobile)}</span>
       </p>
+
       <form
-        className="mt-8 space-y-4 flex-1 flex flex-col"
         onSubmit={(e) => {
           e.preventDefault();
           void verify();
@@ -308,6 +405,7 @@ const PhoneLogin: React.FC = () => {
           {otp.map((d, i) => (
             <input
               key={i}
+              id={`user-otp-${i}`}
               ref={(el) => {
                 otpRefs.current[i] = el;
               }}
@@ -322,35 +420,48 @@ const PhoneLogin: React.FC = () => {
               onKeyDown={(e) => {
                 if (e.key === "Backspace" && !otp[i] && i > 0)
                   otpRefs.current[i - 1]?.focus();
+                if (e.key === "Enter" && otp.join("").length === 6)
+                  void verify();
               }}
-              className={`w-full aspect-square text-center bg-gray-50 border ${
-                error ? "border-red-400" : "border-gray-300"
-              } rounded-xl text-xl font-black text-gray-900 focus:border-[#E31E24] focus:bg-white focus:outline-none`}
+              className={`w-11 h-12 text-center bg-[#F5F5F5] border rounded-lg text-[16px] font-bold text-[#111] focus:outline-none focus:border-[#E21B23] focus:ring-1 focus:ring-[#E21B23]/20 transition-all disabled:opacity-60 ${
+                error ? "border-[#FBD5D5]" : "border-[#E5E5E5]"
+              }`}
             />
           ))}
         </div>
-        {error && <ErrorNotice message={error} />}
-        <div className="text-xs text-center text-gray-500">
+
+        {error && (
+          <div className="mt-3 px-3 py-2.5 rounded-lg text-[12px] font-medium text-[#E21B23] bg-[#FEF2F2] border border-[#FBD5D5]">
+            {error}
+          </div>
+        )}
+
+        <div className="text-[12px] text-center text-[#888] mt-4">
           {cooldown > 0 ? (
-            <>Resend code in {cooldown}s</>
+            <>
+              Resend code in{" "}
+              <span className="font-bold text-[#111]">{cooldown}s</span>
+            </>
           ) : (
             <button
               type="button"
               onClick={() => void sendOtp()}
               disabled={sending}
-              className="font-bold text-[#E31E24] hover:underline"
+              className="font-bold text-[#E21B23] hover:underline"
             >
               {sending ? "Resending…" : "Resend code"}
             </button>
           )}
         </div>
-        <div className="flex-1" />
+
         <button
           type="submit"
           disabled={verifying || otp.join("").length !== 6}
-          className={primaryBtn}
+          className="w-full mt-4 py-2.5 text-[13px] font-semibold text-white rounded-lg transition-all hover:opacity-90 active:scale-95 disabled:opacity-60 flex items-center justify-center gap-2"
+          style={{ background: "#E21B23" }}
         >
-          {verifying ? <Spinner label="Verifying…" /> : "Verify & continue"}
+          {verifying && <Loader2 className="w-4 h-4 animate-spin" />}
+          {verifying ? "Verifying…" : "Verify & Continue"}
         </button>
       </form>
     </Shell>
@@ -438,7 +549,6 @@ const ProfileSetup: React.FC<{ uid: string; phone: string }> = ({
         emergencyContact: `+91 ${emergency}`,
         photoUrl,
       });
-      // App's profile listener switches to the dashboard; keep the spinner.
     } catch (e) {
       setError(
         describeError(e, "We couldn’t create your profile. Please try again."),
@@ -450,29 +560,27 @@ const ProfileSetup: React.FC<{ uid: string; phone: string }> = ({
 
   const fieldErr = (k: keyof typeof errors) =>
     touched && errors[k] ? (
-      <p className="text-[11px] text-red-600 mt-1">{errors[k]}</p>
+      <p className="text-[11px] text-[#E21B23] mt-1">{errors[k]}</p>
     ) : null;
 
   return (
-    <Shell>
-      <h2 className="text-xl font-black text-gray-900">
-        Complete your profile
-      </h2>
-      <p className="text-sm text-gray-500 mt-1">
-        {intent === "login"
-          ? "We didn’t find an account for this number, so let’s set one up."
-          : "Drivers use this to identify you at pickup."}
-      </p>
+    <Shell
+      title="Nesam Tours & Travels"
+      subtitle={
+        intent === "login"
+          ? "Set up your profile to continue"
+          : "Complete your passenger profile"
+      }
+    >
       <form
-        className="mt-6 space-y-4"
         noValidate
         onSubmit={(e) => {
           e.preventDefault();
           void save();
         }}
       >
-        <div className="flex items-center gap-4">
-          <label className="relative w-20 h-20 rounded-full bg-gray-100 border-2 border-dashed border-gray-300 flex items-center justify-center overflow-hidden cursor-pointer hover:border-[#E31E24] shrink-0">
+        <div className="flex items-center gap-4 mb-4">
+          <label className="relative w-16 h-16 rounded-2xl bg-[#F5F5F5] border-2 border-dashed border-[#E5E5E5] flex items-center justify-center overflow-hidden cursor-pointer hover:border-[#E21B23] shrink-0 transition-colors">
             {preview ? (
               <img
                 src={preview}
@@ -480,7 +588,7 @@ const ProfileSetup: React.FC<{ uid: string; phone: string }> = ({
                 className="w-full h-full object-cover"
               />
             ) : (
-              <span className="text-[10px] font-bold text-gray-500 text-center px-2">
+              <span className="text-[10px] font-bold text-[#888] text-center px-1">
                 Add photo
               </span>
             )}
@@ -491,96 +599,115 @@ const ProfileSetup: React.FC<{ uid: string; phone: string }> = ({
               onChange={(e) => pickPhoto(e.target.files?.[0])}
             />
           </label>
-          <div className="text-xs text-gray-500">
-            <p className="font-bold text-gray-700">Profile picture</p>
-            <p>Optional — helps your driver recognise you.</p>
+          <div className="text-[12px] text-[#666]">
+            <p className="font-bold text-[#111]">Profile Photo</p>
+            <p className="text-[11px] text-[#999]">
+              Optional — helps your driver recognize you.
+            </p>
             {progress != null && (
-              <p className="text-[#E31E24] font-bold mt-1">
+              <p className="text-[#E21B23] font-bold mt-0.5">
                 Uploading… {progress}%
               </p>
             )}
           </div>
         </div>
 
-        <div>
-          <label htmlFor="name" className={labelCls}>
-            Full name
-          </label>
+        <label
+          htmlFor="name"
+          className="block text-[12px] font-semibold text-[#444] mb-1.5"
+        >
+          Full Name
+        </label>
+        <input
+          id="name"
+          autoComplete="name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          className="w-full mb-1 px-3.5 py-2.5 text-[13px] bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23] focus:ring-1 focus:ring-[#E21B23]/20 transition-all font-semibold text-[#111]"
+          placeholder="e.g. John Doe"
+        />
+        {fieldErr("name")}
+
+        <label
+          htmlFor="email"
+          className="block text-[12px] font-semibold text-[#444] mb-1.5 mt-3"
+        >
+          Email Address
+        </label>
+        <input
+          id="email"
+          type="email"
+          autoComplete="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="w-full mb-1 px-3.5 py-2.5 text-[13px] bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23] focus:ring-1 focus:ring-[#E21B23]/20 transition-all font-semibold text-[#111]"
+          placeholder="you@example.com"
+        />
+        {fieldErr("email")}
+
+        <label
+          htmlFor="emergency"
+          className="block text-[12px] font-semibold text-[#444] mb-1.5 mt-3"
+        >
+          Emergency Contact
+        </label>
+        <div className="flex items-center bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg px-3.5 py-2.5 focus-within:border-[#E21B23] focus-within:ring-1 focus-within:ring-[#E21B23]/20 transition-all">
+          <span className="text-[13px] font-bold text-[#E21B23] mr-2.5">
+            +91
+          </span>
           <input
-            id="name"
-            autoComplete="name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className={inputCls}
-            placeholder="As on your ID"
+            id="emergency"
+            type="tel"
+            inputMode="numeric"
+            maxLength={10}
+            value={emergency}
+            onChange={(e) =>
+              setEmergency(e.target.value.replace(/\D/g, "").slice(0, 10))
+            }
+            className="bg-transparent w-full text-[13px] font-semibold text-[#111] focus:outline-none placeholder-[#BBB]"
+            placeholder="Family member or friend"
           />
-          {fieldErr("name")}
         </div>
-        <div>
-          <label htmlFor="email" className={labelCls}>
-            Email address
-          </label>
-          <input
-            id="email"
-            type="email"
-            autoComplete="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className={inputCls}
-            placeholder="you@example.com"
-          />
-          {fieldErr("email")}
-        </div>
-        <div>
-          <label htmlFor="emergency" className={labelCls}>
-            Emergency contact
-          </label>
-          <div className="flex items-center bg-gray-50 border border-gray-300 rounded-xl px-4 py-3 focus-within:border-[#E31E24] focus-within:bg-white">
-            <span className="text-sm font-bold text-gray-700 mr-3">+91</span>
-            <input
-              id="emergency"
-              type="tel"
-              inputMode="numeric"
-              maxLength={10}
-              value={emergency}
-              onChange={(e) =>
-                setEmergency(e.target.value.replace(/\D/g, "").slice(0, 10))
-              }
-              className="flex-1 bg-transparent text-sm font-medium text-gray-900 focus:outline-none placeholder-gray-400"
-              placeholder="Family member or friend"
-            />
+        {fieldErr("emergency")}
+        <p className="text-[11px] text-[#999] mt-1.5">
+          We share your live trip with them only when you trigger SOS or share
+          trip.
+        </p>
+
+        {error && (
+          <div className="mt-3 px-3 py-2.5 rounded-lg text-[12px] font-medium text-[#E21B23] bg-[#FEF2F2] border border-[#FBD5D5]">
+            {error}
           </div>
-          {fieldErr("emergency")}
-          <p className="text-[11px] text-gray-400 mt-1">
-            We share your live trip with them only when you trigger SOS or
-            share.
-          </p>
-        </div>
+        )}
 
-        {error && <ErrorNotice message={error} />}
-
-        <button type="submit" disabled={saving} className={primaryBtn}>
-          {saving ? (
-            <Spinner label="Saving…" />
-          ) : photoFailed ? (
-            "Retry upload & continue"
-          ) : (
-            "Save & start booking"
-          )}
+        <button
+          type="submit"
+          disabled={saving}
+          className="w-full mt-4 py-2.5 text-[13px] font-semibold text-white rounded-lg transition-all hover:opacity-90 active:scale-95 disabled:opacity-60 flex items-center justify-center gap-2"
+          style={{ background: "#E21B23" }}
+        >
+          {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+          {saving
+            ? "Saving…"
+            : photoFailed
+              ? "Retry Upload & Continue"
+              : "Save & Start Booking"}
         </button>
+
         {photoFailed && !saving && (
           <button
             type="button"
             onClick={() => void save(true)}
-            className={secondaryBtn}
+            className="w-full mt-2 py-2 text-[12px] font-semibold text-[#666] bg-[#F5F5F5] hover:bg-[#EBEBEB] rounded-lg border border-[#E5E5E5] transition-colors"
           >
             Continue without photo
           </button>
         )}
+
         <button
           type="button"
           onClick={() => void signOutUser()}
-          className="w-full text-xs font-bold text-gray-500 hover:text-gray-900 py-2"
+          className="w-full text-center text-[12px] font-semibold text-[#999] hover:text-[#111] mt-3"
         >
           Not your number? Sign out
         </button>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from "react";
 import {
   VendorProfile,
   VendorRecord,
@@ -9,31 +9,47 @@ import {
   VendorTrip,
   WalletDetails,
   PayoutRequest,
-  TransactionRecord
-} from './types';
-import {
-  DEFAULT_WALLET
-} from './config/constants';
+  TransactionRecord,
+} from "./types";
+import { DEFAULT_WALLET } from "./config/constants";
 
-import { Header } from './components/Header';
-import { Sidebar } from './components/Sidebar';
-import { VendorLoginScreen } from './screens/VendorLoginScreen';
-import { DashboardScreen } from './screens/DashboardScreen';
-import { FleetScreen } from './screens/FleetScreen';
-import { DriverManagementScreen } from './screens/DriverManagementScreen';
-import { MarketplaceBiddingScreen } from './screens/MarketplaceBiddingScreen';
-import { TripAssignmentScreen } from './screens/TripAssignmentScreen';
-import { WalletPayoutScreen } from './screens/WalletPayoutScreen';
-import { DocumentsVerificationScreen } from './screens/DocumentsVerificationScreen';
+import { Header } from "./components/Header";
+import { Sidebar } from "./components/Sidebar";
+import { VendorLoginScreen } from "./screens/VendorLoginScreen";
+import { DashboardScreen } from "./screens/DashboardScreen";
+import { FleetScreen } from "./screens/FleetScreen";
+import { DriverManagementScreen } from "./screens/DriverManagementScreen";
+import { MarketplaceBiddingScreen } from "./screens/MarketplaceBiddingScreen";
+import { TripAssignmentScreen } from "./screens/TripAssignmentScreen";
+import { WalletPayoutScreen } from "./screens/WalletPayoutScreen";
+import { DocumentsVerificationScreen } from "./screens/DocumentsVerificationScreen";
 
 const pageMeta: Record<string, { title: string; breadcrumb: string[] }> = {
-  dashboard: { title: 'Overview Dashboard', breadcrumb: ['Overview', 'Dashboard'] },
-  trips: { title: 'Active Trips Dispatch', breadcrumb: ['Overview', 'Live Trips'] },
-  fleet: { title: 'Vehicle Fleet Management', breadcrumb: ['Fleet', 'Vehicles'] },
-  drivers: { title: 'Driver Management', breadcrumb: ['Fleet', 'Drivers'] },
-  marketplace: { title: 'Open Trip Marketplace & Bidding', breadcrumb: ['Marketplace', 'Open Trips'] },
-  wallet: { title: 'Fleet Wallet & Payouts', breadcrumb: ['Finance', 'Wallet & Payouts'] },
-  documents: { title: 'Business Verification & Documents', breadcrumb: ['Compliance', 'KYC Verification'] }
+  dashboard: {
+    title: "Overview Dashboard",
+    breadcrumb: ["Overview", "Dashboard"],
+  },
+  trips: {
+    title: "Active Trips Dispatch",
+    breadcrumb: ["Overview", "Live Trips"],
+  },
+  fleet: {
+    title: "Vehicle Fleet Management",
+    breadcrumb: ["Fleet", "Vehicles"],
+  },
+  drivers: { title: "Driver Management", breadcrumb: ["Fleet", "Drivers"] },
+  marketplace: {
+    title: "Open Trip Marketplace & Bidding",
+    breadcrumb: ["Marketplace", "Open Trips"],
+  },
+  wallet: {
+    title: "Fleet Wallet & Payouts",
+    breadcrumb: ["Finance", "Wallet & Payouts"],
+  },
+  documents: {
+    title: "Business Verification & Documents",
+    breadcrumb: ["Compliance", "KYC Verification"],
+  },
 };
 
 import {
@@ -46,21 +62,24 @@ import {
   assignTripInFirestore,
   submitPayoutRequestToFirestore,
   subscribeToVendorActiveTrips,
-  subscribeToVendorPayouts
-} from './services/vendorFirestoreService';
-import type { User } from 'firebase/auth';
+  subscribeToVendorPayouts,
+} from "./services/vendorFirestoreService";
+import type { User } from "firebase/auth";
 import {
   subscribeToAuthUser,
   signOutUser,
   getAuthIntent,
   setAuthIntent,
   resetRecaptchaVerifier,
-} from './services/authService';
-import { subscribeToVendor, type VendorSnapshot } from './services/onboardingService';
-import { describeDataError } from './utils/retry';
-import { OnboardingWizard } from './screens/onboarding/OnboardingWizard';
-import { AccountStatusScreen } from './screens/AccountStatusScreen';
-import { Button, FullScreenLoader } from './components/onboarding/ui';
+} from "./services/authService";
+import {
+  subscribeToVendor,
+  type VendorSnapshot,
+} from "./services/onboardingService";
+import { describeDataError } from "./utils/retry";
+import { OnboardingWizard } from "./screens/onboarding/OnboardingWizard";
+import { AccountStatusScreen } from "./screens/AccountStatusScreen";
+import { Button, FullScreenLoader } from "./components/onboarding/ui";
 
 async function handleSignOut() {
   setAuthIntent(null);
@@ -68,7 +87,7 @@ async function handleSignOut() {
   try {
     await signOutUser();
   } catch (error) {
-    console.warn('Sign out failed:', error);
+    console.warn("Sign out failed:", error);
   }
 }
 
@@ -82,8 +101,10 @@ export function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [user, setUser] = useState<User | null>(null);
   // undefined = still loading, null = no vendors/{uid} doc yet
-  const [vendor, setVendor] = useState<VendorSnapshot | null | undefined>(undefined);
-  const [vendorError, setVendorError] = useState('');
+  const [vendor, setVendor] = useState<VendorSnapshot | null | undefined>(
+    undefined,
+  );
+  const [vendorError, setVendorError] = useState("");
   const [listenerKey, setListenerKey] = useState(0);
   const [reapplying, setReapplying] = useState(false);
 
@@ -96,14 +117,14 @@ export function App() {
 
   useEffect(() => {
     setVendor(undefined);
-    setVendorError('');
+    setVendorError("");
     setReapplying(false);
     if (!user) return undefined;
     return subscribeToVendor(
       user.uid,
       (snap) => {
         setVendor(snap);
-        setVendorError('');
+        setVendorError("");
       },
       (error) => setVendorError(describeDataError(error)),
     );
@@ -112,7 +133,7 @@ export function App() {
   const status = vendor?.record.status;
   // Leave "reapply" mode once the vendor resubmits or the admin acts.
   useEffect(() => {
-    if (status !== 'REJECTED') setReapplying(false);
+    if (status !== "REJECTED") setReapplying(false);
   }, [status]);
 
   if (authLoading) return <FullScreenLoader />;
@@ -120,37 +141,62 @@ export function App() {
 
   if (vendorError) {
     return (
-      <div className="min-h-screen flex items-center justify-center px-4" style={{ background: '#F5F5F5' }}>
+      <div
+        className="min-h-screen flex items-center justify-center px-4"
+        style={{ background: "#F5F5F5" }}
+      >
         <div className="max-w-sm w-full bg-white rounded-2xl border border-[#E5E5E5] p-6 text-center shadow-sm">
-          <h1 className="text-[16px] font-bold text-[#111] mb-2">Couldn't load your account</h1>
+          <h1 className="text-[16px] font-bold text-[#111] mb-2">
+            Couldn't load your account
+          </h1>
           <p className="text-[13px] text-[#666] mb-5">{vendorError}</p>
           <div className="flex gap-2 justify-center">
-            <Button variant="secondary" onClick={handleSignOut}>Sign out</Button>
-            <Button onClick={() => setListenerKey((k) => k + 1)}>Try again</Button>
+            <Button variant="secondary" onClick={handleSignOut}>
+              Sign out
+            </Button>
+            <Button onClick={() => setListenerKey((k) => k + 1)}>
+              Try again
+            </Button>
           </div>
         </div>
       </div>
     );
   }
 
-  if (vendor === undefined) return <FullScreenLoader label="Loading your account…" />;
+  if (vendor === undefined)
+    return <FullScreenLoader label="Loading your account…" />;
 
-  const phone = user.phoneNumber || vendor?.record.phone || '';
+  const phone = user.phoneNumber || vendor?.record.phone || "";
 
-  if (!vendor || status === 'INCOMPLETE' || status === 'CHANGES_REQUESTED' || (status === 'REJECTED' && reapplying)) {
+  if (
+    !vendor ||
+    status === "INCOMPLETE" ||
+    status === "CHANGES_REQUESTED" ||
+    (status === "REJECTED" && reapplying)
+  ) {
     const notice =
-      !vendor && getAuthIntent() === 'login'
+      !vendor && getAuthIntent() === "login"
         ? `No vendor account is registered to ${phone} yet. Complete the steps below to apply.`
         : undefined;
-    return <OnboardingWizard key={user.uid} record={vendor?.record ?? null} phone={phone} notice={notice} onSignOut={handleSignOut} />;
+    return (
+      <OnboardingWizard
+        key={user.uid}
+        record={vendor?.record ?? null}
+        phone={phone}
+        notice={notice}
+        onSignOut={handleSignOut}
+      />
+    );
   }
 
-  if (status !== 'APPROVED') {
+  if (status !== "APPROVED") {
     return (
       <AccountStatusScreen
         record={vendor.record}
         onSignOut={handleSignOut}
-        onReapply={status === 'REJECTED' ? () => setReapplying(true) : undefined}
+        onReapply={
+          status === "REJECTED" ? () => setReapplying(true) : undefined
+        }
       />
     );
   }
@@ -158,8 +204,14 @@ export function App() {
   return <VendorDashboard profile={vendor.profile} record={vendor.record} />;
 }
 
-function VendorDashboard({ profile, record }: { profile: VendorProfile; record: VendorRecord }) {
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+function VendorDashboard({
+  profile,
+  record,
+}: {
+  profile: VendorProfile;
+  record: VendorRecord;
+}) {
+  const [activeTab, setActiveTab] = useState<string>("dashboard");
   const [collapsed, setCollapsed] = useState<boolean>(false);
   const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
 
@@ -189,9 +241,12 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
       setDrivers(liveDrivers);
     });
 
-    const unsubActiveTrips = subscribeToVendorActiveTrips(vendorId, (liveActiveTrips) => {
-      setActiveTrips(liveActiveTrips);
-    });
+    const unsubActiveTrips = subscribeToVendorActiveTrips(
+      vendorId,
+      (liveActiveTrips) => {
+        setActiveTrips(liveActiveTrips);
+      },
+    );
 
     const unsubPayouts = subscribeToVendorPayouts(vendorId, (livePayouts) => {
       setPayoutRequests(livePayouts);
@@ -211,7 +266,7 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
     setMobileNavOpen(false);
   };
 
-  const meta = pageMeta[activeTab] || pageMeta['dashboard'];
+  const meta = pageMeta[activeTab] || pageMeta["dashboard"];
 
   // Fleet Handlers
   const handleAddVehicle = (newVehicle: FleetVehicle) => {
@@ -219,61 +274,81 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
     saveVehicleToFirestore(newVehicle, profile.id);
   };
 
-  const handleUpdateVehicleStatus = (vehicleId: string, status: FleetVehicle['status']) => {
-    setVehicles(prev => prev.map(v => {
-      if (v.id === vehicleId) {
-        const updated = { ...v, status };
-        saveVehicleToFirestore(updated, profile.id);
-        return updated;
-      }
-      return v;
-    }));
+  const handleUpdateVehicleStatus = (
+    vehicleId: string,
+    status: FleetVehicle["status"],
+  ) => {
+    setVehicles((prev) =>
+      prev.map((v) => {
+        if (v.id === vehicleId) {
+          const updated = { ...v, status };
+          saveVehicleToFirestore(updated, profile.id);
+          return updated;
+        }
+        return v;
+      }),
+    );
   };
 
   const handleAssignDriver = (vehicleId: string, driverId: string) => {
-    const driver = drivers.find(d => d.id === driverId);
-    setVehicles(prev => prev.map(v => {
-      if (v.id === vehicleId) {
-        const updated = {
-          ...v,
-          assignedDriverId: driverId || undefined,
-          assignedDriverName: driver?.name || undefined
-        };
-        saveVehicleToFirestore(updated, profile.id);
-        return updated;
-      }
-      return v;
-    }));
-
-    if (driver) {
-      setDrivers(prev => prev.map(d => {
-        if (d.id === driverId) {
+    const driver = drivers.find((d) => d.id === driverId);
+    setVehicles((prev) =>
+      prev.map((v) => {
+        if (v.id === vehicleId) {
           const updated = {
-            ...d,
-            assignedVehicleNumber: vehicles.find(v => v.id === vehicleId)?.vehicleNumber
+            ...v,
+            assignedDriverId: driverId || undefined,
+            assignedDriverName: driver?.name || undefined,
           };
+          saveVehicleToFirestore(updated, profile.id);
           return updated;
         }
-        return d;
-      }));
+        return v;
+      }),
+    );
+
+    if (driver) {
+      setDrivers((prev) =>
+        prev.map((d) => {
+          if (d.id === driverId) {
+            const updated = {
+              ...d,
+              assignedVehicleNumber: vehicles.find((v) => v.id === vehicleId)
+                ?.vehicleNumber,
+            };
+            return updated;
+          }
+          return d;
+        }),
+      );
     }
   };
 
   const handleAddDriver = (newDriver: FleetDriver) => {
     setDrivers([newDriver, ...drivers]);
-    inviteDriverByVendor(newDriver.phone, profile.id, profile.companyName, newDriver.assignedVehicleNumber);
+    inviteDriverByVendor(
+      newDriver.phone,
+      profile.id,
+      profile.companyName,
+      newDriver.assignedVehicleNumber,
+    );
   };
 
-  const handleUpdateDriverStatus = (driverId: string, status: FleetDriver['status']) => {
-    setDrivers(prev => prev.map(d => {
-      if (d.id === driverId) {
-        const updated = { ...d, status };
-        // We cannot update driver docs. Let's just simulate locally or remove this
-        // saveDriverToFirestore(updated, profile.id);
-        return updated;
-      }
-      return d;
-    }));
+  const handleUpdateDriverStatus = (
+    driverId: string,
+    status: FleetDriver["status"],
+  ) => {
+    setDrivers((prev) =>
+      prev.map((d) => {
+        if (d.id === driverId) {
+          const updated = { ...d, status };
+          // We cannot update driver docs. Let's just simulate locally or remove this
+          // saveDriverToFirestore(updated, profile.id);
+          return updated;
+        }
+        return d;
+      }),
+    );
   };
 
   // Marketplace & Bidding Handlers
@@ -281,28 +356,38 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
     const newVendorTrip: VendorTrip = {
       id: `VTRIP-${Date.now()}`,
       bookingId: trip.bookingId,
-      customerName: 'Verified Booking Customer',
-      customerPhone: '+91 98400 11223',
+      customerName: "Verified Booking Customer",
+      customerPhone: "+91 98400 11223",
       pickupAddress: trip.pickup.address,
       dropAddress: trip.drop.address,
       scheduledTime: `${trip.travelDate}, ${trip.pickup.time}`,
-      vehicleNumber: vehicles[0]?.vehicleNumber || 'TN 09 BX 4821',
-      driverId: drivers[0]?.id || 'DRV-7892',
-      driverName: drivers[0]?.name || 'Muthu Kumar',
-      driverPhone: drivers[0]?.phone || '+91 98450 12345',
+      vehicleNumber: vehicles[0]?.vehicleNumber || "TN 09 BX 4821",
+      driverId: drivers[0]?.id || "DRV-7892",
+      driverName: drivers[0]?.name || "Muthu Kumar",
+      driverPhone: drivers[0]?.phone || "+91 98450 12345",
       grossFare: trip.offeredPayout,
       platformFee: Math.round(trip.offeredPayout * 0.1),
       vendorPayout: Math.round(trip.offeredPayout * 0.9),
-      status: 'Assigned'
+      status: "Assigned",
     };
 
     setActiveTrips([newVendorTrip, ...activeTrips]);
-    setOpenTrips(prev => prev.filter(t => t.id !== trip.id));
-    setActiveTab('trips');
-    assignTripInFirestore(trip.id, newVendorTrip.driverId, newVendorTrip.driverName, newVendorTrip.vehicleNumber, profile.id);
+    setOpenTrips((prev) => prev.filter((t) => t.id !== trip.id));
+    setActiveTab("trips");
+    assignTripInFirestore(
+      trip.id,
+      newVendorTrip.driverId,
+      newVendorTrip.driverName,
+      newVendorTrip.vehicleNumber,
+      profile.id,
+    );
   };
 
-  const handleSubmitCounterBid = (trip: OpenTrip, counterRate: number, note: string) => {
+  const handleSubmitCounterBid = (
+    trip: OpenTrip,
+    counterRate: number,
+    note: string,
+  ) => {
     const newBid: BidProposal = {
       id: `BID-${Math.floor(100 + Math.random() * 900)}`,
       tripId: trip.id,
@@ -310,49 +395,81 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
       offeredPayout: trip.offeredPayout,
       vendorCounterRate: counterRate,
       biddingNote: note,
-      submittedAt: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }),
-      status: 'Pending Review'
+      submittedAt: new Date().toLocaleTimeString("en-IN", {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+      status: "Pending Review",
     };
 
     setBidProposals([newBid, ...bidProposals]);
-    submitBidToFirestore(newBid, profile.id, profile.companyName || 'Vendor Partner');
+    submitBidToFirestore(
+      newBid,
+      profile.id,
+      profile.companyName || "Vendor Partner",
+    );
   };
 
   // Dispatch Assignment
-  const handleAssignDriverAndVehicle = (tripId: string, driverId: string, vehicleNumber: string) => {
-    const driver = drivers.find(d => d.id === driverId);
-    setActiveTrips(prev => prev.map(t => t.id === tripId ? {
-      ...t,
-      driverId: driverId,
-      driverName: driver?.name || t.driverName,
-      driverPhone: driver?.phone || t.driverPhone,
-      vehicleNumber: vehicleNumber
-    } : t));
-    assignTripInFirestore(tripId, driverId, driver?.name || '', vehicleNumber, profile.id);
+  const handleAssignDriverAndVehicle = (
+    tripId: string,
+    driverId: string,
+    vehicleNumber: string,
+  ) => {
+    const driver = drivers.find((d) => d.id === driverId);
+    setActiveTrips((prev) =>
+      prev.map((t) =>
+        t.id === tripId
+          ? {
+              ...t,
+              driverId: driverId,
+              driverName: driver?.name || t.driverName,
+              driverPhone: driver?.phone || t.driverPhone,
+              vehicleNumber: vehicleNumber,
+            }
+          : t,
+      ),
+    );
+    assignTripInFirestore(
+      tripId,
+      driverId,
+      driver?.name || "",
+      vehicleNumber,
+      profile.id,
+    );
   };
 
   // Wallet Payout Request
-  const handleRequestPayout = (amount: number, method: 'UPI' | 'Bank Transfer', details: string) => {
+  const handleRequestPayout = (
+    amount: number,
+    method: "UPI" | "Bank Transfer",
+    details: string,
+  ) => {
     const newRequest: PayoutRequest = {
       id: `VPO-${Math.floor(100 + Math.random() * 900)}`,
       amount: amount,
-      requestedAt: new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }),
+      requestedAt: new Date().toLocaleString("en-IN", {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }),
       payoutMethod: method,
       targetDetails: details,
-      status: 'Pending'
+      status: "Pending",
     };
 
     setPayoutRequests([newRequest, ...payoutRequests]);
-    setWallet(prev => ({
+    setWallet((prev) => ({
       ...prev,
-      availableBalance: prev.availableBalance - amount
+      availableBalance: prev.availableBalance - amount,
     }));
     submitPayoutRequestToFirestore(newRequest, profile.id);
   };
 
   return (
-    <div className="h-screen flex overflow-hidden font-sans antialiased" style={{ background: '#F5F5F5' }}>
-      
+    <div
+      className="h-screen flex overflow-hidden font-sans antialiased"
+      style={{ background: "#F5F5F5" }}
+    >
       {/* Mobile overlay */}
       {mobileNavOpen && (
         <div
@@ -364,7 +481,7 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
       {/* Fixed Collapsible Sidebar */}
       <div
         className={`lg:relative fixed z-40 h-screen transition-transform duration-300 ${
-          mobileNavOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
+          mobileNavOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         }`}
       >
         <Sidebar
@@ -383,7 +500,7 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
       {/* Main Workspace */}
       <div
         className={`flex-1 flex flex-col min-w-0 h-screen overflow-hidden transition-all duration-300 ${
-          collapsed ? 'lg:ml-[68px]' : 'lg:ml-[240px]'
+          collapsed ? "lg:ml-[68px]" : "lg:ml-[240px]"
         }`}
       >
         {/* Mobile Hamburger Header */}
@@ -392,8 +509,18 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
             onClick={() => setMobileNavOpen(true)}
             className="w-10 h-10 bg-white rounded-lg shadow-md flex items-center justify-center border border-[#E5E5E5] text-[#111]"
           >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M4 6h16M4 12h16M4 18h16"
+              />
             </svg>
           </button>
         </div>
@@ -406,12 +533,14 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
           onNavigate={navigate}
           wallet={wallet}
           profile={profile}
-          pendingBidsCount={bidProposals.filter(b => b.status === 'Pending Review').length}
+          pendingBidsCount={
+            bidProposals.filter((b) => b.status === "Pending Review").length
+          }
         />
 
         {/* Scrollable View Content */}
         <main className="flex-1 overflow-y-auto min-h-0 p-4 sm:p-6 lg:p-8">
-          {activeTab === 'dashboard' && (
+          {activeTab === "dashboard" && (
             <DashboardScreen
               profile={profile}
               vehicles={vehicles}
@@ -423,7 +552,7 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
             />
           )}
 
-          {activeTab === 'fleet' && (
+          {activeTab === "fleet" && (
             <FleetScreen
               vehicles={vehicles}
               drivers={drivers}
@@ -433,7 +562,7 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
             />
           )}
 
-          {activeTab === 'drivers' && (
+          {activeTab === "drivers" && (
             <DriverManagementScreen
               drivers={drivers}
               vehicles={vehicles}
@@ -442,7 +571,7 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
             />
           )}
 
-          {activeTab === 'marketplace' && (
+          {activeTab === "marketplace" && (
             <MarketplaceBiddingScreen
               openTrips={openTrips}
               bidProposals={bidProposals}
@@ -451,7 +580,7 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
             />
           )}
 
-          {activeTab === 'trips' && (
+          {activeTab === "trips" && (
             <TripAssignmentScreen
               activeTrips={activeTrips}
               drivers={drivers}
@@ -460,7 +589,7 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
             />
           )}
 
-          {activeTab === 'wallet' && (
+          {activeTab === "wallet" && (
             <WalletPayoutScreen
               vendorId={profile.id}
               wallet={wallet}
@@ -470,12 +599,11 @@ function VendorDashboard({ profile, record }: { profile: VendorProfile; record: 
             />
           )}
 
-          {activeTab === 'documents' && (
+          {activeTab === "documents" && (
             <DocumentsVerificationScreen record={record} />
           )}
         </main>
       </div>
-
     </div>
   );
 }
