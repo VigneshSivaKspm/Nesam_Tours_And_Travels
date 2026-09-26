@@ -28,14 +28,15 @@ export default function Login({ onSignUp }: { onSignUp?: () => void }) {
     >
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div
-            className="w-14 h-14 rounded-2xl mx-auto mb-4 flex items-center justify-center text-white text-xl font-bold"
-            style={{ background: "#E21B23" }}
-          >
-            NT
-          </div>
+          <img
+            src="/icons/logo.png"
+            alt="Nesam Admin"
+            className="w-16 h-16 rounded-2xl object-contain bg-white border border-[#E5E5E5] p-2 mx-auto mb-4 shadow-sm"
+          />
           <h1 className="text-[19px] font-bold text-[#111111]">Nesam Admin</h1>
-          <p className="text-[13px] text-[#999] mt-1">Sign in to the Super Admin Panel</p>
+          <p className="text-[13px] text-[#999] mt-1">
+            Sign in to the Super Admin Panel
+          </p>
         </div>
 
         <form
@@ -43,9 +44,17 @@ export default function Login({ onSignUp }: { onSignUp?: () => void }) {
           className="bg-white rounded-2xl border border-[#E5E5E5] p-6 shadow-sm"
         >
           <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-[#111]">
-            <div className="font-bold text-[#E21B23] mb-1">🔑 Super Admin Credentials:</div>
-            <div>Email: <span className="font-mono font-semibold">admin@nesam.in</span></div>
-            <div>Password: <span className="font-mono font-semibold">Admin@123456</span></div>
+            <div className="font-bold text-[#E21B23] mb-1">
+              🔑 Super Admin Credentials:
+            </div>
+            <div>
+              Email:{" "}
+              <span className="font-mono font-semibold">admin@nesam.in</span>
+            </div>
+            <div>
+              Password:{" "}
+              <span className="font-mono font-semibold">Admin@123456</span>
+            </div>
           </div>
 
           {error && (

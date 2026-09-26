@@ -1,7 +1,11 @@
 import { useState, type FormEvent } from "react";
 import { signUpAdmin, describeAuthError } from "../services/authService";
 
-export default function Signup({ onBackToLogin }: { onBackToLogin: () => void }) {
+export default function Signup({
+  onBackToLogin,
+}: {
+  onBackToLogin: () => void;
+}) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -44,12 +48,11 @@ export default function Signup({ onBackToLogin }: { onBackToLogin: () => void })
     >
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div
-            className="w-14 h-14 rounded-2xl mx-auto mb-4 flex items-center justify-center text-white text-xl font-bold"
-            style={{ background: "#E21B23" }}
-          >
-            NT
-          </div>
+          <img
+            src="/icons/logo.png"
+            alt="Nesam Admin"
+            className="w-16 h-16 rounded-2xl object-contain bg-white border border-[#E5E5E5] p-2 mx-auto mb-4 shadow-sm"
+          />
           <h1 className="text-[19px] font-bold text-[#111111]">Nesam Admin</h1>
           <p className="text-[13px] text-[#999] mt-1">
             Request access to the Super Admin Panel
@@ -80,9 +83,10 @@ export default function Signup({ onBackToLogin }: { onBackToLogin: () => void })
               Account created
             </h2>
             <p className="text-[12px] text-[#666] mb-6">
-              Your request is pending approval. The platform team will grant Super
-              Admin access to <span className="font-semibold">{email}</span>.
-              You'll be able to sign in once approved.
+              Your request is pending approval. The platform team will grant
+              Super Admin access to{" "}
+              <span className="font-semibold">{email}</span>. You'll be able to
+              sign in once approved.
             </p>
             <button
               onClick={onBackToLogin}
