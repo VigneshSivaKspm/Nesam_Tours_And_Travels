@@ -141,9 +141,27 @@ export const subscribeReviews = (cb: (data: CustomerReview[]) => void) =>
 export const subscribePenalties = (cb: (data: PenaltyRecord[]) => void) =>
   subscribeToCollection<PenaltyRecord>(COLLECTIONS.PENALTIES, cb);
 
+import {
+  subscribeAdminNotifications,
+  subscribeOutboundNotifications,
+  markAdminNotificationRead,
+  markAllAdminNotificationsRead,
+  dismissAdminNotification,
+  sendAdminNotification,
+} from "./adminNotificationService";
+
+export {
+  subscribeAdminNotifications,
+  subscribeOutboundNotifications,
+  markAdminNotificationRead,
+  markAllAdminNotificationsRead,
+  dismissAdminNotification,
+  sendAdminNotification,
+};
+
 export const subscribeNotifications = (
   cb: (data: NotificationRecord[]) => void,
-) => subscribeToCollection<NotificationRecord>(COLLECTIONS.NOTIFICATIONS, cb);
+) => subscribeAdminNotifications(cb);
 
 export const subscribeStaff = (cb: (data: StaffMember[]) => void) =>
   subscribeToCollection<StaffMember>(COLLECTIONS.STAFF, cb);

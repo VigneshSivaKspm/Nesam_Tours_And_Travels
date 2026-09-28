@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { StaffMember } from "../types";
-import { roles } from "../config/constants";
+import { roles as initialRoles } from "../config/constants";
+import { staff as defaultMockStaff } from "../data/mockData";
 import { subscribeStaff, setFirestoreDocument, updateFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
 
 const statusStyle: Record<string, string> = {
@@ -20,6 +21,10 @@ export default function Staff() {
   const [activeTab, setActiveTab] = useState<"staff" | "roles">("staff");
   const [search, setSearch] = useState("");
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showAddRoleModal, setShowAddRoleModal] = useState(false);
+  const [newRoleName, setNewRoleName] = useState("");
+  const [rolesList, setRolesList] = useState(initialRoles);
+
   const [newStaff, setNewStaff] = useState({ name: '', email: '', phone: '', role: 'Booking Manager', status: 'Active' });
   const [staffList, setStaffList] = useState<StaffMember[]>([]);
 
@@ -27,6 +32,38 @@ export default function Staff() {
     const unsub = subscribeStaff(setStaffList);
     return () => unsub();
   }, []);
+
+  const displayStaff: StaffMember[] = staffList.length > 0 ? staffList : (defaultMockStaff as StaffMember[]);
+
+  const [seedingStaff, setSeedingStaff] = useState(false);
+  const handleSeedStaff = async () => {
+    setSeedingStaff(true);
+    try {
+      for (const s of defaultMockStaff) {
+        await setFirestoreDocument(COLLECTIONS.STAFF, s.id, s);
+      }
+      alert("Standard staff members successfully synchronized to Firestore!");
+    } catch (e: any) {
+      console.error(e);
+      alert("Error saving staff: " + (e?.message || e));
+    } finally {
+      setSeedingStaff(false);
+    }
+  };
+
+  const handleToggleStaffStatus = async (s: StaffMember) => {
+    const newStatus = s.status === "Active" ? "Inactive" : "Active";
+    setStaffList((prev) =>
+      (prev.length > 0 ? prev : (defaultMockStaff as StaffMember[])).map((item) =>
+        item.id === s.id ? { ...item, status: newStatus } : item,
+      ),
+    );
+    try {
+      await updateFirestoreDocument(COLLECTIONS.STAFF, s.id, { status: newStatus });
+    } catch (err) {
+      console.warn("Error updating staff status:", err);
+    }
+  };
 
   const handleAddStaff = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -42,12 +79,12 @@ export default function Staff() {
       phone: newStaff.phone.trim(),
       role: newStaff.role,
       status: newStaff.status as "Active" | "Inactive",
-      permissions: roles.find(r => r.name === newStaff.role)?.permissions || [],
+      permissions: rolesList.find(r => r.name === newStaff.role)?.permissions || [],
       lastLogin: 'Never'
     };
 
     // Optimistically update staff list immediately
-    setStaffList((prev) => [createdStaff, ...prev]);
+    setStaffList((prev) => [createdStaff, ...(prev.length > 0 ? prev : (defaultMockStaff as StaffMember[]))]);
     setShowAddModal(false);
     setNewStaff({ name: '', email: '', phone: '', role: 'Booking Manager', status: 'Active' });
 
@@ -59,7 +96,26 @@ export default function Staff() {
     }
   };
 
-  const filtered = staffList.filter((s) =>
+  const handleCreateRole = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newRoleName.trim()) return;
+    const exists = rolesList.some((r) => r.name.toLowerCase() === newRoleName.trim().toLowerCase());
+    if (exists) {
+      alert("A role with this name already exists.");
+      return;
+    }
+    const newRole = {
+      name: newRoleName.trim(),
+      permissions: ["Dashboard", "Bookings", "Notifications"],
+      color: "#8B5CF6",
+    };
+    setRolesList([...rolesList, newRole]);
+    setNewRoleName("");
+    setShowAddRoleModal(false);
+    alert(`Role "${newRole.name}" created successfully!`);
+  };
+
+  const filtered = displayStaff.filter((s) =>
     search === "" ||
     (s.name && s.name.toLowerCase().includes(search.toLowerCase())) ||
     (s.email && s.email.toLowerCase().includes(search.toLowerCase())) ||
@@ -71,10 +127,10 @@ export default function Staff() {
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: "Total Staff", value: staffList.length, color: "#E21B23" },
-          { label: "Active", value: staffList.filter((s: any) => s.status === "Active").length, color: "#10B981" },
-          { label: "Roles Defined", value: roles.length, color: "#3B82F6" },
-          { label: "Inactive", value: staffList.filter((s: any) => s.status === "Inactive").length, color: "#999" },
+          { label: "Total Staff", value: displayStaff.length, color: "#E21B23" },
+          { label: "Active", value: displayStaff.filter((s: any) => s.status === "Active").length, color: "#10B981" },
+          { label: "Roles Defined", value: rolesList.length, color: "#3B82F6" },
+          { label: "Inactive", value: displayStaff.filter((s: any) => s.status === "Inactive").length, color: "#999" },
         ].map((s) => (
           <div key={s.label} className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4">
             <div className="text-[22px] font-bold" style={{ color: s.color }}>{s.value}</div>
@@ -84,17 +140,30 @@ export default function Staff() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 bg-white rounded-xl border border-[#E5E5E5] p-1 w-fit shadow-sm">
-        {[{ key: "staff", label: "Staff Members" }, { key: "roles", label: "Roles & Permissions" }].map((t) => (
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex gap-1 bg-white rounded-xl border border-[#E5E5E5] p-1 w-fit shadow-sm">
+          {[{ key: "staff", label: "Staff Members" }, { key: "roles", label: "Roles & Permissions" }].map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setActiveTab(t.key as any)}
+              className={`px-5 py-2 rounded-lg text-[13px] font-semibold transition-all cursor-pointer ${activeTab === t.key ? "text-white shadow-sm" : "text-[#666] hover:text-[#111]"}`}
+              style={activeTab === t.key ? { background: "#E21B23" } : {}}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {staffList.length === 0 && (
           <button
-            key={t.key}
-            onClick={() => setActiveTab(t.key as any)}
-            className={`px-5 py-2 rounded-lg text-[13px] font-semibold transition-all ${activeTab === t.key ? "text-white shadow-sm" : "text-[#666] hover:text-[#111]"}`}
-            style={activeTab === t.key ? { background: "#E21B23" } : {}}
+            onClick={handleSeedStaff}
+            disabled={seedingStaff}
+            className="px-4 py-2 border border-amber-300 rounded-xl text-xs font-bold text-amber-900 bg-amber-50 hover:bg-amber-100 shadow-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
           >
-            {t.label}
+            <span>⚡</span>
+            <span>{seedingStaff ? "Syncing..." : "Sync Standard Staff to Cloud"}</span>
           </button>
-        ))}
+        )}
       </div>
 
       {/* Staff Table */}
@@ -112,7 +181,7 @@ export default function Staff() {
                 className="w-full pl-9 pr-4 py-2 text-[13px] bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23] placeholder-[#999]"
               />
             </div>
-            <button onClick={() => setShowAddModal(true)} className="ml-auto flex items-center gap-2 px-4 py-2 text-[12px] font-semibold text-white rounded-lg hover:opacity-90 transition-opacity" style={{ background: "#E21B23" }}>
+            <button onClick={() => setShowAddModal(true)} className="ml-auto flex items-center gap-2 px-4 py-2 text-[12px] font-semibold text-white rounded-lg hover:opacity-90 transition-opacity cursor-pointer" style={{ background: "#E21B23" }}>
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
               </svg>
@@ -131,57 +200,82 @@ export default function Staff() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((s, i) => (
-                    <tr key={i} className="table-row border-b border-[#F5F5F5] last:border-0">
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          <div
-                            className="w-9 h-9 rounded-full flex items-center justify-center text-white text-[11px] font-bold shrink-0"
-                            style={{ background: roleColors[s.role] || "#E21B23" }}
+                  {filtered.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="text-center py-12 text-[#999] text-xs">
+                        <div className="text-sm font-medium mb-2">No staff members match the search criteria.</div>
+                        {staffList.length === 0 && (
+                          <button
+                            onClick={handleSeedStaff}
+                            disabled={seedingStaff}
+                            className="px-4 py-2 text-xs font-semibold text-white rounded-lg shadow-sm hover:opacity-90 inline-flex items-center gap-2 cursor-pointer"
+                            style={{ backgroundColor: "#E21B23" }}
                           >
-                            {(s.name || 'Staff').split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
-                          </div>
-                          <div>
-                            <div className="text-[12px] font-semibold text-[#111]">{s.name}</div>
-                            <div className="text-[10px] text-[#999]">{s.email}</div>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span
-                          className="text-[11px] font-semibold px-2 py-0.5 rounded-full text-white"
-                          style={{ background: roleColors[s.role] || "#E21B23" }}
-                        >
-                          {s.role}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-[12px] text-[#666]">{s.phone}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex flex-wrap gap-1 max-w-[200px]">
-                          {(s.permissions || []).slice(0, 3).map((p, pi) => (
-                            <span key={pi} className="text-[9px] font-semibold px-1.5 py-0.5 bg-[#F5F5F5] text-[#666] rounded">{p}</span>
-                          ))}
-                          {(s.permissions || []).length > 3 && (
-                            <span className="text-[9px] font-semibold px-1.5 py-0.5 bg-[#F5F5F5] text-[#999] rounded">+{(s.permissions || []).length - 3} more</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${statusStyle[s.status]}`}>{s.status}</span>
-                      </td>
-                      <td className="px-4 py-3 text-[11px] text-[#666]">{s.lastLogin}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex gap-1">
-                          <button className="text-[11px] px-2 py-1 rounded-md border border-[#E5E5E5] hover:bg-[#FEF2F2] text-[#E21B23] font-medium transition-colors">Edit</button>
-                          {s.role !== "Super Admin" && (
-                            <button className="text-[11px] px-2 py-1 rounded-md border border-[#E5E5E5] hover:bg-[#F5F5F5] text-[#444] font-medium transition-colors">
-                              {s.status === "Active" ? "Deactivate" : "Activate"}
-                            </button>
-                          )}
-                        </div>
+                            <span>⚡</span>
+                            <span>Sync Standard Staff Members</span>
+                          </button>
+                        )}
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    filtered.map((s, i) => (
+                      <tr key={s.id || i} className="table-row border-b border-[#F5F5F5] last:border-0 hover:bg-[#FAFAFA] transition-colors">
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-3">
+                            <div
+                              className="w-9 h-9 rounded-full flex items-center justify-center text-white text-[11px] font-bold shrink-0"
+                              style={{ background: roleColors[s.role] || "#E21B23" }}
+                            >
+                              {(s.name || 'Staff').split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
+                            </div>
+                            <div>
+                              <div className="text-[12px] font-semibold text-[#111]">{s.name}</div>
+                              <div className="text-[10px] text-[#999]">{s.email}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className="text-[11px] font-semibold px-2 py-0.5 rounded-full text-white"
+                            style={{ background: roleColors[s.role] || "#E21B23" }}
+                          >
+                            {s.role}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-[12px] text-[#666]">{s.phone}</td>
+                        <td className="px-4 py-3">
+                          <div className="flex flex-wrap gap-1 max-w-[200px]">
+                            {(s.permissions || []).slice(0, 3).map((p, pi) => (
+                              <span key={pi} className="text-[9px] font-semibold px-1.5 py-0.5 bg-[#F5F5F5] text-[#666] rounded">{p}</span>
+                            ))}
+                            {(s.permissions || []).length > 3 && (
+                              <span className="text-[9px] font-semibold px-1.5 py-0.5 bg-[#F5F5F5] text-[#999] rounded">+{(s.permissions || []).length - 3} more</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${statusStyle[s.status]}`}>{s.status}</span>
+                        </td>
+                        <td className="px-4 py-3 text-[11px] text-[#666]">{s.lastLogin || "Active"}</td>
+                        <td className="px-4 py-3">
+                          <div className="flex gap-1.5">
+                            {s.role !== "Super Admin" && (
+                              <button
+                                onClick={() => handleToggleStaffStatus(s)}
+                                className={`text-[11px] px-2.5 py-1 rounded-md border font-medium transition-colors cursor-pointer ${
+                                  s.status === "Active"
+                                    ? "border-red-200 text-red-600 hover:bg-red-50"
+                                    : "border-green-200 text-green-700 hover:bg-green-50"
+                                }`}
+                              >
+                                {s.status === "Active" ? "Deactivate" : "Activate"}
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -195,10 +289,7 @@ export default function Staff() {
           <div className="flex justify-between items-center">
             <p className="text-[12px] text-[#666]">Define roles and control feature access for each staff category.</p>
             <button
-              onClick={() => {
-                const roleName = prompt("Enter new Role Name:");
-                if (roleName) alert(`Role "${roleName}" created with default permissions.`);
-              }}
+              onClick={() => setShowAddRoleModal(true)}
               className="flex items-center gap-2 px-4 py-2 text-[12px] font-semibold text-white rounded-lg hover:opacity-90 cursor-pointer"
               style={{ background: "#E21B23" }}
             >
@@ -209,24 +300,16 @@ export default function Staff() {
             </button>
           </div>
           <div className="grid grid-cols-1 gap-4">
-            {roles.map((role, i) => (
+            {rolesList.map((role, i) => (
               <div key={i} className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-3">
                     <div className="w-3 h-10 rounded-full" style={{ background: role.color }} />
                     <div>
                       <div className="text-[14px] font-bold text-[#111]">{role.name}</div>
-                      <div className="text-[11px] text-[#999] mt-0.5">{staffList.filter((s: any) => s.role === role.name).length} staff member{staffList.filter((s: any) => s.role === role.name).length !== 1 ? "s" : ""}</div>
+                      <div className="text-[11px] text-[#999] mt-0.5">{displayStaff.filter((s: any) => s.role === role.name).length} staff member{displayStaff.filter((s: any) => s.role === role.name).length !== 1 ? "s" : ""}</div>
                     </div>
                   </div>
-                  {role.name !== "Super Admin" && (
-                    <button
-                      onClick={() => alert(`Edit Role permissions for ${role.name}`)}
-                      className="text-[12px] font-semibold px-3 py-1.5 border border-[#E5E5E5] rounded-lg hover:bg-[#F5F5F5] text-[#444] cursor-pointer"
-                    >
-                      Edit Role
-                    </button>
-                  )}
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {role.permissions.map((p, pi) => (
@@ -245,19 +328,61 @@ export default function Staff() {
         </div>
       )}
 
+      {showAddRoleModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b pb-3">
+              <h3 className="text-base font-bold text-gray-900">Define New Role</h3>
+              <button onClick={() => setShowAddRoleModal(false)} className="text-gray-400 hover:text-gray-700 cursor-pointer">✕</button>
+            </div>
+            <form onSubmit={handleCreateRole} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">Role Title *</label>
+                <input
+                  required
+                  placeholder="e.g. Operations Coordinator"
+                  value={newRoleName}
+                  onChange={(e) => setNewRoleName(e.target.value)}
+                  className="w-full px-3 py-2 border rounded-lg text-xs focus:ring-2 focus:ring-red-500 focus:outline-none"
+                />
+              </div>
+              <p className="text-[11px] text-gray-500">
+                New roles will be assigned foundational Dashboard and Bookings access by default.
+              </p>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAddRoleModal(false)}
+                  className="px-3 py-1.5 text-xs text-gray-600 border rounded-lg hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-1.5 text-xs font-semibold text-white rounded-lg shadow"
+                  style={{ background: "#E21B23" }}
+                >
+                  Create Role
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl">
             <div className="flex items-center justify-between border-b pb-3">
               <h3 className="text-base font-bold text-gray-900">Add Staff Member</h3>
-              <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-gray-700">✕</button>
+              <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-gray-700 cursor-pointer">✕</button>
             </div>
             <div className="space-y-3">
               <input placeholder="Name *" className="w-full p-2 border rounded text-xs" required onChange={(e) => setNewStaff({...newStaff, name: e.target.value})} />
               <input placeholder="Email *" type="email" className="w-full p-2 border rounded text-xs" required onChange={(e) => setNewStaff({...newStaff, email: e.target.value})} />
               <input placeholder="Phone" type="tel" className="w-full p-2 border rounded text-xs" onChange={(e) => setNewStaff({...newStaff, phone: e.target.value})} />
               <select className="w-full p-2 border rounded text-xs" onChange={(e) => setNewStaff({...newStaff, role: e.target.value})}>
-                {roles.map(r => <option key={r.name}>{r.name}</option>)}
+                {rolesList.map(r => <option key={r.name}>{r.name}</option>)}
               </select>
               <select className="w-full p-2 border rounded text-xs" onChange={(e) => setNewStaff({...newStaff, status: e.target.value})}>
                 <option>Active</option><option>Inactive</option>

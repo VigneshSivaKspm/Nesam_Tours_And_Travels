@@ -419,6 +419,31 @@ export default function TourPackages() {
     }
   };
 
+  const handleSeedDefaultPackages = async () => {
+    setSaving(true);
+    try {
+      for (const tmpl of PRESET_PACKAGE_TEMPLATES) {
+        const docId = `PKG-${tmpl.code.substring(0, 12)}`;
+        await setFirestoreDocument(COLLECTIONS.TOUR_PACKAGES, docId, {
+          id: docId,
+          ...tmpl,
+          status: "Active",
+          published: true,
+          featured: true,
+          endingLocation: tmpl.destinations[tmpl.destinations.length - 1] || tmpl.startingLocation,
+          allowedVehicleCategoryIds: [],
+          allowedVehicleCategoryNames: ["Sedan", "SUV", "Innova", "Tempo Traveller"],
+          createdAt: new Date().toISOString(),
+        });
+      }
+      showToast("Standard tour packages loaded successfully!");
+    } catch (err) {
+      showToast("Failed to load tour packages.", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleApplyPreset = (tmplName: string) => {
     const tmpl = PRESET_PACKAGE_TEMPLATES.find((t) => t.name === tmplName);
     if (!tmpl) return;
@@ -674,16 +699,27 @@ export default function TourPackages() {
           </p>
         </div>
 
-        <button
-          onClick={handleOpenAdd}
-          className="flex items-center gap-2 px-4 py-2.5 text-[13px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 transition-all cursor-pointer"
-          style={{ background: "#E21B23" }}
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-          </svg>
-          + Add Tour Package
-        </button>
+        <div className="flex items-center gap-2">
+          {tourPackages.length === 0 && (
+            <button
+              onClick={handleSeedDefaultPackages}
+              disabled={saving}
+              className="flex items-center gap-1.5 px-4 py-2.5 text-[13px] font-semibold text-[#E21B23] bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg shadow-sm transition-all cursor-pointer"
+            >
+              ⚡ Load Standard Tour Packages
+            </button>
+          )}
+          <button
+            onClick={handleOpenAdd}
+            className="flex items-center gap-2 px-4 py-2.5 text-[13px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 transition-all cursor-pointer"
+            style={{ background: "#E21B23" }}
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+            + Add Tour Package
+          </button>
+        </div>
       </div>
 
       {/* Summary KPI Cards */}
@@ -748,17 +784,26 @@ export default function TourPackages() {
               />
             </svg>
           </div>
-          <h2 className="text-[18px] font-bold text-[#111111] mb-2">Tour Packages</h2>
+          <h2 className="text-[18px] font-bold text-[#111111] mb-2">Standard Tour Packages</h2>
           <p className="text-[13px] text-[#999999] max-w-sm mb-6">
             Create and manage tour packages with itineraries, pricing, vehicle assignments and vendor partnerships.
           </p>
-          <button
-            onClick={handleOpenAdd}
-            className="px-6 py-2.5 text-[13px] font-semibold text-white rounded-lg hover:opacity-90 transition-opacity cursor-pointer"
-            style={{ background: "#E21B23" }}
-          >
-            Get Started
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSeedDefaultPackages}
+              disabled={saving}
+              className="px-6 py-2.5 text-[13px] font-semibold text-white rounded-lg hover:opacity-90 transition-opacity cursor-pointer shadow-sm"
+              style={{ background: "#E21B23" }}
+            >
+              ⚡ Load Standard Tour Packages
+            </button>
+            <button
+              onClick={handleOpenAdd}
+              className="px-5 py-2.5 text-[13px] font-semibold text-[#444] bg-white border border-[#E5E5E5] rounded-lg hover:bg-gray-50 transition-colors cursor-pointer"
+            >
+              + Create Custom Package
+            </button>
+          </div>
         </div>
       ) : (
         /* Directory Grid & Controls */

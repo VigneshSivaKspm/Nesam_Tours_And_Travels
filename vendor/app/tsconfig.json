@@ -1,20 +1,10 @@
 {
+  "extends": "expo/tsconfig.base",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "lib": ["ES2022", "DOM"],
-    "jsx": "react-native",
-    "moduleResolution": "node",
-    "skipLibCheck": true,
-    "strict": false,
-    "allowSyntheticDefaultImports": true,
-    "esModuleInterop": true,
-    "baseUrl": ".",
-    "paths": {
-      "react-native": ["../../user/app/node_modules/react-native"],
-      "react": ["../../user/app/node_modules/react"]
-    },
-    "typeRoots": ["../../user/app/node_modules/@types", "./node_modules/@types"]
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "App.tsx"]
+  "include": ["App.tsx", "index.ts", "app.config.ts", "src/**/*.ts", "src/**/*.tsx"]
 }

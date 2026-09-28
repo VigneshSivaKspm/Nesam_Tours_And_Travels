@@ -1,139 +1,143 @@
-import React, { useState } from 'react';
-import { View, StyleSheet, SafeAreaView, StatusBar } from 'react-native';
-import { Colors } from './src/theme/colors';
-import { DriverStatus, TripDetails } from './src/types/driver';
-import { DEFAULT_DRIVER_PROFILE, DEFAULT_ACTIVE_TRIP, DEFAULT_AVAILABLE_TRIPS, DEFAULT_EARNINGS } from './src/config/constants';
+// Gatekeeper for the Driver app (native port of driver/web/src/App.tsx):
+// Firebase Auth user → drivers/{uid} snapshot → screen for the account state.
+// When an admin approves the driver the snapshot fires and the workspace
+// mounts immediately.
+import React, { useEffect, useState } from 'react';
+import { StatusBar } from 'expo-status-bar';
+import * as SplashScreen from 'expo-splash-screen';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { DefaultTheme, NavigationContainer } from '@react-navigation/native';
+import type { User } from 'firebase/auth';
+import { RecaptchaProvider } from './src/components/RecaptchaVerifier';
+import { NetworkBanner } from './src/components/NetworkBanner';
+import { FullScreenLoader } from './src/components/ui';
+import { AuthScreen } from './src/screens/auth/AuthScreen';
+import { getAuthIntent } from './src/screens/auth/authIntent';
+import { LoadErrorScreen, NoAccountScreen, VerificationStatusScreen } from './src/screens/auth/AccountStateScreens';
+import { RegistrationScreen } from './src/screens/RegistrationScreen';
+import { MainNavigator } from './src/navigation/MainNavigator';
+import { navigationRef } from './src/navigation/navigationRef';
+import { DriverDataProvider } from './src/context/DriverData';
+import { signOutUser, subscribeToAuthUser } from './src/services/authService';
+import { emptyRegistration, formatPhone, getDriverInvite, subscribeToDriverAccount, type DriverInvite } from './src/services/driverService';
+import type { DriverAccount } from './src/types/driver';
+import { describeError } from './src/utils/retry';
+import { colors } from './src/theme';
 
-import { DriverHeader } from './src/components/DriverHeader';
-import { BottomNav } from './src/components/BottomNav';
-import { HomeScreen } from './src/screens/HomeScreen';
-import { PreTripVerificationScreen } from './src/screens/PreTripVerificationScreen';
-import { TripExecutionScreen } from './src/screens/TripExecutionScreen';
-import { EarningsScreen } from './src/screens/EarningsScreen';
-import { WalletScreen } from './src/screens/WalletScreen';
-import { ProfileScreen } from './src/screens/ProfileScreen';
+void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
-export default function App() {
-  const [activeTab, setActiveTab] = useState<string>('home');
-  const [status, setStatus] = useState<DriverStatus>('Online');
+const navTheme = {
+  ...DefaultTheme,
+  colors: { ...DefaultTheme.colors, primary: colors.primary, background: colors.bg, card: colors.card, text: colors.ink, border: colors.border },
+};
 
-  const [activeTrip, setActiveTrip] = useState<TripDetails | null>(DEFAULT_ACTIVE_TRIP);
-  const [availableTrips, setAvailableTrips] = useState<TripDetails[]>(DEFAULT_AVAILABLE_TRIPS);
-  const [earnings, setEarnings] = useState(DEFAULT_EARNINGS);
+interface AccountState {
+  key: string;
+  account?: DriverAccount | null;
+  error: string;
+}
 
-  const [inPreTrip, setInPreTrip] = useState<boolean>(false);
+function Root() {
+  const [authUser, setAuthUser] = useState<User | null | undefined>(undefined);
+  const [accountState, setAccountState] = useState<AccountState>({ key: '', error: '' });
+  const [attempt, setAttempt] = useState(0);
+  const [invite, setInvite] = useState<{ uid: string; invite: DriverInvite | null } | null>(null);
+  const [registerAnyway, setRegisterAnyway] = useState(false);
+  const [resubmitting, setResubmitting] = useState(false);
 
-  const handleStatusToggle = (newStatus: DriverStatus) => {
-    setStatus(newStatus);
-  };
+  useEffect(() => subscribeToAuthUser(setAuthUser), []);
 
-  const handleAcceptTrip = (trip: TripDetails) => {
-    setActiveTrip({ ...trip, status: 'Assigned' });
-    setAvailableTrips(prev => prev.filter(t => t.id !== trip.id));
-    setActiveTab('home');
-  };
+  const uid = authUser?.uid;
+  const key = uid ? `${uid}#${attempt}` : '';
+  useEffect(() => {
+    if (!uid) return undefined;
+    const k = `${uid}#${attempt}`;
+    return subscribeToDriverAccount(
+      uid,
+      (account) => setAccountState({ key: k, account, error: '' }),
+      (e) => setAccountState({ key: k, error: describeError(e, 'Check your internet connection and try again.') }),
+    );
+  }, [uid, attempt]);
 
-  const handleCompletePreTrip = (startOdometer: number) => {
-    if (activeTrip) {
-      setActiveTrip({
-        ...activeTrip,
-        status: 'En Route Pickup',
-        startOdometer
-      });
-    }
-    setInPreTrip(false);
-    setActiveTab('trip');
-  };
+  const current = accountState.key === key ? accountState : null;
+  const account = current?.account;
+  const accountError = current?.error ?? '';
 
-  const handleUpdateTripStatus = (newTripStatus: any, extraData?: any) => {
-    if (!activeTrip) return;
-    const updated = {
-      ...activeTrip,
-      status: newTripStatus,
-      ...extraData
+  // An admin/vendor invite for this phone pre-fills the registration.
+  const phoneE164 = authUser?.phoneNumber ?? '';
+  const needsInvite = !!uid && account === null;
+  useEffect(() => {
+    if (!needsInvite || !uid) return undefined;
+    let alive = true;
+    void getDriverInvite(phoneE164).then((inv) => alive && setInvite({ uid, invite: inv }));
+    return () => {
+      alive = false;
     };
-    setActiveTrip(updated);
+  }, [needsInvite, uid, phoneE164]);
 
-    if (newTripStatus === 'Completed') {
-      const payout = (updated.driverEarnings || 702) + (updated.tollAmount || 0);
-      setEarnings(prev => ({
-        ...prev,
-        today: prev.today + payout,
-        walletBalance: prev.walletBalance + payout
-      }));
-    }
+  const resolved = authUser !== undefined && (!authUser || account !== undefined || !!accountError);
+  useEffect(() => {
+    if (resolved) void SplashScreen.hideAsync().catch(() => undefined);
+  }, [resolved]);
+
+  const signOut = () => {
+    setRegisterAnyway(false);
+    setResubmitting(false);
+    void signOutUser();
   };
+
+  if (authUser === undefined) return <FullScreenLoader />;
+  if (!authUser) return <AuthScreen />;
+  if (account === undefined && accountError) {
+    return <LoadErrorScreen message={accountError} onRetry={() => setAttempt((a) => a + 1)} onSignOut={signOut} />;
+  }
+  if (account === undefined) return <FullScreenLoader label="Loading your profile…" />;
+
+  if (account === null) {
+    if (getAuthIntent() === 'login' && !registerAnyway) {
+      return <NoAccountScreen phone={formatPhone(phoneE164)} onRegister={() => setRegisterAnyway(true)} onSignOut={signOut} />;
+    }
+    if (!invite || invite.uid !== authUser.uid) return <FullScreenLoader label="Preparing registration…" />;
+    const initial = emptyRegistration(formatPhone(phoneE164));
+    if (invite.invite?.name) initial.profile.name = invite.invite.name;
+    return <RegistrationScreen key={`signup-${authUser.uid}`} uid={authUser.uid} mode="signup" initial={initial} vendorName={invite.invite?.vendorName} onSignOut={signOut} />;
+  }
+
+  const status = account.driver.approvalStatus;
+  if (status === 'Rejected' && resubmitting) {
+    return (
+      <RegistrationScreen
+        key={`resubmit-${authUser.uid}`}
+        uid={authUser.uid}
+        mode="resubmit"
+        initial={account}
+        currentStatus={status}
+        rejectionReason={account.driver.rejectionReason}
+        onDone={() => setResubmitting(false)}
+        onCancel={() => setResubmitting(false)}
+        onSignOut={signOut}
+      />
+    );
+  }
+  if (status !== 'Approved') return <VerificationStatusScreen account={account} onSignOut={signOut} onResubmit={() => setResubmitting(true)} />;
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={Colors.black} />
-
-      {/* Header */}
-      <DriverHeader
-        status={status}
-        onStatusToggle={handleStatusToggle}
-        profile={MOCK_DRIVER_PROFILE}
-        walletBalance={earnings.walletBalance}
-      />
-
-      {/* Screen Routing */}
-      <View style={styles.screenContainer}>
-        {inPreTrip && activeTrip ? (
-          <PreTripVerificationScreen
-            trip={activeTrip}
-            onComplete={handleCompletePreTrip}
-            onCancel={() => setInPreTrip(false)}
-          />
-        ) : (
-          <>
-            {activeTab === 'home' && (
-              <HomeScreen
-                status={status}
-                onStatusToggle={handleStatusToggle}
-                profile={MOCK_DRIVER_PROFILE}
-                activeTrip={activeTrip}
-                availableTrips={availableTrips}
-                earnings={earnings}
-                onStartPreTrip={() => setInPreTrip(true)}
-                onContinueTrip={() => setActiveTab('trip')}
-                onAcceptTrip={handleAcceptTrip}
-              />
-            )}
-
-            {activeTab === 'trip' && activeTrip && (
-              <TripExecutionScreen
-                trip={activeTrip}
-                onUpdateStatus={handleUpdateTripStatus}
-              />
-            )}
-
-            {activeTab === 'earnings' && <EarningsScreen earnings={earnings} />}
-
-            {activeTab === 'wallet' && (
-              <WalletScreen
-                balance={earnings.walletBalance}
-                onRequestPayout={(amount) => {
-                  setEarnings(prev => ({ ...prev, walletBalance: prev.walletBalance - amount }));
-                }}
-              />
-            )}
-
-            {activeTab === 'profile' && <ProfileScreen profile={MOCK_DRIVER_PROFILE} />}
-          </>
-        )}
-      </View>
-
-      {/* Bottom Navigation */}
-      <BottomNav
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        hasActiveTrip={Boolean(activeTrip && activeTrip.status !== 'Completed')}
-      />
-    </SafeAreaView>
+    <DriverDataProvider key={account.driver.id} account={account}>
+      <MainNavigator onSignOut={signOut} />
+    </DriverDataProvider>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.black },
-  screenContainer: { flex: 1, backgroundColor: Colors.background }
-});
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <RecaptchaProvider>
+        <NavigationContainer ref={navigationRef} theme={navTheme}>
+          <StatusBar style="dark" />
+          <Root />
+          <NetworkBanner />
+        </NavigationContainer>
+      </RecaptchaProvider>
+    </SafeAreaProvider>
+  );
+}

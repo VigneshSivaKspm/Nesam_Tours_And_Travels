@@ -595,9 +595,6 @@ export default function Pricing() {
 
   // Auto-Populate Baseline Fare Rules
   const handleLoadPresets = async () => {
-    if (!window.confirm("Load preset baseline fare rules for Tamil Nadu Taxi Services?")) {
-      return;
-    }
     setLoading(true);
     let count = 0;
 
@@ -622,7 +619,7 @@ export default function Pricing() {
     }
 
     setLoading(false);
-    showToast(`Loaded ${count} preset fare rules successfully!`);
+    showToast(`Loaded ${count > 0 ? count : 'all'} preset fare rules successfully!`);
   };
 
   return (
@@ -645,17 +642,15 @@ export default function Pricing() {
         </div>
 
         <div className="flex items-center gap-2">
-          {fareRules.length > 0 && (
-            <button
-              onClick={handleLoadPresets}
-              className="px-3 py-2 text-xs font-semibold text-[#111111] bg-white border border-[#E5E5E5] rounded-xl hover:bg-gray-50 transition-all flex items-center gap-1.5 shadow-xs"
-            >
-              <svg className="w-3.5 h-3.5 text-[#E21B23]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-              </svg>
-              Auto-Populate Presets
-            </button>
-          )}
+          <button
+            onClick={handleLoadPresets}
+            className="px-3 py-2 text-xs font-semibold text-[#E21B23] bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
+          >
+            <svg className="w-3.5 h-3.5 text-[#E21B23]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            Auto-Populate Presets
+          </button>
 
           <button
             onClick={handleOpenCreate}

@@ -59,6 +59,12 @@ service firebase.storage {
       allow delete: if isAdmin() || (isSignedIn() && uid() == vendorId && vendorEditable(vendorId));
     }
 
+    // Customer profile photos: customers/{uid}/profile/avatar-{ts}.jpg
+    match /customers/{customerId}/{allPaths=**} {
+      allow read: if isAdmin() || (isSignedIn() && uid() == customerId);
+      allow write: if (isAdmin() || (isSignedIn() && uid() == customerId)) && validUpload();
+    }
+
     // Driver KYC + pre-trip photos. The driver's own vendor may view them.
     match /drivers/{driverId}/{allPaths=**} {
       allow read: if isAdmin()

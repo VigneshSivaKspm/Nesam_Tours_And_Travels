@@ -104,27 +104,14 @@ const pageMeta: Record<string, { title: string; breadcrumb: string[] }> = {
   reviews: { title: "Reviews & Ratings", breadcrumb: ["System", "Reviews"] },
   staff: { title: "Staff & Roles", breadcrumb: ["System", "Staff & Roles"] },
   settings: { title: "Settings", breadcrumb: ["System", "Settings"] },
+  support: {
+    title: "Support Tickets",
+    breadcrumb: ["Help & Support", "Support Tickets"],
+  },
 };
 
 // Generic placeholder pages (content pages not yet built)
-const genericPages: Record<string, { desc: string; icon: string }> = {
-  categories: {
-    desc: "Manage vehicle categories including Sedan, SUV, Innova, Tempo Traveller and configure fare rules per category.",
-    icon: "M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6z",
-  },
-  services: {
-    desc: "Configure Airport Taxi, Outstation Cab, One Way Taxi, Local Rental, Corporate and Recurring services.",
-    icon: "M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01",
-  },
-  offers: {
-    desc: "Create discount codes and promotional coupons with usage limits, expiry dates and service restrictions.",
-    icon: "M9 14l6-6m-5.5.5h.01m4.99 5h.01M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16l3.5-2 3.5 2 3.5-2 3.5 2z",
-  },
-  invoices: {
-    desc: "View, download and manage GST-compliant tax invoices for all completed bookings. Auto-generate customer receipts.",
-    icon: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z",
-  },
-};
+const genericPages: Record<string, { desc: string; icon: string }> = {};
 
 function AdminShell({ session }: { session: AdminSession }) {
   const [activePage, setActivePage] = useState("dashboard");
@@ -200,7 +187,7 @@ function AdminShell({ session }: { session: AdminSession }) {
       case "b2b":
         return <B2BIntegrations />;
       case "notifications":
-        return <NotificationsPage />;
+        return <NotificationsPage onNavigate={setActivePage} />;
       case "staff":
         return <StaffRoles />;
       case "services":
@@ -211,6 +198,8 @@ function AdminShell({ session }: { session: AdminSession }) {
         return <Locations />;
       case "pricing":
         return <Pricing />;
+      case "offers":
+        return <Offers />;
       case "reviews":
         return <Reviews />;
       case "settings":

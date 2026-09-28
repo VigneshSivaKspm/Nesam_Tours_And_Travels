@@ -1,16 +1,10 @@
 {
+  "extends": "expo/tsconfig.base",
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "lib": ["ES2022", "DOM"],
-    "jsx": "react-native",
-    "moduleResolution": "bundler",
-    "skipLibCheck": true,
     "strict": true,
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["src/*"]
-    }
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "App.tsx"]
+  "include": ["App.tsx", "index.ts", "app.config.ts", "src/**/*.ts", "src/**/*.tsx"]
 }

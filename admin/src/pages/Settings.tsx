@@ -48,23 +48,60 @@ export default function Settings() {
     setTimeout(() => setSaved(false), 2000);
   };
 
+  const DEFAULT_TRAVEL_SETTINGS = {
+    companyName: "Nesam Tours & Travels Pvt. Ltd.",
+    gst: "33AABCN1234F1Z5",
+    phone: "+91 44 4567 8901",
+    email: "info@nesamtours.in",
+    website: "www.nesamtours.in",
+    address: "No. 42, Mount Road, Anna Salai, Chennai - 600002, Tamil Nadu",
+    advanceBookingLimit: "30",
+    minBookingNotice: "2",
+    cancelWindow: "24",
+    cancelCharge: "10",
+    allowCod: true,
+    smsEnabled: true,
+    emailEnabled: true,
+    whatsappEnabled: true,
+    pushEnabled: true,
+    currency: "INR (₹)",
+    timezone: "Asia/Kolkata (IST)",
+    language: "English",
+    gstRate: "5",
+    upi: "nesamtours@hdfc",
+  };
+
+  const handleRestoreDefaults = () => {
+    setFormData(DEFAULT_TRAVEL_SETTINGS);
+  };
+
   return (
     <div className="p-6 space-y-5">
-      <div className="flex gap-1 bg-white rounded-xl border border-[#E5E5E5] p-1 w-fit shadow-sm">
-        {tabs.map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`px-5 py-2 rounded-lg text-[13px] font-semibold transition-all ${
-              activeTab === tab
-                ? "text-white shadow-sm"
-                : "text-[#666] hover:text-[#111]"
-            }`}
-            style={activeTab === tab ? { background: "#E21B23" } : {}}
-          >
-            {tab}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex gap-1 bg-white rounded-xl border border-[#E5E5E5] p-1 w-fit shadow-sm">
+          {tabs.map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`px-5 py-2 rounded-lg text-[13px] font-semibold transition-all cursor-pointer ${
+                activeTab === tab
+                  ? "text-white shadow-sm"
+                  : "text-[#666] hover:text-[#111]"
+              }`}
+              style={activeTab === tab ? { background: "#E21B23" } : {}}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
+
+        <button
+          onClick={handleRestoreDefaults}
+          className="px-4 py-2 border border-amber-300 rounded-xl text-xs font-bold text-amber-900 bg-amber-50 hover:bg-amber-100 shadow-xs flex items-center gap-1.5 cursor-pointer"
+        >
+          <span>⚡</span>
+          <span>Load Travel Agency Presets</span>
+        </button>
       </div>
 
       <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-6">
@@ -82,19 +119,22 @@ export default function Settings() {
                 {[
                   {
                     label: "Company Name",
-                    value: "Nesam Tours & Travels Private Limited",
+                    key: "companyName",
                   },
-                  { label: "GST Number", value: "33AABCN1234F1Z5" },
-                  { label: "Phone", value: "+91 44 4567 8901" },
-                  { label: "Email", value: "info@nesamtours.in" },
-                  { label: "Website", value: "www.nesamtours.in" },
+                  { label: "GST Number", key: "gst" },
+                  { label: "Phone", key: "phone" },
+                  { label: "Email", key: "email" },
+                  { label: "Website", key: "website" },
                 ].map((f) => (
                   <div key={f.label}>
                     <label className="text-[11px] font-semibold text-[#999] uppercase tracking-wide block mb-1.5">
                       {f.label}
                     </label>
                     <input
-                      defaultValue={f.value}
+                      value={formData[f.key] || ""}
+                      onChange={(e) =>
+                        setFormData({ ...formData, [f.key]: e.target.value })
+                      }
                       className="w-full px-3 py-2 text-[13px] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23] focus:ring-1 focus:ring-[#E21B23]/20 text-[#111]"
                     />
                   </div>

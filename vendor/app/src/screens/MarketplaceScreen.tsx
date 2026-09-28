@@ -1,117 +1,217 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, TextInput } from 'react-native';
-import { Colors } from '../theme/colors';
-import { OpenTrip } from '../types/vendor';
+// Open-trip feed, instant accept and counter-bidding (native port of
+// vendor/web MarketplaceBiddingScreen.tsx, wired to the real rules).
+import React, { useMemo, useState } from 'react';
+import { Alert, FlatList, StyleSheet, Text, TextInput, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useVendorData } from '../context/VendorData';
+import { Badge, Button, Card, EmptyState, Notice, Row, Segmented, Sheet, TextField } from '../components/ui';
+import { acceptOfferedRate, submitCounterBid, validateCounterRate, VendorActionError, withdrawBid } from '../services/vendorService';
+import type { MarketTrip, VendorBid } from '../types/operations';
+import { formatINR } from '../utils/format';
+import { describeDataError } from '../utils/retry';
+import { colors, radius, space, type } from '../theme';
 
-interface MarketplaceScreenProps {
-  openTrips: OpenTrip[];
-  onAcceptTrip: (trip: OpenTrip) => void;
+type Tab = 'feed' | 'bids';
+
+export function MarketplaceScreen() {
+  const { identity, marketTrips, bids, errors } = useVendorData();
+  const [tab, setTab] = useState<Tab>('feed');
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
+  const [bidTrip, setBidTrip] = useState<MarketTrip | null>(null);
+
+  const pendingByTrip = useMemo(() => {
+    const m = new Map<string, VendorBid>();
+    for (const b of bids) if (b.status === 'Pending Review' && !m.has(b.tripId)) m.set(b.tripId, b);
+    return m;
+  }, [bids]);
+
+  const accept = (trip: MarketTrip) =>
+    Alert.alert('Accept this trip?', `${trip.route}\nYour payout: ${formatINR(trip.offeredPayout)}\n\nYou will need to dispatch a driver from your fleet.`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Accept trip',
+        onPress: () => {
+          setBusyId(trip.id);
+          setMessage(null);
+          acceptOfferedRate(identity, trip)
+            .then(() => setMessage({ tone: 'success', text: `Trip ${trip.bookingId} is yours. Dispatch a driver from the Trips tab.` }))
+            .catch((e: unknown) => setMessage({ tone: 'error', text: e instanceof VendorActionError ? e.message : describeDataError(e) }))
+            .finally(() => setBusyId(null));
+        },
+      },
+    ]);
+
+  const withdraw = (bid: VendorBid) =>
+    Alert.alert('Withdraw bid?', `Your counter bid of ${formatINR(bid.vendorCounterRate)} will be removed.`, [
+      { text: 'Keep bid', style: 'cancel' },
+      {
+        text: 'Withdraw',
+        style: 'destructive',
+        onPress: () => {
+          withdrawBid(bid)
+            .then(() => setMessage({ tone: 'success', text: 'Bid withdrawn.' }))
+            .catch((e: unknown) => setMessage({ tone: 'error', text: e instanceof VendorActionError ? e.message : describeDataError(e) }));
+        },
+      },
+    ]);
+
+  return (
+    <SafeAreaView style={styles.root} edges={['top']}>
+      {bidTrip ? (
+        <BidSheet
+          key={bidTrip.id}
+          trip={bidTrip}
+          onClose={() => setBidTrip(null)}
+          onDone={() => {
+            setBidTrip(null);
+            setMessage({ tone: 'success', text: 'Counter bid submitted. NESAM will review it.' });
+          }}
+        />
+      ) : null}
+      <View style={styles.header}>
+        <Text style={type.h1}>Marketplace</Text>
+        <Text style={[type.small, { marginBottom: space.md }]}>Accept the offered rate instantly or submit a counter bid for NESAM review.</Text>
+        <Segmented
+          options={[
+            { value: 'feed', label: `Open trips (${marketTrips.length})` },
+            { value: 'bids', label: `My bids (${bids.length})` },
+          ]}
+          value={tab}
+          onChange={setTab}
+        />
+        {message ? <Notice tone={message.tone} message={message.text} style={{ marginTop: space.md, marginBottom: 0 }} /> : null}
+      </View>
+
+      {tab === 'feed' ? (
+        <FlatList
+          data={marketTrips}
+          keyExtractor={(t) => t.id}
+          contentContainerStyle={styles.list}
+          ListHeaderComponent={<Notice message={errors.market} />}
+          ListEmptyComponent={<EmptyState title="No open trips" message="New trip requests appear here the moment customers book." />}
+          renderItem={({ item: t }) => {
+            const myBid = pendingByTrip.get(t.id);
+            return (
+              <Card>
+                <View style={styles.rowBetween}>
+                  <Text style={type.tiny}>{t.bookingId}</Text>
+                  <Badge label={t.vehicleCategory || 'Any vehicle'} tone="warning" />
+                </View>
+                <Text style={[type.h3, { marginTop: 4 }]}>{t.route}</Text>
+                <Text style={type.small} numberOfLines={2}>
+                  Pickup: {t.pickup.address}
+                </Text>
+                <Text style={type.small} numberOfLines={2}>
+                  Drop: {t.drop.address}
+                </Text>
+                <Text style={type.small}>
+                  {t.travelDate || 'Date TBC'}
+                  {t.pickup.time ? ` · ${t.pickup.time}` : ''}
+                  {t.distanceKm ? ` · ${t.distanceKm} km` : ''}
+                  {t.service ? ` · ${t.service}` : ''}
+                  {t.tripType ? ` · ${t.tripType}` : ''}
+                </Text>
+                <View style={styles.payRow}>
+                  <View>
+                    <Text style={type.tiny}>OFFERED PAYOUT</Text>
+                    <Text style={styles.payout}>{formatINR(t.offeredPayout)}</Text>
+                  </View>
+                  {t.bidCount ? <Badge label={`${t.bidCount} bid${t.bidCount > 1 ? 's' : ''}`} tone="info" /> : null}
+                </View>
+                {myBid ? (
+                  <View style={styles.myBid}>
+                    <Text style={[type.small, { flex: 1 }]}>Your bid {formatINR(myBid.vendorCounterRate)} is under review.</Text>
+                    <Button small variant="ghost" title="Withdraw" onPress={() => withdraw(myBid)} />
+                  </View>
+                ) : null}
+                <View style={styles.actions}>
+                  <Button small variant="dark" title="Counter bid" disabled={!!myBid || busyId !== null} onPress={() => setBidTrip(t)} style={{ flex: 1 }} />
+                  <Button small title={busyId === t.id ? 'Accepting…' : 'Accept rate'} loading={busyId === t.id} disabled={busyId !== null} onPress={() => accept(t)} style={{ flex: 1 }} />
+                </View>
+              </Card>
+            );
+          }}
+        />
+      ) : (
+        <FlatList
+          data={bids}
+          keyExtractor={(b) => `${b.tripId}/${b.id}`}
+          contentContainerStyle={styles.list}
+          ListHeaderComponent={<Notice message={errors.bids} />}
+          ListEmptyComponent={<EmptyState title="No bids yet" message="Counter bids you submit appear here with their review status." />}
+          renderItem={({ item: b }) => (
+            <Card>
+              <View style={styles.rowBetween}>
+                <Text style={type.h3}>{b.bookingId}</Text>
+                <Badge label={b.status} tone={b.status === 'Accepted' ? 'success' : b.status === 'Pending Review' ? 'warning' : 'neutral'} />
+              </View>
+              <Row label="Offered payout" value={formatINR(b.offeredPayout)} />
+              <Row label="Your counter rate" value={formatINR(b.vendorCounterRate)} bold />
+              {b.biddingNote ? <Text style={type.small}>Note: {b.biddingNote}</Text> : null}
+              <Text style={type.tiny}>{b.submittedAt ? `Submitted ${b.submittedAt.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}` : 'Sending…'}</Text>
+              {b.status === 'Pending Review' ? <Button small variant="ghost" title="Withdraw bid" onPress={() => withdraw(b)} style={{ alignSelf: 'flex-start' }} /> : null}
+            </Card>
+          )}
+        />
+      )}
+    </SafeAreaView>
+  );
 }
 
-export const MarketplaceScreen: React.FC<MarketplaceScreenProps> = ({ openTrips, onAcceptTrip }) => {
-  const [selectedTrip, setSelectedTrip] = useState<OpenTrip | null>(null);
-  const [counterRate, setCounterRate] = useState<string>('4500');
-  const [successMsg, setSuccessMsg] = useState<boolean>(false);
+function BidSheet({ trip, onClose, onDone }: { trip: MarketTrip; onClose: () => void; onDone: () => void }) {
+  const { identity } = useVendorData();
+  const [rate, setRate] = useState(String(Math.round(trip.offeredPayout * 1.1) || ''));
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
-  const handleSubmitCounter = () => {
-    setSuccessMsg(true);
-    setSelectedTrip(null);
-    setTimeout(() => setSuccessMsg(false), 3000);
+  const submit = async () => {
+    const value = Number(rate);
+    const invalid = validateCounterRate(value, trip.offeredPayout);
+    if (invalid) return setError(invalid);
+    setBusy(true);
+    setError('');
+    try {
+      await submitCounterBid(identity, trip, value, note);
+      onDone();
+    } catch (e) {
+      setError(e instanceof VendorActionError ? e.message : describeDataError(e));
+    } finally {
+      setBusy(false);
+    }
+    return undefined;
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <View style={styles.banner}>
-        <Text style={styles.title}>Trip Marketplace Feed</Text>
-        <Text style={styles.sub}>Accept Offered Rate or Submit Counter Bid</Text>
-      </View>
-
-      {successMsg && (
-        <View style={styles.successBox}>
-          <Text style={styles.successText}>✓ Counter Bid Submitted to Customer & Admin!</Text>
-        </View>
-      )}
-
-      {openTrips.map(ot => (
-        <View key={ot.id} style={styles.card}>
-          <View style={styles.row}>
-            <Text style={styles.bookingId}>{ot.bookingId}</Text>
-            <Text style={styles.category}>{ot.vehicleCategory}</Text>
-          </View>
-          <Text style={styles.route}>{ot.route}</Text>
-          <Text style={styles.date}>Travel Date: {ot.travelDate}</Text>
-          
-          <View style={styles.footerRow}>
-            <Text style={styles.payout}>Offered: ₹{ot.offeredPayout}</Text>
-            <View style={styles.btnRow}>
-              <TouchableOpacity style={styles.bidBtn} onPress={() => setSelectedTrip(ot)}>
-                <Text style={styles.bidBtnText}>Counter Bid</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.acceptBtn} onPress={() => onAcceptTrip(ot)}>
-                <Text style={styles.acceptBtnText}>Accept Rate</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      ))}
-
-      {/* Counter Bid Prompt Modal / Section */}
-      {selectedTrip && (
-        <View style={styles.modalCard}>
-          <Text style={styles.modalTitle}>Submit Counter Bid: {selectedTrip.bookingId}</Text>
-          <Text style={styles.modalSub}>Customer Rate: ₹{selectedTrip.offeredPayout}</Text>
-
-          <Text style={styles.label}>Your Proposed Rate (₹)</Text>
-          <TextInput
-            style={styles.input}
-            value={counterRate}
-            onChangeText={setCounterRate}
-            keyboardType="numeric"
-          />
-
-          <TouchableOpacity style={styles.submitBtn} onPress={handleSubmitCounter}>
-            <Text style={styles.submitBtnText}>Submit Bid Proposal</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity onPress={() => setSelectedTrip(null)} style={{ marginTop: 8, alignItems: 'center' }}>
-            <Text style={{ color: Colors.secondaryText, fontSize: 11, fontWeight: '700' }}>Cancel</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-    </ScrollView>
+    <Sheet visible onClose={onClose} title={`Counter bid · ${trip.bookingId}`} dismissible={!busy}>
+      <Text style={[type.small, { marginBottom: space.md }]}>
+        {trip.route} · offered {formatINR(trip.offeredPayout)}
+      </Text>
+      <TextField label="Your counter rate (₹)" value={rate} onChangeText={(t) => setRate(t.replace(/\D/g, '').slice(0, 7))} keyboardType="number-pad" />
+      <Text style={[type.label, { marginBottom: 6 }]}>Note for NESAM (optional)</Text>
+      <TextInput
+        value={note}
+        onChangeText={(t) => setNote(t.slice(0, 300))}
+        placeholder="Vehicle, driver experience, anything that justifies your rate"
+        placeholderTextColor={colors.faint}
+        multiline
+        style={styles.note}
+      />
+      <Notice message={error} />
+      <Button title={busy ? 'Submitting…' : 'Submit counter bid'} loading={busy} onPress={() => void submit()} />
+    </Sheet>
   );
-};
+}
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background },
-  content: { padding: 16, paddingBottom: 40 },
-  banner: { backgroundColor: Colors.black, borderRadius: 16, padding: 16, marginBottom: 14 },
-  title: { color: Colors.white, fontSize: 18, fontWeight: '900' },
-  sub: { color: Colors.warning, fontSize: 11, fontWeight: '700', marginTop: 2 },
-  successBox: { backgroundColor: '#E6F4EA', padding: 12, borderRadius: 10, borderWidth: 1, borderColor: Colors.success, marginBottom: 12 },
-  successText: { color: Colors.success, fontWeight: '800', fontSize: 12, textAlign: 'center' },
-
-  card: { backgroundColor: Colors.white, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: Colors.border, marginBottom: 10 },
-  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  bookingId: { fontSize: 11, fontFamily: 'monospace', color: Colors.secondaryText },
-  category: { backgroundColor: '#FEF3C7', color: '#92400E', fontSize: 9, fontWeight: '900', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  route: { fontSize: 14, fontWeight: '800', color: Colors.black, marginTop: 4 },
-  date: { fontSize: 11, color: Colors.secondaryText, marginTop: 2 },
-  footerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: Colors.border },
-  payout: { fontSize: 16, fontWeight: '900', color: Colors.primary },
-  btnRow: { flexDirection: 'row', gap: 6 },
-  bidBtn: { backgroundColor: Colors.darkCharcoal, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
-  bidBtnText: { color: Colors.white, fontWeight: '800', fontSize: 11 },
-  acceptBtn: { backgroundColor: Colors.primary, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6 },
-  acceptBtnText: { color: Colors.white, fontWeight: '800', fontSize: 11 },
-
-  modalCard: { backgroundColor: Colors.white, borderRadius: 14, padding: 16, borderWidth: 2, borderColor: Colors.primary, marginTop: 10 },
-  modalTitle: { fontSize: 14, fontWeight: '800', color: Colors.black },
-  modalSub: { fontSize: 11, color: Colors.secondaryText, marginBottom: 8 },
-  label: { fontSize: 11, fontWeight: '700', color: Colors.black, marginTop: 4 },
-  input: { borderWidth: 1, borderColor: Colors.border, borderRadius: 8, padding: 10, fontSize: 16, fontWeight: '900', color: Colors.primary, marginTop: 4 },
-  submitBtn: { backgroundColor: Colors.primary, paddingVertical: 10, borderRadius: 8, alignItems: 'center', marginTop: 10 },
-  submitBtnText: { color: Colors.white, fontWeight: '900', fontSize: 12 }
+  root: { flex: 1, backgroundColor: colors.bg },
+  header: { padding: space.lg, paddingBottom: space.sm },
+  list: { padding: space.lg, paddingTop: space.sm, paddingBottom: space.xxl },
+  rowBetween: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: space.sm },
+  payRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: space.md },
+  payout: { fontSize: 22, fontWeight: '900', color: colors.primary },
+  myBid: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.warningSoft, borderRadius: radius.sm, paddingLeft: space.md, marginTop: space.sm },
+  actions: { flexDirection: 'row', gap: space.sm, marginTop: space.md },
+  note: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: space.md, minHeight: 72, textAlignVertical: 'top', color: colors.ink, marginBottom: space.md },
 });

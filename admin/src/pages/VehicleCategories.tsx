@@ -415,6 +415,39 @@ export default function VehicleCategories() {
     }
   };
 
+  const handleSeedDefaultCategories = async () => {
+    setSaving(true);
+    try {
+      const seeded: VehicleCategory[] = [];
+      for (const tmpl of PRESET_TEMPLATES) {
+        const id = `CAT-${tmpl.code}`;
+        const cat: VehicleCategory = {
+          id,
+          name: tmpl.name,
+          code: tmpl.code,
+          description: tmpl.description,
+          icon: tmpl.icon,
+          seatingCapacity: tmpl.seatingCapacity,
+          luggageCapacity: tmpl.luggageCapacity,
+          acSupported: tmpl.acSupported as any,
+          recommendedPassengers: tmpl.recommendedPassengers,
+          displayOrder: tmpl.displayOrder,
+          status: "Active",
+          fare: { ...tmpl.fare },
+        };
+        await setFirestoreDocument(COLLECTIONS.VEHICLE_CATEGORIES, id, cat);
+        seeded.push(cat);
+      }
+      setCategories(seeded);
+      showToast("Standard categories (Sedan, SUV, Innova, Crysta, Tempo) loaded!", "success");
+    } catch (err: any) {
+      console.warn("Error seeding vehicle categories:", err);
+      showToast("Failed to seed categories: " + err.message, "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   // Toggle status
   const handleToggleStatus = async (cat: VehicleCategory) => {
     const newStatus = cat.status === "Active" ? "Inactive" : "Active";
@@ -483,16 +516,24 @@ export default function VehicleCategories() {
           </p>
         </div>
 
-        <button
-          onClick={handleOpenAdd}
-          className="flex items-center gap-2 px-4 py-2.5 text-[13px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 transition-all cursor-pointer"
-          style={{ background: "#E21B23" }}
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-          </svg>
-          + Add Vehicle Category
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleSeedDefaultCategories}
+            className="flex items-center gap-2 px-3.5 py-2.5 text-[13px] font-semibold text-[#333] bg-white border border-[#DDD] rounded-lg shadow-xs hover:bg-gray-50 active:scale-95 transition-all cursor-pointer"
+          >
+            ⚡ Seed Standard Categories
+          </button>
+          <button
+            onClick={handleOpenAdd}
+            className="flex items-center gap-2 px-4 py-2.5 text-[13px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 transition-all cursor-pointer"
+            style={{ background: "#E21B23" }}
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+            + Add Vehicle Category
+          </button>
+        </div>
       </div>
 
       {/* Summary Stats Cards */}
@@ -561,13 +602,21 @@ export default function VehicleCategories() {
           <p className="text-[13px] text-[#999999] max-w-sm mb-6">
             Manage vehicle categories including Sedan, SUV, Innova, Tempo Traveller and configure fare rules per category.
           </p>
-          <button
-            onClick={handleOpenAdd}
-            className="px-6 py-2.5 text-[13px] font-semibold text-white rounded-lg hover:opacity-90 transition-opacity cursor-pointer"
-            style={{ background: "#E21B23" }}
-          >
-            Get Started
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSeedDefaultCategories}
+              className="px-5 py-2.5 text-[13px] font-semibold text-[#111] bg-white border border-[#DDD] rounded-lg hover:bg-gray-50 transition-all cursor-pointer shadow-xs"
+            >
+              ⚡ Load Standard Categories
+            </button>
+            <button
+              onClick={handleOpenAdd}
+              className="px-6 py-2.5 text-[13px] font-semibold text-white rounded-lg hover:opacity-90 transition-opacity cursor-pointer shadow-sm"
+              style={{ background: "#E21B23" }}
+            >
+              + Create Custom Category
+            </button>
+          </div>
         </div>
       ) : (
         /* Category Directory Table & Controls */

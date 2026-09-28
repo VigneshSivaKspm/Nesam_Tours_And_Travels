@@ -1,105 +1,140 @@
-import React from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
-import { Colors } from '../theme/colors';
+// Trip history with filters (port of user/web TripsHistoryScreen.tsx).
+import React, { useMemo, useState } from 'react';
+import { FlatList, RefreshControl, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useNavigation } from '@react-navigation/native';
+import { useCustomerData } from '../context/CustomerData';
+import { Badge, Button, EmptyState, Notice, Segmented } from '../components/ui';
+import { CancelRideSheet } from '../components/CancelRideSheet';
+import { isActiveStatus } from '../services/rideService';
+import type { TripRecord } from '../types';
+import { formatINR } from '../utils/format';
+import { colors, radius, space, type } from '../theme';
 
-interface TripsScreenProps {
-  onBack: () => void;
+type Filter = 'All' | 'Upcoming' | 'Completed' | 'Cancelled';
+
+const PHASE_LABEL: Record<TripRecord['phase'], string> = {
+  searching: 'Finding driver',
+  partner_confirmed: 'Confirmed',
+  driver_en_route: 'Driver on the way',
+  driver_arrived: 'Driver arrived',
+  in_trip: 'On trip',
+  completed: 'Completed',
+  cancelled: 'Cancelled',
+};
+
+function tone(phase: TripRecord['phase']) {
+  if (phase === 'completed') return 'success' as const;
+  if (phase === 'cancelled') return 'danger' as const;
+  if (phase === 'searching') return 'warning' as const;
+  if (phase === 'partner_confirmed') return 'info' as const;
+  return 'brand' as const;
 }
 
-export function TripsScreen({ onBack }: TripsScreenProps) {
-  const trips = [
-    {
-      id: 'NST99482',
-      date: '24 Aug 2026, 06:30 AM',
-      type: 'Outstation (One Way)',
-      route: 'Chennai Airport → Tidel Park, OMR',
-      vehicle: 'Toyota Innova Crysta',
-      driver: 'Senthil Nathan (+91 98400 12345)',
-      fare: 2850,
-      status: 'Confirmed',
-      paymentStatus: 'Paid (Razorpay)',
-      otp: '4920'
-    },
-    {
-      id: 'NST88120',
-      date: '18 Aug 2026, 09:00 AM',
-      type: 'Local Rental (8 hr / 80 km)',
-      route: 'Coimbatore Local City Package',
-      vehicle: 'Maruti Suzuki Dzire',
-      driver: 'Karthik Raja (+91 98450 67890)',
-      fare: 1800,
-      status: 'Completed',
-      paymentStatus: 'Paid',
-      otp: '9182'
-    }
-  ];
+export function TripsScreen() {
+  const navigation = useNavigation();
+  const { trips, tripsLoading, tripsError, retryTrips } = useCustomerData();
+  const [filter, setFilter] = useState<Filter>('All');
+  const [cancelTrip, setCancelTrip] = useState<TripRecord | null>(null);
+
+  const filtered = useMemo(
+    () =>
+      trips.filter((t) =>
+        filter === 'All' ? true : filter === 'Upcoming' ? isActiveStatus(t.status) : filter === 'Completed' ? t.status === 'Completed' : t.status === 'Cancelled',
+      ),
+    [trips, filter],
+  );
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <SafeAreaView style={styles.root} edges={['top']}>
+      <CancelRideSheet key={cancelTrip?.id ?? 'none'} trip={cancelTrip} onClose={() => setCancelTrip(null)} />
       <View style={styles.header}>
-        <TouchableOpacity onPress={onBack}>
-          <Text style={styles.backText}>← Back</Text>
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>My Trip Bookings & Invoices</Text>
+        <Text style={type.h1}>My trips</Text>
+        <Text style={type.small}>Track active rides, view receipts and rate past trips</Text>
+        <View style={{ height: space.md }} />
+        <Segmented
+          options={(['All', 'Upcoming', 'Completed', 'Cancelled'] as Filter[]).map((f) => ({ value: f, label: f }))}
+          value={filter}
+          onChange={setFilter}
+        />
       </View>
-
-      {trips.map(t => (
-        <View key={t.id} style={styles.card}>
-          <View style={styles.row}>
-            <Text style={styles.bookingId}>{t.id}</Text>
-            <Text style={[styles.statusTag, t.status === 'Completed' ? styles.statusCompleted : styles.statusConfirmed]}>
-              {t.status}
-            </Text>
-          </View>
-
-          <Text style={styles.routeText}>{t.route}</Text>
-          <Text style={styles.typeText}>{t.type} • {t.date}</Text>
-          <Text style={styles.driverText}>Driver: {t.driver}</Text>
-          <Text style={styles.vehicleText}>Vehicle: {t.vehicle}</Text>
-
-          <View style={styles.footerRow}>
-            <div>
-              <Text style={styles.fareLabel}>Total Fare Paid</Text>
-              <Text style={styles.fareVal}>₹{t.fare} <Text style={styles.payStatus}>({t.paymentStatus})</Text></Text>
-            </div>
-
-            <TouchableOpacity
-              style={styles.pdfBtn}
-              onPress={() => Alert.alert('Download Invoice', `PDF Tax Invoice for ${t.id} downloaded!`)}
-            >
-              <Text style={styles.pdfBtnText}>📄 PDF Invoice</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      ))}
-    </ScrollView>
+      <FlatList
+        data={filtered}
+        keyExtractor={(t) => t.id}
+        contentContainerStyle={{ padding: space.lg, paddingTop: 0 }}
+        refreshControl={<RefreshControl refreshing={false} onRefresh={retryTrips} colors={[colors.primary]} />}
+        ListHeaderComponent={tripsError ? <Notice message={tripsError} onRetry={retryTrips} /> : null}
+        ListEmptyComponent={
+          tripsLoading ? (
+            <Text style={[type.small, { textAlign: 'center', marginTop: space.xl }]}>Loading your trips…</Text>
+          ) : (
+            <EmptyState
+              title={`No ${filter === 'All' ? '' : `${filter.toLowerCase()} `}trips yet`}
+              message="Your rides will appear here."
+              action={<Button title="Book a ride" onPress={() => navigation.navigate('Tabs', { screen: 'Book' })} />}
+            />
+          )
+        }
+        renderItem={({ item: t }) => {
+          const needsRating = t.status === 'Completed' && t.rating == null;
+          return (
+            <View style={styles.card}>
+              <View style={styles.rowTop}>
+                <View style={{ flex: 1 }}>
+                  <Text style={type.tiny}>{t.bookingId}</Text>
+                  <Text style={styles.date}>
+                    {t.date}
+                    {t.time && t.time !== 'Now' ? ` · ${t.time}` : ''}
+                  </Text>
+                </View>
+                <Badge label={PHASE_LABEL[t.phase]} tone={tone(t.phase)} />
+              </View>
+              <View style={styles.place}>
+                <View style={[styles.dot, { backgroundColor: colors.success }]} />
+                <Text style={styles.placeText} numberOfLines={1}>
+                  {t.pickup.name}
+                </Text>
+              </View>
+              <View style={styles.place}>
+                <View style={[styles.dot, { backgroundColor: colors.primary, borderRadius: 2 }]} />
+                <Text style={styles.placeText} numberOfLines={1}>
+                  {t.drop.name}
+                </Text>
+              </View>
+              <View style={styles.fareRow}>
+                <Text style={[type.small, { flex: 1 }]} numberOfLines={1}>
+                  {t.categoryName}
+                  {t.driver ? ` · ${t.driver.name}` : ''}
+                </Text>
+                <Text style={type.h3}>{formatINR(t.fare + t.tollCharges)}</Text>
+              </View>
+              <View style={styles.actions}>
+                <Button
+                  small
+                  variant="dark"
+                  title={isActiveStatus(t.status) ? 'Track ride' : needsRating ? 'Receipt & rate' : 'View details'}
+                  onPress={() => navigation.navigate('ActiveRide', { bookingId: t.id })}
+                  style={{ flex: 1 }}
+                />
+                {['Pending', 'Confirmed'].includes(t.status) ? <Button small variant="secondary" title="Cancel" onPress={() => setCancelTrip(t)} /> : null}
+              </View>
+            </View>
+          );
+        }}
+      />
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.lightBg },
-  content: { padding: 16, paddingBottom: 40 },
-  header: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
-  backText: { color: Colors.primary, fontWeight: '800', fontSize: 13 },
-  headerTitle: { fontSize: 16, fontWeight: '900', color: Colors.black, marginLeft: 12 },
-
-  card: { backgroundColor: Colors.white, borderRadius: 14, padding: 14, borderWidth: 1, borderColor: Colors.border, marginBottom: 12 },
-  row: { flexDirection: 'row', justifyBetween: 'space-between', alignItems: 'center' },
-  bookingId: { fontSize: 11, fontFamily: 'monospace', color: Colors.textSecondary },
-  statusTag: { fontSize: 9, fontWeight: '900', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 },
-  statusConfirmed: { backgroundColor: '#DBEAFE', color: '#1E40AF' },
-  statusCompleted: { backgroundColor: '#E6F4EA', color: Colors.success },
-
-  routeText: { fontSize: 14, fontWeight: '800', color: Colors.black, marginTop: 4 },
-  typeText: { fontSize: 11, color: Colors.textSecondary, marginTop: 2 },
-  driverText: { fontSize: 11, color: Colors.black, marginTop: 4, fontWeight: '700' },
-  vehicleText: { fontSize: 11, color: Colors.textSecondary },
-
-  footerRow: { flexDirection: 'row', justifyBetween: 'space-between', alignItems: 'center', marginTop: 10, paddingTop: 8, borderTopWidth: 1, borderTopColor: Colors.border },
-  fareLabel: { fontSize: 9, color: Colors.textSecondary },
-  fareVal: { fontSize: 15, fontWeight: '900', color: Colors.primary },
-  payStatus: { fontSize: 10, color: Colors.textSecondary, fontWeight: 'normal' },
-
-  pdfBtn: { backgroundColor: Colors.black, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 6 },
-  pdfBtnText: { color: Colors.white, fontSize: 10, fontWeight: '800' }
+  root: { flex: 1, backgroundColor: colors.bg },
+  header: { padding: space.lg },
+  card: { backgroundColor: colors.card, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: space.lg, marginBottom: space.md },
+  rowTop: { flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginBottom: space.sm },
+  date: { fontSize: 13, fontWeight: '800', color: colors.ink },
+  place: { flexDirection: 'row', alignItems: 'center', gap: space.sm, marginBottom: 4 },
+  dot: { width: 8, height: 8, borderRadius: 4 },
+  placeText: { flex: 1, fontSize: 14, fontWeight: '700', color: colors.ink },
+  fareRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: colors.bg, borderRadius: radius.md, padding: space.md, marginTop: space.sm, gap: space.sm },
+  actions: { flexDirection: 'row', gap: space.sm, marginTop: space.md },
 });

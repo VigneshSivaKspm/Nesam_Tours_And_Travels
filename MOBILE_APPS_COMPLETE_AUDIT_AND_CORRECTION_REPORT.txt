@@ -1,0 +1,472 @@
+================================================================================
+ NESAM TOURS & TRAVELS
+ COMPLETE THREE MOBILE APPLICATION AUDIT
+ CUSTOMER + DRIVER + VENDOR
+================================================================================
+
+ Report date   : 28 Sep 2026
+ Repository    : C:\Users\User\Desktop\Legendary One\Nesam_Tours_And_Travels-main
+                 (branch master, clean at start; last commit 4df0f90)
+ Firebase      : nesamtoursandtravels-202f5
+ Report status : PHASE 1 COMPLETE (audit + verification).
+                 PHASE 2 (corrections / rebuild / Android builds) NOT STARTED —
+                 blocked by a local permission control, see section 32.
+
+ NOTE ON THE REQUESTED REPORT PATH
+   The brief asked for D:\LegendaryOne\Websites\nesamtravels\... . There is no
+   D: drive on this machine, so the report lives at the repository root.
+
+ NOTE ON THE MASTER SPECIFICATION
+   NESAM_COMPLETE_SYSTEM_WORKFLOW_AND_PAGE_SPECIFICATION.txt does not exist
+   anywhere in the repository (searched recursively). Source of truth used, in
+   order: (1) the Web apps, (2) firestore.rules / storage.rules / functions,
+   (3) NESAM_QA_TEST_REPORT.txt (25 Sep 2026 snapshot) for context only.
+   Where a Web app contradicts firestore.rules, the rules win, because the
+   rules are what the live backend enforces (see section 12).
+
+--------------------------------------------------------------------------------
+ 1. EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+
+ All three "mobile apps" are static UI prototypes, not applications:
+
+   Customer App (user/app)   — 911 lines. No Firebase, no auth, no network
+                               calls. Every screen renders hard-coded mock data.
+                               Crashes when "My Rides" opens (HTML <div> in a
+                               React Native tree). Cannot start at all: the
+                               declared entry file index.js does not exist.
+   Driver App   (driver/app) — 1,332 lines. Same state, plus a CRITICAL
+                               security defect: the boarding-OTP check accepts
+                               a universal bypass code '123456' and shows the
+                               passenger's OTP on the driver's screen.
+   Vendor App   (vendor/app) — 874 lines. Static mock of dashboard, fleet,
+                               marketplace, wallet. No onboarding, no bidding,
+                               no dispatch.
+
+ None of the three can be built into an Android artifact as they stand:
+ missing entry file, missing icon/splash assets, no android project, and an
+ Expo SDK (52) whose default target API (34) is below Google Play's current
+ target-API requirement.
+
+ Verdict: the existing mobile code has no reusable production logic. Every
+ required feature must be (re)implemented against the real backend, using the
+ Web apps and firestore.rules as the functional contract.
+
+ Shared backend: the emulator verification in section 30 CONFIRMED that the
+ current firestore.rules deny two core Customer Web operations — creating a
+ booking and cancelling a booking. This is a live defect in the Web product,
+ independent of the mobile work.
+
+--------------------------------------------------------------------------------
+ 2. REPOSITORY STRUCTURE (as found)
+--------------------------------------------------------------------------------
+
+   user/app     Expo prototype: App.tsx, app.json, package.json(+lock),
+                tsconfig.json, src/{components,config,data,screens,theme,types}
+   driver/app   Expo prototype: same layout, no lock file
+   vendor/app   Expo prototype: same layout, no lock file
+   user/web     Vite + React 19 + Firebase 12 (6,722 lines TS/TSX)
+   driver/web   Vite + React 19 + Firebase 12 (5,000 lines)
+   vendor/web   Vite + React 19 + Firebase 12 (6,996 lines)
+   admin/       Vite admin panel (23,975 lines)
+   functions/   Cloud Functions v2 (439 lines) — see BKD-06
+   firestore.rules (622 lines), storage.rules, firestore.indexes.json
+
+   Not present in any app: android/, ios/, assets/, index.js, babel/metro
+   config, tests, lint config, .env handling.
+
+--------------------------------------------------------------------------------
+ 3. TECHNOLOGY STACK
+--------------------------------------------------------------------------------
+
+                     Customer        Driver          Vendor
+   Framework         Expo ~52        Expo ~52        Expo ~52
+   React Native      0.76.6          0.76.6          0.76.6
+   React             18.3.1          18.3.1          18.3.1
+   TypeScript        yes, strict     yes, strict:false yes, strict:false
+   Navigation        none (useState tab switch in all three)
+   Firebase          none            none            none
+   Maps              none            none            none
+   Image/doc picker  none            none            none
+   Notifications     none            none            none
+   State mgmt        local useState only
+   Android pkg       com.nesamtours. com.nesamtours. com.nesamtours.
+                     customer        driver          vendor
+   targetSdk/minSdk  Expo 52 defaults (target 34 / min 24) — no android dir
+
+   Package IDs are unique and intentional; they will be KEPT unchanged.
+
+ Toolchain available on this machine
+   Node 24.18, npm 11.16, JDK 17.0.19 (Microsoft), Android SDK (platforms
+   31–36, build-tools 35/36, NDK 27.0/28.2, cmake 3.22), Gradle 8.x/9.2 caches,
+   firebase-tools 15.28.2, Firestore emulator jar 1.19.8.
+   NOT available: Android emulator binary, any system image, any attached
+   device → runtime testing on Android is not possible locally until an
+   emulator image is installed or a phone is connected.
+
+ Target stack chosen for the rebuild (Phase 2)
+   Expo SDK 57 (expo 57.0.25, react-native 0.86.3, react 19.2.3). SDK 52
+   defaults to target API 34, which Play no longer accepts. SDK 57 aligns
+   React with the Web apps (React 19).
+   Firebase JS SDK 12.19 (same SDK and project as the Web apps), auth persisted
+   with getReactNativePersistence(AsyncStorage).
+   React Navigation (native-stack + bottom-tabs) for auth gating and Android
+   back handling.
+   expo-location, expo-image-picker, expo-image-manipulator,
+   expo-document-picker (vendor PDFs), react-native-maps (key-gated, see
+   section 32), @react-native-community/netinfo, react-native-webview (used
+   only for Firebase's reCAPTCHA challenge; see section 15).
+
+--------------------------------------------------------------------------------
+ 4. WEB-TO-APP REUSE ANALYSIS
+--------------------------------------------------------------------------------
+
+ WEB FILE                                   APP DESTINATION                         CLASS              REASON
+ user/web/src/types/index.ts                user/app/src/types/index.ts             COPY_AS_BASE       domain model, statuses
+ user/web/src/utils/format.ts               user/app/src/utils/format.ts            COPY_AND_ADAPT     escapeHtml unused on native
+ user/web/src/utils/geo.ts                  user/app/src/utils/geo.ts               COPY_AS_BASE       pure
+ user/web/src/utils/retry.ts                user/app/src/utils/retry.ts             COPY_AND_ADAPT     navigator.onLine → NetInfo
+ user/web/src/config/constants.ts           user/app/src/config/constants.ts        COPY_AND_ADAPT     import.meta.env → expo config
+ user/web/src/services/pricingService.ts    user/app/src/services/pricingService.ts COPY_AS_BASE       fare engine + coupons
+ user/web/src/services/rideService.ts       user/app/src/services/rideService.ts    COPY_AND_ADAPT     crypto.getRandomValues →
+                                                                                                        expo-crypto; drop events
+                                                                                                        and cancellationFee
+                                                                                                        writes until BKD-01/02 fixed
+ user/web/src/services/userFirestoreService user/app/src/services/userService.ts    COPY_AND_ADAPT     typed support tickets
+ user/web/src/services/geoService.ts        user/app/src/services/geoService.ts     COPY_AND_ADAPT     browser geolocation →
+                                                                                                        expo-location; Photon/OSRM kept
+ user/web/src/services/storageService.ts    user/app/src/services/storageService.ts RECREATE_NATIVELY  canvas resize →
+                                                                                                        expo-image-manipulator
+ user/web/src/services/authService.ts       user/app/src/services/authService.ts    RECREATE_NATIVELY  DOM RecaptchaVerifier
+ user/web/src/services/firebase.ts          user/app/src/config/firebase.ts         RECREATE_NATIVELY  IndexedDB cache, App Check
+ user/web/src/components/RideMap.tsx        (native map component)                  RECREATE_NATIVELY  Leaflet
+ user/web/src/components/*.tsx, screens/*   native screens                          RECREATE_NATIVELY  DOM/Tailwind
+ driver/web/src/types.d.ts                  driver/app/src/types/driver.ts          COPY_AS_BASE
+ driver/web/src/services/driverFirestoreService.ts
+                                            driver/app/src/services/driverService.ts COPY_AND_ADAPT    claim → transaction,
+                                                                                                        add driverLocation
+ driver/web/src/services/storageService.ts  driver/app/src/services/storageService.ts RECREATE_NATIVELY
+ driver/web/src/screens/RegistrationScreen.tsx (validateStep only)
+                                            driver/app/src/validation/kyc.ts        COPY_AND_ADAPT     pure validators extracted
+ vendor/web/src/types.d.ts                  vendor/app/src/types/vendor.ts          COPY_AS_BASE
+ vendor/web/src/utils/validation.ts         vendor/app/src/utils/validation.ts      COPY_AS_BASE       GSTIN/PAN/IFSC/Aadhaar-Verhoeff
+ vendor/web/src/config/onboarding.ts        vendor/app/src/config/onboarding.ts     COPY_AS_BASE
+ vendor/web/src/services/onboardingService.ts
+                                            vendor/app/src/services/onboardingService.ts COPY_AND_ADAPT
+ vendor/web/src/services/storageService.ts  vendor/app/src/services/storageService.ts RECREATE_NATIVELY File → picker URI blob
+ vendor/web/src/services/vendorFirestoreService.ts
+                                            (rewritten against rules)               RECREATE_NATIVELY  web version writes
+                                                                                                        rule-violating shapes,
+                                                                                                        fake fallbacks (VEN-W1..3)
+ vendor/web/src/data/mockVendorData.ts      —                                       DO_NOT_COPY        mock data
+ */web/src/services/firebase.ts (App Check) —                                       DO_NOT_COPY        web reCAPTCHA Enterprise
+ functions/**, scripts/set-admin-claim.mjs  —                                       SERVER_ONLY
+
+ Migration trace (WEB SOURCE → APP DESTINATION → COPIED? → MODIFIED? → WHY)
+   NOT YET PERFORMED — Phase 2 is blocked (section 32). The table above is the
+   plan; this block will record the actual copies.
+
+--------------------------------------------------------------------------------
+ 5–9. ISSUES BY SEVERITY
+--------------------------------------------------------------------------------
+ Format: ID | Severity | App | File:line | Problem → Impact → Correction.
+ Status for every mobile issue: OPEN (correction blocked, see section 32).
+ Status for BKD issues: OPEN (fix planned, see section 28).
+
+ ---- CRITICAL ----
+ DRV-01  CRITICAL  Driver  src/screens/TripExecutionScreen.tsx:21, :85; src/types/driver.ts:26
+   Problem  : OTP check is `boardingOTP === trip.customerOTP || boardingOTP === '123456'`,
+              and the screen prints "Demo OTP: {trip.customerOTP}". The driver's
+              trip model carries the passenger's OTP.
+   Impact   : any driver can start any trip without the passenger present.
+   Root     : demo code. Correct model (rules L380–400): driver never reads
+              booking_secrets; submits otpAttempt; rules compare server-side.
+   Required : remove the model field, bypass and hint; submit otpAttempt via update.
+ CUS-01  CRITICAL  Customer  whole app
+   Problem  : no Firebase; all data mocked (src/config/constants.ts,
+              src/data/mockUserData.ts: user "Sriram", fixed trips).
+   Impact   : nothing the user does reaches the platform.
+ CUS-02  CRITICAL  Customer  no auth anywhere
+   Problem  : no phone/OTP login, no session, no profile detection, no logout.
+ CUS-03  CRITICAL  Customer  src/screens/TripsScreen.tsx:61–64
+   Problem  : HTML `<div>` inside React Native JSX.
+   Impact   : runtime crash (unknown host component) when "My Rides" opens.
+ CUS-04 / DRV-02 / VEN-02  CRITICAL  all  package.json "main": "index.js"
+   Problem  : entry file does not exist; no registerRootComponent.
+   Impact   : app cannot bundle or start.
+ DRV-03  CRITICAL  Driver  whole app — no Firebase, auth, KYC, marketplace (mock).
+ VEN-01  CRITICAL  Vendor  whole app — no Firebase, auth, onboarding (mock).
+ BKD-01  CRITICAL  Shared  firestore.rules (no match for bookings/{id}/events)
+   Problem  : Customer Web createRideRequest (rideService.ts:436) adds an
+              `events` sub-document in the same batch. No rule covers it →
+              default deny → the WHOLE batch is rejected.
+   Verified : emulator — "customer create booking + … + events" DENIED; same
+              batch without events ALLOWED.
+   Impact   : once these rules are deployed, NO customer can book on the Web.
+   Required : minimal rule for bookings/{b}/events/{e}: create by the booking's
+              customer / assigned driver / assigned vendor with actorId == uid;
+              read by participants + admin; no update/delete.
+ BKD-02  CRITICAL  Shared  firestore.rules L327 customerUpdateOk
+   Problem  : Customer Web cancelRide writes `cancellationFee`; the allow-list
+              omits it. The retry path (rideService.ts:536) sends the same field.
+   Verified : emulator — cancel with cancellationFee DENIED.
+   Impact   : customers can never cancel on the Web.
+   Required : allow 'cancellationFee' (number, >= 0) in the cancel allow-list.
+
+ ---- HIGH ----
+ CUS-05 / DRV-04a / VEN-04a  HIGH  all  app.json
+   icon.png / splash.png / adaptive-icon.png referenced, assets/ folder absent
+   → prebuild and Gradle build fail. Brand assets exist at */web/public/logo.png.
+ CUS-06  HIGH  Customer  src/types.d.ts:1–2
+   `declare module 'react'; declare module 'react-native';` turns every RN import
+   into `any`; this is why invalid style keys (CUS-09) compile.
+ DRV-04  HIGH  Driver  tsconfig.json paths/typeRoots → ../../user/app/node_modules
+ VEN-03  HIGH  Vendor  tsconfig.json — same cross-app dependency.
+   Both apps depend on another app's node_modules; not self-contained; strict:false.
+ CUS-07  HIGH  Customer  src/screens/BookingScreen.tsx:30–34, :162, :166
+   "Confirm & Pay" generates a random ID locally, shows hard-coded boarding OTP
+   "8842" and fake driver "Senthil Nathan (+91 98400 12345)". No write occurs.
+ CUS-08  HIGH  Customer  BookingScreen.tsx:22–28
+   Fare is constants (1200+1450+300+150 + 5%) instead of the platform fare
+   engine (vehicle_categories, base km, per-km/min, night, minimum fare,
+   outstation allowance, coupons, GST 5%) used by Web and written to bookings.
+ DRV-05  HIGH  Driver  TripExecutionScreen.tsx:74 — asks for a 6-digit OTP;
+   platform OTP is 4 digits (rules L425 otp.size()==4).
+ DRV-06  HIGH  Driver  src/screens/PreTripVerificationScreen.tsx:17–20
+   Pre-trip "photos" are pre-filled Unsplash URLs, so the mandatory safety
+   check is satisfied without capturing anything.
+ DRV-07  HIGH  Driver  App.tsx:30–34 — "accept" only mutates local state; no
+   atomic claim. (Backend claim itself is safe — see section 30.)
+ VEN-04  HIGH  Vendor  whole app — no onboarding wizard (5 steps), verification
+   status, bidding, dispatch, fleet documents, driver invites, payouts.
+ BKD-03  HIGH  Shared  firestore.rules — no rule for sos_alerts.
+   Verified: customer SOS create DENIED. Web Safety Centre "alert" silently fails.
+ BKD-05  HIGH  Shared  storage.rules — no customers/{uid}/ path (default deny).
+   Customer profile-photo upload (Web and future app) is denied.
+ BKD-06  HIGH  Shared  functions/src — inconsistent with the rules model
+   firestore.rules header states "no Cloud Functions, no custom claims", yet
+   functions/ defines: verifyBoardingOtp → sets status 'Trip Started' (not a
+   valid BookingStatus; normalised to Ongoing by Web but bypasses the rules'
+   OTP path); registerUser → creates vendors with status 'Pending' instead of
+   'INCOMPLETE'; onTripCompleted → skips every independent-driver trip (needs
+   assignedVendorId) and credits the SAME vendorPayout to vendor AND driver
+   walletBalance. No client calls these functions. Deployment status unknown.
+   Recommendation: do not deploy until reconciled; mobile apps will not call them.
+ VEN-W1  HIGH  Vendor Web (reference defect) vendor/web/src/App.tsx:355–383
+   "Accept offered rate" assigns a fabricated driver ("Muthu Kumar", DRV-7892,
+   "TN 09 BX 4821") and writes a rule-violating update; errors are swallowed
+   (vendorFirestoreService.ts:305) so the UI shows success. The mobile vendor
+   app must implement vendorClaimOk (rules L338) instead of copying this.
+
+ ---- MEDIUM ----
+ CUS-09  MEDIUM  Customer  invalid style key `justifyBetween`
+   BookingScreen.tsx:188, ProfileScreen.tsx:84, TripsScreen.tsx:87, :98 —
+   ignored by RN, rows render left-packed.
+ CUS-10  MEDIUM  Customer  ProfileScreen.tsx:17–20 — Save only toggles a banner;
+   the verified login phone is editable in a TextInput.
+ CUS-11  MEDIUM  Customer  missing vs Web: live ride tracking, boarding OTP
+   display (booking_secrets), cancellation policy/fees, safety/SOS, receipt,
+   rating/review, saved places, support tickets, notifications, offers,
+   wallet balance, device location, place search, coupons, scheduling with
+   30-min lead / 30-day limit, state restoration of the active ride.
+ CUS-14 / DRV-10 / VEN-05  MEDIUM  all  Expo SDK 52 → default target API 34,
+   below the Play Store target-API requirement.
+ DRV-08  MEDIUM  Driver  no six-stage KYC (personal, ID+licence, vehicle,
+   vehicle docs, bank, review), no camera/gallery uploads, no Pending /
+   Rejected / Suspended screens.
+ DRV-09  MEDIUM  Driver  earnings and wallet are static constants.
+ BKD-04  MEDIUM  Shared  driver_presence — no rule and no writer.
+   Verified: customer read DENIED. Web "N drivers nearby" is always empty.
+   Plan: mobile live tracking uses bookings.driverLocation, which rules
+   already allow (verified). An optional driver_presence rule is listed in
+   section 28.
+ BKD-07  MEDIUM  Shared  payout_requests create only checks amount > 0 (L490);
+   nothing ties the amount to the wallet. Admin must verify before paying.
+ BKD-08  MEDIUM  Shared  bookings create accepts any fare >= 0 (L320); a client
+   can book at ₹0. (Same as QA B5, still open.)
+ BKD-09  MEDIUM  Admin (reference) admin/src/pages/Marketplace.tsx:440–449
+   Bid award updates bookings/{trip.bookingId} — bookingId is the display code
+   ("NT…"), not the document id — so the award can miss the booking. Affects
+   end-to-end Flow 5 (Admin awards vendor).
+ BKD-10  MEDIUM  Shared  driver bank account number stored in drivers/{uid}
+   (driverFirestoreService.ts:269), which the linked vendor can read (rules L251).
+
+ ---- LOW / MINOR / COSMETIC ----
+ CUS-12  LOW    Customer  "PDF invoice" buttons show fake alerts (BookingScreen:174, TripsScreen:68).
+ CUS-13  LOW    all       react-native SafeAreaView (deprecated), no BackHandler handling.
+ CUS-15  MINOR  Customer  duplicate types in src/types/index.ts and src/data/mockUserData.ts.
+ CUS-16  MINOR  Customer  app.json userInterfaceStyle "dark" while the UI is light.
+ BKD-11  LOW    Web       Customer Safety Centre and Driver Web use +919840012345
+                          as the support number; the configured number is +918531970197.
+ BKD-12  LOW    Web       Customer OffersScreen filters coupons by `active == true`;
+                          coupons use `status` → the Offers list is always empty.
+
+--------------------------------------------------------------------------------
+ 10. TYPESCRIPT PROBLEMS
+--------------------------------------------------------------------------------
+   CUS-06 (module stubs hide all RN types), DRV-04/VEN-03 (strict:false,
+   borrowed typeRoots). `tsc` could not be run on the prototypes: no
+   node_modules installed and no lock files for driver/vendor.
+
+--------------------------------------------------------------------------------
+ 11. REACT NATIVE PROBLEMS
+--------------------------------------------------------------------------------
+   CUS-03 (<div>), CUS-09 (invalid style keys), CUS-13, missing entry (CUS-04).
+
+--------------------------------------------------------------------------------
+ 12. FIREBASE PROBLEMS
+--------------------------------------------------------------------------------
+   Mobile: no Firebase at all (CUS-01, DRV-03, VEN-01).
+   Shared: BKD-01..06.
+   Phone auth on native: the Web's DOM RecaptchaVerifier cannot be used.
+   Chosen approach: Firebase JS SDK 12.19 React Native build (verified to
+   export signInWithPhoneNumber / PhoneAuthProvider / getReactNativePersistence)
+   with an app-local reCAPTCHA verifier that satisfies the SDK's verifier
+   contract (type 'recaptcha', verify(), _reset() — confirmed in
+   @firebase/auth dist/rn). The token comes from Google's reCAPTCHA shown in a
+   WebView on the project's authorised authDomain. This is the same technique
+   expo-firebase-recaptcha used; it is NOT a WebView screen.
+   Risk: if reCAPTCHA Enterprise is ENFORCED for the Phone provider in the
+   Firebase console, JS-SDK phone auth on native fails; the fix then is native
+   @react-native-firebase/auth, which requires google-services.json.
+
+--------------------------------------------------------------------------------
+ 13. FIRESTORE SCHEMA INCONSISTENCIES
+--------------------------------------------------------------------------------
+   * Booking status vocabulary: Pending → Confirmed → Assigned → Ongoing →
+     Completed | Cancelled; tripStage: Assigned → En Route Pickup → Reached
+     Pickup → In Progress → Arrived Destination → Completed. Prototype apps use
+     'Driver Assigned', 'Trip Started' (Customer) — not platform values.
+     functions/otp.ts writes 'Trip Started' (BKD-06).
+   * Admin bid award sets status 'Assigned' with no driver; the customer view
+     must treat "Assigned without assignedDriverId" as partner-confirmed.
+   * Vendor status: canonical INCOMPLETE / PENDING_APPROVAL / CHANGES_REQUESTED
+     / APPROVED / REJECTED / SUSPENDED (legacy spellings still honoured by rules).
+   * Bid status 'Pending Review' (rules L474); Admin UI checks 'Pending' /
+     'Counter' → awards buttons never show for mobile/web vendor bids.
+   * Payout statuses: Pending → Paid | Deferred | Rejected (admin DriverEarnings).
+     No UTR field is written by Admin; apps can only display one if added.
+
+--------------------------------------------------------------------------------
+ 14. SECURITY PROBLEMS
+--------------------------------------------------------------------------------
+   DRV-01 (OTP bypass), CUS-07 (hard-coded OTP displayed), BKD-07, BKD-08,
+   BKD-10. Secret scan of the mobile folders: no service accounts, private
+   keys, Razorpay secrets or passwords. Public Firebase web config (apiKey etc.)
+   appears only in the Web apps; it is a client identifier, not a secret.
+
+--------------------------------------------------------------------------------
+ 15–24. AUTH / NAVIGATION / ANDROID / PERMISSIONS / UI / PERFORMANCE /
+        SUBSCRIPTIONS / OFFLINE / FORMS / ERROR HANDLING
+--------------------------------------------------------------------------------
+   Authentication  : absent in all three (CUS-02, DRV-03, VEN-01).
+   Navigation      : single useState tab switch; no back stack, no Android
+                     back handling, no auth gating, no restoration.
+   Android native  : no android project; entry + assets missing; SDK 52.
+   Permissions     : none declared (location, camera, media are needed).
+   UI/UX           : hard-coded names, fake success states, emoji icons.
+   Performance     : n/a (no data); lists use ScrollView+map.
+   Subscriptions   : none.
+   Offline/network : none.
+   Forms           : no validation anywhere (phone, email, IDs, IFSC, UPI).
+   Error handling  : none; the only feedback is fake Alert.alert().
+
+--------------------------------------------------------------------------------
+ 25. CUSTOMER APP FINDINGS   → CUS-01..16 above
+ 26. DRIVER APP FINDINGS     → DRV-01..10 above
+ 27. VENDOR APP FINDINGS     → VEN-01..05 above (+ VEN-W1 reference defect)
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+ 28. CHANGES REQUIRED
+--------------------------------------------------------------------------------
+ Mobile (all three apps): rebuild on Expo SDK 57 per section 3, porting the
+ Web features listed in CUS-11 / DRV-08 / VEN-04, keeping package IDs, with:
+   - no imports from */web (all logic copied into each app, section 4)
+   - atomic driver claim (transaction + existing rules)
+   - OTP only via otpAttempt; driver never reads booking_secrets
+   - vendor claim/bid/dispatch exactly per rules L338–375, L442–480
+   - live tracking via bookings.driverLocation (already permitted)
+   - Jest unit tests for pricing, coupons, cancellation policy, validators,
+     status derivation, wallet maths; emulator rules tests for every mobile
+     write shape.
+
+ Shared backend (minimal, needed by Web too):
+   BKD-01  add bookings/{b}/events/{e} create/read rule (participants only)
+   BKD-02  add 'cancellationFee' to customer cancel allow-list
+   BKD-03  add sos_alerts create (own booking) / read (owner+admin)
+   BKD-05  add storage path customers/{uid}/** (owner write, validUpload)
+   BKD-04  optional driver_presence rule (driver writes own doc)
+ Not changed without your decision: functions/ (BKD-06), admin (BKD-09),
+ fare trust (BKD-08, needs a server).
+
+--------------------------------------------------------------------------------
+ 29. CHANGES COMPLETED
+--------------------------------------------------------------------------------
+   None to application or backend code. Only this report was added.
+
+--------------------------------------------------------------------------------
+ 30. TESTS EXECUTED
+--------------------------------------------------------------------------------
+ Firestore rules verification — local emulator 1.19.8, repository
+ firestore.rules unmodified, @firebase/rules-unit-testing, payloads copied
+ from the Web services. Harness kept outside the repo (scratch directory).
+
+   PASS [expect deny ] customer booking batch incl. events sub-doc  → BKD-01 confirmed
+   PASS [expect allow] same batch without events
+   PASS [expect deny ] customer cancel with cancellationFee         → BKD-02 confirmed
+   PASS [expect deny ] customer creates sos_alerts                  → BKD-03 confirmed
+   PASS [expect deny ] customer reads driver_presence               → BKD-04 confirmed
+   PASS [expect deny ] driver reads booking_secrets                 (security OK)
+   PASS  two drivers claim the same trip concurrently → exactly 1 winner (security OK)
+   PASS [expect deny ] wrong OTP cannot start trip                  (security OK)
+   PASS [expect allow] correct OTP starts trip
+   PASS [expect allow] driver writes driverLocation during trip
+   PASS [expect allow] driver completes trip
+   PASS [expect deny ] completed trip cannot be restarted with OTP  (security OK)
+   Result: 12 / 12 behaved as predicted.
+
+ Not run: storage rules (the storage emulator needs JDK 21; JDK 17 is installed),
+ TypeScript on the prototypes (no dependencies installed), any build.
+
+--------------------------------------------------------------------------------
+ 31. BUILD RESULTS
+--------------------------------------------------------------------------------
+   Customer  NOT BUILT   Driver  NOT BUILT   Vendor  NOT BUILT
+   No APK or AAB exists. release-output/ was not created.
+
+--------------------------------------------------------------------------------
+ 32. REMAINING EXTERNAL REQUIREMENTS / BLOCKERS
+--------------------------------------------------------------------------------
+ B-0  LOCAL PERMISSION (blocks all of Phase 2)
+      Replacing the prototype files in user/app (git rm, and then even a
+      no-clobber copy of new files) was denied by the Claude Code auto-mode
+      classifier as "irreversible local destruction". The prototypes are
+      committed (4df0f90) and recoverable from git. Rebuilding the apps
+      necessarily overwrites/removes them, so this needs explicit approval.
+ B-1  Android release keystore — none in the repo. Release builds can be
+      produced unsigned (or debug-signed for testing); Play upload needs yours.
+ B-2  Google Maps Android API key — needed for in-app maps. Without it the
+      apps will show a map-free route card with "Open in Google Maps".
+ B-3  google-services.json per package (com.nesamtours.customer/driver/vendor)
+      — needed for FCM push. The backend also has no push sender function,
+      so push notifications are not deliverable today; in-app Firestore
+      notifications will be implemented instead.
+ B-4  Firebase console: Phone sign-in enabled, and reCAPTCHA Enterprise NOT
+      enforced for the Phone provider (section 12).
+ B-5  Rules deployment — the corrected firestore.rules / storage.rules must be
+      deployed (firebase deploy --only firestore:rules,storage).
+ B-6  Android emulator system image or a USB device for runtime testing.
+ B-7  Master specification file (not in repository).
+
+--------------------------------------------------------------------------------
+ 33. FINAL PRODUCTION READINESS STATUS
+--------------------------------------------------------------------------------
+   Customer App : BLOCKED — prototype only; rebuild not yet authorised (B-0)
+   Driver App   : BLOCKED — prototype only; contains OTP bypass (DRV-01)
+   Vendor App   : BLOCKED — prototype only
+   Shared rules : 2 CRITICAL live Web defects confirmed (BKD-01, BKD-02)
+
+   Issue counts (this audit): CRITICAL 9 · HIGH 14 · MEDIUM 11 · LOW 4 · MINOR 2
+   (an issue that affects all three apps identically is counted once)
+================================================================================

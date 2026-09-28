@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import {
   subscribeToCollection,
+  subscribeAdminNotifications,
   COLLECTIONS,
 } from "../services/adminFirestoreService";
 import { normalizeVendorStatus } from "../utils/vendorStatus";
@@ -215,6 +216,7 @@ export default function Sidebar({
     vendors: 0,
     drivers: 0,
     notifications: 0,
+    support: 0,
   });
 
   useEffect(() => {
@@ -258,11 +260,15 @@ export default function Sidebar({
         setBadges((prev) => ({ ...prev, drivers: pending }));
       },
     );
-    const unsubNotifs = subscribeToCollection(
-      "notifications",
+    const unsubNotifs = subscribeAdminNotifications((data) => {
+      const unread = data.filter((n) => !n.read).length;
+      setBadges((prev) => ({ ...prev, notifications: unread }));
+    });
+    const unsubSupport = subscribeToCollection(
+      "support_tickets",
       (data: any[]) => {
-        const unread = data.filter((n) => n.read === false).length;
-        setBadges((prev) => ({ ...prev, notifications: unread }));
+        const open = data.filter((t) => t.status === "Open" || !t.status).length;
+        setBadges((prev) => ({ ...prev, support: open }));
       },
     );
 
@@ -272,6 +278,7 @@ export default function Sidebar({
       unsubVendors();
       unsubDrivers();
       unsubNotifs();
+      unsubSupport();
     };
   }, []);
 
@@ -285,7 +292,8 @@ export default function Sidebar({
       return badges.drivers.toString();
     if (id === "notifications" && badges.notifications > 0)
       return badges.notifications.toString();
-    if (id === "support") return "3";
+    if (id === "support" && badges.support > 0)
+      return badges.support.toString();
     return undefined;
   };
 

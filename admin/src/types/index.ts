@@ -33,6 +33,10 @@ export interface Driver {
   phone: string;
   vehicle?: string;
   assignedVehicleNumber?: string;
+  vehicleNumber?: string;
+  vehicleType?: string;
+  presenceStatus?: string;
+  docStatus?: string;
   vendor?: string | null;
   license?: string;
   licenseNumber?: string;
@@ -59,7 +63,6 @@ export interface Driver {
     odometer?: boolean;
     rearSeat?: boolean;
   };
-  docStatus?: string;
   createdAt?: any;
 }
 
@@ -231,8 +234,17 @@ export interface NotificationRecord {
   type: string;
   title: string;
   message: string;
-  time: string;
+  time?: string;
   read: boolean;
+  createdAt?: any;
+  recipientId?: string;
+  recipientType?: "admin" | "driver" | "customer" | "vendor" | "all" | string;
+  recipientName?: string;
+  channel?: string;
+  actionUrl?: string;
+  priority?: "low" | "normal" | "high" | "urgent";
+  isSystemAlert?: boolean;
+  broadcast?: boolean;
 }
 
 export interface StaffMember {
@@ -256,7 +268,9 @@ export interface InvoiceItem {
   description: string;
   amount: number;
   qty?: number;
+  quantity?: number;
   rate?: number;
+  sacCode?: string;
 }
 
 export interface CompanySnapshot {

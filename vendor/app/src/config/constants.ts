@@ -1,31 +1,10 @@
-import { VendorProfile, FleetVehicle, OpenTrip, VendorTrip } from '../types/vendor';
+// Vendor app constants. Support contact matches the Customer / Driver apps.
+export const SUPPORT_PHONE = '+918531970197';
+export const SUPPORT_PHONE_DISPLAY = '85319 70197';
 
-export const DEFAULT_VENDOR_PROFILE: VendorProfile = {
-  companyName: 'Nesam Express Fleet Services',
-  gstin: '33AAACN9042K1Z8',
-  phone: '+91 98401 55667',
-  fleetCount: 12,
-  driverCount: 10
-};
+/** Vehicle categories offered when adding a fleet vehicle (match ride categories). */
+export const FLEET_CATEGORIES = ['Hatchback', 'Sedan', 'SUV', 'Premium SUV', 'Tempo Traveller', 'Mini Bus', 'Bus'] as const;
+export const FUEL_TYPES = ['Diesel', 'Petrol', 'CNG', 'Electric'] as const;
 
-export const DEFAULT_VEHICLES: FleetVehicle[] = [
-  {
-    id: 'V1',
-    vehicleNumber: 'TN 09 BX 4821',
-    category: 'Sedan',
-    makeModel: 'Maruti Suzuki Dzire',
-    assignedDriver: 'Muthu Kumar',
-    status: 'On Trip'
-  },
-  {
-    id: 'V2',
-    vehicleNumber: 'TN 01 CV 9820',
-    category: 'SUV',
-    makeModel: 'Toyota Innova Crysta',
-    assignedDriver: 'Karthik Raja',
-    status: 'Active'
-  }
-];
-
-export const DEFAULT_OPEN_TRIPS: OpenTrip[] = [];
-export const DEFAULT_ACTIVE_TRIPS: VendorTrip[] = [];
+/** Documents expiring within this many days are highlighted. */
+export const EXPIRY_WARNING_DAYS = 30;

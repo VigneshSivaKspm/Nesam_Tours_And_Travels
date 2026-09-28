@@ -321,12 +321,18 @@ service cloud.firestore {
     }
 
     // Customer may cancel (before the trip starts) or rate a completed trip.
+    // The cancellation fee the rider was quoted is recorded for the admin;
+    // it is informational (never a charge) and bounded.
     function customerUpdateOk() {
       let d = request.resource.data;
       return (
-               onlyChanges(['status', 'cancelReason', 'cancelledBy', 'cancelledAt', 'updatedAt'])
+               onlyChanges(['status', 'cancelReason', 'cancelledBy', 'cancelledAt',
+                            'cancellationFee', 'updatedAt'])
                && d.status == 'Cancelled'
                && resource.data.status in ['Pending', 'Confirmed', 'Assigned']
+               && d.get('cancellationFee', 0) is number
+               && d.get('cancellationFee', 0) >= 0
+               && d.get('cancellationFee', 0) <= 500
              ) || (
                onlyChanges(['rating', 'reviewComment', 'ratedAt', 'updatedAt'])
                && resource.data.status == 'Completed'
@@ -412,6 +418,41 @@ service cloud.firestore {
                     || driverClaimOk(bookingId)
                     || driverProgressOk(bookingId);
       allow delete: if isAdmin();
+    }
+
+    // Append-only audit trail written alongside booking changes (created,
+    // cancelled, rated, sos…). Only the booking's own customer, assigned
+    // driver or assigned vendor may add an entry, stamped with their own uid.
+    // bookingAfter() lets the entry ride in the same batch as the change.
+    function bookingParticipantAfter(id) {
+      let b = bookingAfter(id);
+      return b.get('customerId', '') == uid()
+             || b.get('assignedDriverId', '') == uid()
+             || b.get('assignedVendorId', '') == uid();
+    }
+    match /bookings/{bookingId}/events/{eventId} {
+      allow create: if isAdmin() || (
+                       isSignedIn()
+                       && request.resource.data.actorId == uid()
+                       && bookingParticipantAfter(bookingId)
+                     );
+      allow read: if isAdmin() || (
+                     isSignedIn()
+                     && (booking(bookingId).get('customerId', '') == uid()
+                         || booking(bookingId).get('assignedDriverId', '') == uid()
+                         || booking(bookingId).get('assignedVendorId', '') == uid())
+                   );
+      allow update, delete: if isAdmin();
+    }
+
+    // Rider SOS alerts for their own booking; handled by admins.
+    match /sos_alerts/{alertId} {
+      allow create: if isSignedIn()
+                     && request.resource.data.customerId == uid()
+                     && request.resource.data.status == 'Open'
+                     && booking(request.resource.data.bookingId).customerId == uid();
+      allow read: if isAdmin() || (isSignedIn() && resource.data.customerId == uid());
+      allow update, delete: if isAdmin();
     }
 
     // Boarding OTP lives apart from the booking so drivers/vendors (who can
@@ -560,6 +601,14 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
     match /coupons/{couponId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+    match /vehicles/{vehicleId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+    match /vehicle_categories/{catId} {
       allow read: if isSignedIn();
       allow write: if isAdmin();
     }

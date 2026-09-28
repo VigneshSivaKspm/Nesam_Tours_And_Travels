@@ -98,6 +98,8 @@ async function notifyDriver(driverId: string, title: string, message: string) {
   await addFirestoreDocument(COLLECTIONS.NOTIFICATIONS, {
     recipientId: driverId,
     recipientType: "driver",
+    type: "driver",
+    channel: "In-App",
     title,
     message,
     read: false,

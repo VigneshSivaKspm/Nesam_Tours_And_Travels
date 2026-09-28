@@ -1,69 +1,95 @@
-import React, { useState } from 'react';
-import { View, StyleSheet, SafeAreaView, StatusBar, TouchableOpacity, Text } from 'react-native';
-import { Colors } from './src/theme/colors';
-import { HomeScreen } from './src/screens/HomeScreen';
-import { BookingScreen } from './src/screens/BookingScreen';
-import { TripsScreen } from './src/screens/TripsScreen';
-import { ProfileScreen } from './src/screens/ProfileScreen';
+import React, { useEffect, useState } from 'react';
+import { StatusBar } from 'expo-status-bar';
+import * as SplashScreen from 'expo-splash-screen';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
+import type { User } from 'firebase/auth';
+import { RecaptchaProvider } from './src/components/RecaptchaVerifier';
+import { NetworkBanner } from './src/components/NetworkBanner';
+import { FullScreenLoader } from './src/components/ui';
+import { AuthScreen } from './src/screens/auth/AuthScreen';
+import { ProfileSetupScreen } from './src/screens/auth/ProfileSetupScreen';
+import { AccountHoldScreen, LoadErrorScreen } from './src/screens/auth/AccountStateScreens';
+import { MainNavigator } from './src/navigation/MainNavigator';
+import { navigationRef } from './src/navigation/navigationRef';
+import { CustomerDataProvider } from './src/context/CustomerData';
+import { signOutUser, subscribeToAuthUser } from './src/services/authService';
+import { subscribeToCustomerProfile } from './src/services/userService';
+import type { UserProfile } from './src/types';
+import { describeError } from './src/utils/retry';
+import { colors } from './src/theme';
 
-export default function App() {
-  const [activeTab, setActiveTab] = useState('home');
+void SplashScreen.preventAutoHideAsync().catch(() => undefined);
+
+const BLOCKED_STATUSES = ['Blocked', 'Suspended', 'Rejected', 'Inactive'];
+
+const navTheme = {
+  ...DefaultTheme,
+  colors: { ...DefaultTheme.colors, primary: colors.primary, background: colors.bg, card: colors.card, text: colors.ink, border: colors.border },
+};
+
+interface ProfileState {
+  /** The uid + attempt this result belongs to; stale results are ignored. */
+  key: string;
+  profile?: UserProfile | null;
+  error: string;
+}
+
+function Root() {
+  // undefined = still resolving; null = signed out / no profile doc yet.
+  const [authUser, setAuthUser] = useState<User | null | undefined>(undefined);
+  const [profileState, setProfileState] = useState<ProfileState>({ key: '', error: '' });
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => subscribeToAuthUser(setAuthUser), []);
+
+  const uid = authUser?.uid;
+  const key = uid ? `${uid}#${attempt}` : '';
+  useEffect(() => {
+    if (!uid) return undefined;
+    const k = `${uid}#${attempt}`;
+    return subscribeToCustomerProfile(
+      uid,
+      (p) => setProfileState({ key: k, profile: p, error: '' }),
+      (e) => setProfileState({ key: k, error: describeError(e, 'We couldn’t load your account.') }),
+    );
+  }, [uid, attempt]);
+
+  const current = profileState.key === key ? profileState : null;
+  const profile = current?.profile;
+  const profileError = current?.error ?? '';
+
+  const resolved = authUser !== undefined && (!authUser || profile !== undefined || !!profileError);
+  useEffect(() => {
+    if (resolved) void SplashScreen.hideAsync().catch(() => undefined);
+  }, [resolved]);
+
+  if (authUser === undefined) return <FullScreenLoader />;
+  if (!authUser) return <AuthScreen />;
+  if (profile === undefined && profileError) {
+    return <LoadErrorScreen message={profileError} onRetry={() => setAttempt((k) => k + 1)} onSignOut={() => void signOutUser()} />;
+  }
+  if (profile === undefined) return <FullScreenLoader label="Loading your account…" />;
+  if (profile === null) return <ProfileSetupScreen phone={authUser.phoneNumber ?? ''} />;
+  if (BLOCKED_STATUSES.includes(profile.status)) return <AccountHoldScreen status={profile.status} onSignOut={() => void signOutUser()} />;
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={Colors.black} />
-
-      <View style={styles.content}>
-        {activeTab === 'home' && (
-          <HomeScreen onStartBooking={() => setActiveTab('booking')} />
-        )}
-        {activeTab === 'booking' && (
-          <BookingScreen onBack={() => setActiveTab('home')} />
-        )}
-        {activeTab === 'trips' && (
-          <TripsScreen onBack={() => setActiveTab('home')} />
-        )}
-        {activeTab === 'profile' && (
-          <ProfileScreen onBack={() => setActiveTab('home')} />
-        )}
-      </View>
-
-      {/* Bottom Navigation */}
-      <View style={styles.bottomNav}>
-        {[
-          { id: 'home', label: 'Home', icon: '🏠' },
-          { id: 'booking', label: 'Book Ride', icon: '🚖' },
-          { id: 'trips', label: 'My Rides', icon: '📄' },
-          { id: 'profile', label: 'Profile', icon: '👤' }
-        ].map(t => (
-          <TouchableOpacity
-            key={t.id}
-            style={styles.navBtn}
-            onPress={() => setActiveTab(t.id as any)}
-          >
-            <Text style={styles.navIcon}>{t.icon}</Text>
-            <Text style={[styles.navLabel, activeTab === t.id && styles.navLabelActive]}>{t.label}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-    </SafeAreaView>
+    <CustomerDataProvider key={profile.uid} profile={profile}>
+      <MainNavigator />
+    </CustomerDataProvider>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.black },
-  content: { flex: 1, backgroundColor: Colors.lightBg },
-  bottomNav: {
-    backgroundColor: Colors.black,
-    flexDirection: 'row',
-    height: 60,
-    borderTopWidth: 1,
-    borderTopColor: '#262626',
-    alignItems: 'center',
-    justifyContent: 'space-around'
-  },
-  navBtn: { alignItems: 'center', justifyContent: 'center', flex: 1 },
-  navIcon: { fontSize: 18 },
-  navLabel: { color: '#9CA3AF', fontSize: 10, marginTop: 2, fontWeight: '600' },
-  navLabelActive: { color: Colors.primary, fontWeight: '900' }
-});
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <RecaptchaProvider>
+        <NavigationContainer ref={navigationRef} theme={navTheme}>
+          <StatusBar style="dark" />
+          <Root />
+          <NetworkBanner />
+        </NavigationContainer>
+      </RecaptchaProvider>
+    </SafeAreaProvider>
+  );
+}
