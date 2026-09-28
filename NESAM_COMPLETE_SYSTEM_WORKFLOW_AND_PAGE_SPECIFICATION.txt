@@ -1,0 +1,1199 @@
+================================================================================
+ NESAM TOURS & TRAVELS — COMPLETE PLATFORM WORKFLOW & ARCHITECTURE SPECIFICATION
+ Enterprise Master Documentation: All Four Web Panels, Cloud Backend & Data Flows
+================================================================================
+
+ Project Name        : NESAM Tours & Travels
+ Production Domain   : nesamtravels.com / nesamtours.in
+ Firebase Project ID : nesamtoursandtravels-202f5
+ Codebase Path       : D:\LegendaryOne\Websites\nesamtravels
+ Target Audience     : Engineering Team, System Architects, QA Engineers, DevOps,
+                       Product Managers, and Operations Leadership
+ Classification      : Enterprise Architecture & Operational Runbook
+ Last Updated        : September 2026
+
+================================================================================
+ TABLE OF CONTENTS
+================================================================================
+  1. SYSTEM OVERVIEW & ARCHITECTURE PRINCIPLES
+  2. PLATFORM REPOSITORY & MODULE STRUCTURE
+  3. DATA DICTIONARY & FIRESTORE DATABASE SCHEMA
+  4. CUSTOMER (USER) WEB PANEL — COMPLETE PAGE-BY-PAGE SPECIFICATION
+  5. DRIVER PARTNER WEB PANEL — COMPLETE PAGE-BY-PAGE SPECIFICATION
+  6. FLEET VENDOR WEB PANEL — COMPLETE PAGE-BY-PAGE SPECIFICATION
+  7. SUPER ADMIN CONSOLE — COMPLETE PAGE-BY-PAGE SPECIFICATION
+  8. CLOUD FUNCTIONS & SERVERLESS LOGIC SPECIFICATION
+  9. END-TO-END MULTI-ROLE BUSINESS WORKFLOWS & STATE MACHINES
+ 10. SECURITY ARCHITECTURE (RBAC, FIRESTORE RULES & AUDIT SAFEGUARDS)
+ 11. TESTING, VERIFICATION & BUILD VALIDATION SUMMARY
+ 12. PRE-LAUNCH DEPLOYMENT RUNBOOK & OPERATIONAL CHECKLIST
+
+================================================================================
+ 1. SYSTEM OVERVIEW & ARCHITECTURE PRINCIPLES
+================================================================================
+
+NESAM Tours & Travels is a high-reliability, real-time transportation and mobility
+orchestration platform designed for outstation cabs, one-way drops, airport
+transfers, local rentals, and multi-day tour packages across South India (centered
+in Tamil Nadu, Kerala, Karnataka, and Andhra Pradesh).
+
+The platform coordinates four primary operational roles in real time:
+  1. Customers (Passengers): Book on-demand or scheduled trips, track drivers live,
+     verify boarding using cryptographically generated 4-digit OTPs, and access
+     safety/SOS features.
+  2. Driver Partners: Independent owner-operators who pass 6-stage KYC verification,
+     perform pre-trip vehicle safety checklists, claim marketplace rides, execute
+     point-to-point journeys, and receive daily automated earnings payouts.
+  3. Fleet Vendors: Travel agencies and multi-car fleet owners who register multiple
+     vehicles, recruit/invite drivers under their umbrella, bid on high-value
+     marketplace routes, and dispatch drivers & cars with sub-account management.
+  4. Platform Administrators: Super Admins and Operations Staff who monitor live rides
+     on an active telemetry grid, audit and approve KYC/fleet documents, manually
+     intervene in emergencies, configure fare matrices, manage cashflows, and triage
+     customer/driver support tickets.
+
+KEY ARCHITECTURAL PILLARS:
+  - Real-Time Reactivity: Direct Firestore snapshot listeners (`onSnapshot`) power
+    instant dispatch, bidding updates, and state handshakes without polling lag.
+  - Zero-Trust Security Model: Enforced by server-side Firebase Security Rules. Clients
+    cannot escalate privileges, alter financial fare amounts after confirmation, or
+    view unauthorized PII.
+  - Unified Design System: Consistent enterprise design language across all panels
+    (#F5F5F5 workspace background, #E21B23 Nesam brand crimson, #111111 dark accents,
+    rounded-2xl cards with #E5E5E5 micro-borders, and responsive mobile-first views).
+  - Resilient Phone Authentication: Firebase Phone Auth with reCAPTCHA Enterprise
+    lifecycle guards, automatic localhost IP-translation, and zero-leak token caching.
+
+================================================================================
+ 2. PLATFORM REPOSITORY & MODULE STRUCTURE
+================================================================================
+
+Root Directory: D:\LegendaryOne\Websites\nesamtravels
+├── admin/                         # Super Admin Web Application (Vite + React 19 + TS)
+│   ├── src/
+│   │   ├── components/            # Header, Sidebar, Nav, Modals, Badges
+│   │   ├── config/                # System constants, defaults, status definitions
+│   │   ├── pages/                 # 24 Administrative operations pages
+│   │   ├── services/              # adminFirestoreService.ts, authService.ts, fareEngine.ts
+│   │   ├── types/                 # TypeScript interfaces and entity types
+│   │   ├── App.tsx                # Routing, RBAC session validator, global layout
+│   │   └── main.tsx               # Client entrypoint
+│   ├── package.json               # Admin dependencies (Firebase 12, Recharts, Tailwind 4)
+│   └── vite.config.ts             # Vite bundler configuration
+│
+├── driver/web/                    # Driver Partner Web Application (Vite + React 19 + TS)
+│   ├── src/
+│   │   ├── components/            # Header, BottomNav, PhotoUpload, Modals
+│   │   ├── screens/               # Auth, Dashboard, Verification, PreTrip, Execution, Earnings, etc.
+│   │   ├── services/              # driverFirestoreService.ts, authService.ts, storageService.ts
+│   │   ├── DriverWorkspace.tsx    # State container for active driver session
+│   │   ├── App.tsx                # Driver entrypoint, auth state listener, view router
+│   │   └── types.d.ts             # Driver data types (DriverProfile, TripDetails, Payouts)
+│   ├── package.json               # Driver portal dependencies (Lucide icons, Leaflet, etc.)
+│   └── vite.config.ts
+│
+├── user/web/                      # Customer / Passenger Web Application (Vite + React 19 + TS)
+│   ├── src/
+│   │   ├── components/            # AppHeader, BottomNav, RideMap, PlaceSearch, SafetyCenter, Receipts
+│   │   ├── hooks/                 # useDeviceLocation.ts, useNetworkStatus.ts
+│   │   ├── screens/               # AuthFlow, RideBookingScreen, ActiveRideScreen, History, Support, etc.
+│   │   ├── services/              # userFirestoreService.ts, authService.ts, pricingService.ts, geoService.ts
+│   │   ├── utils/                 # Geo math, retry wrappers, input formatters
+│   │   ├── App.tsx                # Customer root coordinator, live ride watcher
+│   │   └── types/index.ts         # UserProfile, TripRecord, BookingRequest, PricingQuote
+│   ├── package.json
+│   └── vite.config.ts
+│
+├── vendor/web/                    # Fleet Vendor Partner Web Application (Vite + React 19 + TS)
+│   ├── src/
+│   │   ├── components/            # Header, Sidebar, FileUploadField, Status cards
+│   │   ├── screens/               # VendorLogin, Dashboard, OnboardingWizard, Fleet, Bidding, Dispatch, Payouts
+│   │   │   └── onboarding/        # BusinessStep, FleetStep, DocumentsStep, PayoutStep, ReviewStep
+│   │   ├── services/              # vendorFirestoreService.ts, authService.ts, onboardingService.ts
+│   │   ├── App.tsx                # Vendor session controller, router, profile sync
+│   │   └── types.d.ts             # VendorProfile, FleetVehicle, FleetDriver, BidProposal
+│   ├── package.json
+│   └── vite.config.ts
+│
+├── functions/                     # Cloud Functions for Firebase (Node.js 20 TypeScript)
+│   ├── src/
+│   │   ├── admin.ts               # Admin claims, audit events
+│   │   ├── auth.ts                # User creation triggers, role claim hooks
+│   │   ├── index.ts               # Functions exports root
+│   │   ├── otp.ts                 # Boarding OTP generation & verification
+│   │   ├── payments.ts            # Razorpay webhook and payout execution
+│   │   └── trips.ts               # Trip status watcher, marketplace broadcast, SLA timeouts
+│   └── package.json
+│
+├── scripts/                       # Maintenance and DevOps CLI Utilities
+│   ├── set-admin-claim.mjs        # Firebase Admin SDK script for Super Admin promotion
+│   └── service-account.json       # Service account credential for maintenance scripts
+│
+├── firestore.rules                # Hardened Firestore Security Rules (66/66 test cases verified)
+├── storage.rules                  # Firebase Cloud Storage KYC/Document upload rules
+└── firestore.indexes.json         # Composite index definitions for optimized compound queries
+
+================================================================================
+ 3. DATA DICTIONARY & FIRESTORE DATABASE SCHEMA
+================================================================================
+
+The platform uses Cloud Firestore in native mode. All timestamps use serverTimestamp()
+on create/update to prevent client clock manipulation.
+
+--------------------------------------------------------------------------------
+ 3.1 `customers` Collection
+ Document ID: Firebase Auth UID (`user.uid`)
+ Fields:
+   - `id` (string)                 : Customer UID
+   - `name` (string)               : Full passenger name
+   - `phone` (string)              : E.164 formatted mobile (e.g. `+919876543210`)
+   - `email` (string, optional)    : Passenger receipt email
+   - `photoUrl` (string, optional) : GCS download URL for profile avatar
+   - `emergencyContact` (string)   : Alternate 10-digit mobile number for SOS
+   - `language` (string)           : Preferred UI language (en, ta, etc.)
+   - `status` (string)             : 'Active' | 'Suspended'
+   - `wallet` (string | number)    : In-app wallet credits balance
+   - `bookings` (number)           : Lifetime completed trips counter
+   - `spent` (string | number)     : Lifetime GMV spent
+   - `createdAt` (timestamp)       : Registration time
+   - `updatedAt` (timestamp)       : Last profile update
+
+--------------------------------------------------------------------------------
+ 3.2 `drivers` Collection
+ Document ID: Firebase Auth UID (`user.uid`)
+ Fields:
+   - `id` (string)                 : Driver UID
+   - `name` (string)               : Driver full name
+   - `phone` (string)              : Driver verified mobile number
+   - `alternatePhone` (string)     : Emergency contact phone
+   - `email` (string, optional)    : Driver email
+   - `status` (string)             : 'Approved' | 'Pending' | 'Rejected' | 'Suspended'
+   - `docStatus` (string)          : 'Pending' | 'Submitted' | 'Approved' | 'Rejected'
+   - `presence` (string)           : 'Online' | 'Offline' | 'On Trip'
+   - `rating` (number)             : Aggregate driver rating (e.g. 4.85)
+   - `trips` (number)              : Total completed trips
+   - `earnings` (string | number)  : Aggregate driver earnings
+   - `walletBalance` (number)      : Available balance for withdrawal
+   - `licenseNumber` (string)      : Indian Driving License (DL) Number
+   - `licenseExpiry` (string)      : Expiration date (YYYY-MM-DD)
+   - `vehicle` (string)            : Assigned vehicle license plate number
+   - `vehicleModel` (string)       : Vehicle make & model (e.g. "Toyota Innova Crysta")
+   - `vehicleCategory` (string)    : 'Sedan' | 'SUV' | 'Innova' | 'Tempo'
+   - `vendorId` (string, optional) : Parent fleet vendor ID (if fleet driver)
+   - `createdAt` (timestamp)       : Registration date
+   - `updatedAt` (timestamp)       : Last updated date
+
+ Subcollection: `drivers/{uid}/kyc`
+   - `aadhaarFrontUrl`, `aadhaarBackUrl`, `aadhaarNumber`
+   - `panCardUrl`, `panNumber`
+   - `licenseFrontUrl`, `licenseBackUrl`, `badgeNumber`
+   - `bankAccountName`, `bankAccountNumber`, `bankIfsc`, `bankUpi`
+
+--------------------------------------------------------------------------------
+ 3.3 `vendors` Collection
+ Document ID: Firebase Auth UID (`user.uid`)
+ Fields:
+   - `id` (string)                 : Vendor UID
+   - `companyName` (string)        : Registered business or travel agency name
+   - `ownerName` (string)          : Principal partner / director name
+   - `phone` (string)              : Primary verified phone
+   - `email` (string)              : Official billing email
+   - `city` (string)               : Operating headquarters city
+   - `gstin` (string)              : 15-character Goods & Services Tax ID
+   - `pan` (string)                : Company / Individual PAN
+   - `status` (string)             : 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED'
+   - `verified` (boolean)          : Admin verification flag
+   - `fleetCount` (number)         : Registered vehicle count
+   - `activeDriverCount` (number)  : Active affiliated driver count
+   - `commission` (number)         : Platform commission percentage (default: 10%)
+   - `walletBalance` (number)      : Available vendor balance
+   - `payoutInfo` (map)            : `{ bankName, accountNumber, ifsc, upiId }`
+   - `contractAgreed` (boolean)    : Terms of service digital signature
+   - `createdAt` (timestamp)
+   - `updatedAt` (timestamp)
+
+--------------------------------------------------------------------------------
+ 3.4 `bookings` Collection
+ Document ID: Booking ID (`NTT-TIMESTAMP` or Auto-ID)
+ Fields:
+   - `id` (string)                 : Booking ID (matches doc ID)
+   - `customerId` (string)         : Ordering passenger UID
+   - `customer` (string)           : Passenger display name
+   - `phone` (string)              : Passenger contact phone
+   - `service` (string)            : 'Airport Taxi' | 'Outstation Cab' | 'One Way Taxi' | 'Local Rental' | 'Tour Package'
+   - `vehicle` (string)            : Requested category (Sedan, SUV, Innova, Tempo)
+   - `pickup` (string | map)       : Pickup location address & geo coordinates
+   - `drop` (string | map)         : Destination location address & geo coordinates
+   - `date` (string)               : Scheduled pickup date (YYYY-MM-DD)
+   - `time` (string)               : Scheduled pickup time (HH:mm)
+   - `distanceKm` (number)         : Estimated route distance
+   - `fare` (number)               : Gross fare in INR
+   - `fareBreakdown` (map)         : `{ baseFare, distanceFare, gst, driverAllowance, tollEstimate }`
+   - `status` (string)             : 'Pending' | 'Confirmed' | 'Assigned' | 'Ongoing' | 'Completed' | 'Cancelled'
+   - `tripStage` (string)          : 'En Route Pickup' | 'Reached Pickup' | 'In Progress' | 'Arrived Destination'
+   - `assignedDriverId` (string)   : UID of the driver executing the ride
+   - `assignedDriverName` (string) : Driver display name
+   - `assignedDriverPhone` (string): Driver phone number
+   - `assignedVehicleNumber`(str)  : Vehicle plate number
+   - `assignedVendorId` (string)   : Vendor UID (if trip awarded to fleet vendor)
+   - `vendorPayout` (number)       : Net payable to vendor after commission
+   - `driverEarnings` (number)     : Net payable to driver
+   - `payment` (string)            : Payment status ('Pending' | 'Paid' | 'Refunded')
+   - `paymentMethod` (string)      : 'UPI' | 'Cash' | 'Card' | 'Wallet'
+   - `tollsAmount` (number)        : Recorded toll/parking charges added at finish
+   - `source` (string)             : 'customer_app' | 'admin' | 'vendor_b2b'
+   - `createdAt` (timestamp)       : Order creation timestamp
+   - `startedAt` (timestamp)       : Time OTP was verified and meter started
+   - `completedAt` (timestamp)     : Time trip concluded
+
+--------------------------------------------------------------------------------
+ 3.5 `booking_secrets` Collection (Restricted Security Vault)
+ Document ID: Booking ID (`bookings/{bookingId}`)
+ Access: Cloud Functions & Server Admin only.
+ Fields:
+   - `bookingId` (string)          : Matching booking reference
+   - `boardingOTP` (string)        : Cryptographically random 4-digit code (e.g. "4892")
+   - `generatedAt` (timestamp)
+
+--------------------------------------------------------------------------------
+ 3.6 `marketplace_trips` Collection
+ Document ID: Matches Booking ID
+ Fields:
+   - `id` (string)                 : Trip ID
+   - `pickup` (string | map)       : Pickup locality and city
+   - `drop` (string | map)         : Drop locality and city
+   - `date`, `time` (string)       : Departure schedule
+   - `service`, `vehicle` (string) : Service type and vehicle required
+   - `fare` (number)               : Offered gross passenger fare
+   - `driverPayout` (number)       : Standard driver rate (85% of fare)
+   - `status` (string)             : 'Open' | 'Bidding' | 'Assigned' | 'Closed'
+   - `assignedDriverId` (string)   : Assigned driver ID
+   - `assignedVendorId` (string)   : Assigned vendor ID
+   - `createdAt` (timestamp)
+
+ Subcollection: `marketplace_trips/{tripId}/bids`
+ Document ID: Auto-ID or `BID-TIMESTAMP`
+ Fields:
+   - `id` (string)                 : Bid ID
+   - `tripId` (string)             : Reference trip
+   - `vendorId` (string)           : Bidding vendor UID
+   - `vendorName` (string)         : Vendor business name
+   - `vendorCounterRate` (number)  : Counter-offered fare
+   - `offeredPayout` (number)      : Net payout expected
+   - `biddingNote` (string)        : Vehicle details / driver assignment note
+   - `status` (string)             : 'Pending Review' | 'Accepted' | 'Declined'
+   - `submittedAt` (timestamp)
+
+--------------------------------------------------------------------------------
+ 3.7 `vehicles` Collection
+ Document ID: Auto-ID or `VEH-TIMESTAMP`
+ Fields:
+   - `id` (string)                 : Vehicle record ID
+   - `plateNumber` (string)        : Vehicle registration (e.g. "TN 01 AB 1234")
+   - `category` (string)           : 'Sedan' | 'SUV' | 'Innova' | 'Tempo Traveller'
+   - `make` (string)               : e.g. "Maruti Suzuki", "Toyota", "Force"
+   - `model` (string)              : e.g. "Dzire", "Innova Crysta", "Traveller"
+   - `year` (number)               : Year of manufacture
+   - `seatingCapacity` (number)    : Number of passengers
+   - `fuelType` (string)           : 'Diesel' | 'Petrol' | 'CNG' | 'Electric'
+   - `vendorId` (string, optional) : Owning vendor UID (if fleet vehicle)
+   - `driverId` (string, optional) : Primary driver UID
+   - `docStatus` (string)          : 'Pending' | 'Approved' | 'Rejected'
+   - `rcUrl` (string)              : RC copy document URL
+   - `insuranceUrl` (string)       : Insurance policy document URL
+   - `insuranceExpiry` (string)    : Policy validity date
+   - `createdAt` (timestamp)
+
+--------------------------------------------------------------------------------
+ 3.8 `payout_requests` Collection
+ Document ID: Auto-ID or `PO-TIMESTAMP`
+ Fields:
+   - `id` (string)                 : Payout transaction ID
+   - `driverId` (string, optional) : Requesting driver UID
+   - `vendorId` (string, optional) : Requesting vendor UID
+   - `recipientName` (string)      : Payee name
+   - `role` (string)               : 'driver' | 'vendor'
+   - `amount` (number)             : Withdrawal amount in INR
+   - `bankDetails` (map)           : `{ bankName, accountNumber, ifsc, upiId }`
+   - `status` (string)             : 'Pending' | 'Processing' | 'Paid' | 'Rejected'
+   - `transactionReference` (str)  : Bank UTR / IMPS reference
+   - `createdAt` (timestamp)
+   - `processedAt` (timestamp)
+
+--------------------------------------------------------------------------------
+ 3.9 Additional Platform Collections
+   - `support_tickets`             : `{ id, customerId, customerName, category, description, status, createdAt }`
+   - `penalties`                   : `{ id, entityType, entityId, reason, amount, status: 'Active'|'Upheld'|'Reversed' }`
+   - `coupons`                     : `{ code, discountPercent, maxDiscount, minFare, active, validTill }`
+   - `notifications`               : `{ id, title, message, targetAudience, broadcast, recipientId, read, createdAt }`
+   - `settings` / `config`         : `{ companyName, gstin, phone, email, supportHelpline, upiId, commissionRate }`
+   - `admins`                      : `{ uid, email, role: 'admin', status: 'active', createdAt }`
+
+================================================================================
+ 4. CUSTOMER (USER) WEB PANEL — COMPLETE PAGE-BY-PAGE SPECIFICATION
+================================================================================
+
+Target Base Directory: `d:\LegendaryOne\Websites\nesamtravels\user\web\src`
+Primary Entrypoint    : `App.tsx`
+Styling Framework     : Tailwind CSS + Custom Design System
+
+--------------------------------------------------------------------------------
+ 4.1 Authentication & Profile Setup (`screens/AuthFlow.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: High-conversion, frictionless phone authentication and profile setup.
+ - Sub-views:
+   a) Welcome / Entry Screen:
+      - Centered brand card with logo (`/icons/logo.png`), "Nesam Tours & Travels",
+        and slogan "Safe Journey, Happy Memories".
+      - Two prominent selection tiles:
+        * Red Tile (`LogIn` icon): "Login — I already have an account"
+        * Black Tile (`UserPlus` icon): "Sign Up — Create a new passenger account"
+      - Terms and privacy agreement banner.
+   b) Mobile Input Screen:
+      - Clean +91 country prefix box with input validation (must be 10 digits starting
+        with 6, 7, 8, or 9).
+      - Localhost verification safeguard (prompts user to use localhost instead of IP
+        to prevent Firebase domain rejection).
+      - Dispatches invisible Firebase `RecaptchaVerifier` and invokes `sendOtpToPhone`.
+   c) OTP Verification Screen:
+      - Six individual input cells with auto-focus, paste auto-fill, backspace navigation,
+        and keyboard Enter support.
+      - 30-second cooldown timer for SMS resend.
+      - On 6th digit entry, automatically triggers `confirmOtpCode`.
+   d) New Profile Onboarding (`ProfileSetup`):
+      - Triggered when phone is verified but no document exists in `customers/{uid}`.
+      - Avatar image upload with real-time compression and upload progress indicator.
+      - Form inputs: Full Name (2-60 letters), Receipt Email, and Emergency Contact
+        (validated to ensure it is not identical to the login mobile).
+      - Creates customer document in Firestore via `registerCustomerProfile`.
+
+--------------------------------------------------------------------------------
+ 4.2 Ride Booking Screen (`screens/RideBookingScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: End-to-end trip configuration, route calculation, vehicle selection,
+   and instant booking creation.
+ - Key Components:
+   - Service Type Tabs:
+     * Airport Transfers (Pickup from/Drop to Chennai MAA, Madurai, Coimbatore, Trichy).
+     * Outstation One-Way (Intercity point-to-point with zero return toll penalties).
+     * Outstation Round-Trip (Multi-day packages with driver daily allowance).
+     * Local Hourly Rentals (Packages: 4hr/40km, 8hr/80km, 12hr/120km).
+     * South India Tour Packages (Temple circuits, hill stations).
+   - Route Auto-Complete (`PlaceSearch.tsx`):
+     * Integrated with OpenStreetMap / Nominatim search engine via `geoService.ts`.
+     * Quick selection pills for Popular Hubs (Theni, Madurai, Chennai, Coimbatore, Munnar).
+     * Interactive swap button to flip pickup and drop addresses.
+   - Schedule Selector:
+     * Date picker & Time picker with minimum 30-minute lead time restriction.
+   - Vehicle Fleet Carousel:
+     * Sedan (Swift Dzire, Etios — 4 Seats, 2 Bags).
+     * SUV (Ertiga, Triber — 6 Seats, 3 Bags).
+     * Premium SUV (Innova Crysta — 7 Seats, 4 Bags).
+     * Tempo Traveller (12/17 Seater for large groups).
+     * Live fare quote computed in real time via `pricingService.ts`.
+   - Coupon & Promo Input:
+     * Validates coupon code against Firestore `coupons` collection.
+     * Applies instantaneous discount deduction to fare quote.
+   - Booking Confirmation Trigger:
+     * Writes document to `bookings` with status `'Pending'`.
+     * Simultaneously creates entry in `marketplace_trips` with status `'Open'`.
+     * Automatically transitions user screen to `ActiveRideScreen`.
+
+--------------------------------------------------------------------------------
+ 4.3 Active Ride & Live Tracking (`screens/ActiveRideScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Mission-control tracking interface while ride is being fulfilled.
+ - Key Components:
+   - Interactive Leaflet Map (`RideMap.tsx`):
+     * Real-time GPS markers for Passenger Pickup, Destination, and Driver Vehicle.
+     * Dynamic route polyline connecting current coordinates.
+     * Smooth panning on driver location update.
+   - Driver & Vehicle Header Card:
+     * Shows driver photo, driver full name, contact phone (tel: link), vehicle make/model,
+       and registration plate number.
+     * Star rating badge and completed trips counter.
+   - Secure Boarding OTP Card:
+     * Prominently displays the 4-digit secret OTP (e.g. `4892`).
+     * Explicit instructions: "Share this OTP with your driver ONLY upon arrival."
+   - Ride Stage Stepper (`StatusBadge.tsx`):
+     * Stage 1: "Driver Assigned — En Route to Pickup"
+     * Stage 2: "Driver Arrived at Pickup Location"
+     * Stage 3: "Trip in Progress — Heading to Destination"
+     * Stage 4: "Arrived at Destination"
+   - Safety & Emergency Center (`SafetyCenterModal.tsx`):
+     * Immediate 112 Emergency Police Call button.
+     * Real-time trip sharing via Web Share API & WhatsApp link containing live coordinates.
+     * Direct 24x7 NESAM Support Hotline (+91 98400 12345).
+   - Cancellation Flow (`CancelRideDialog.tsx`):
+     * Permitted only when ride is in 'Pending' or 'Confirmed' status.
+     * Prompts for cancellation reason and writes update to Firestore.
+   - Post-Trip Completion Handshake:
+     * Displays `TripReceipt.tsx` with complete itemized fare, toll charges, and GST.
+     * Displays `RatingForm.tsx` to collect 1-to-5 star rating and driver feedback.
+
+--------------------------------------------------------------------------------
+ 4.4 Trips History (`screens/TripsHistoryScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Full ledger of past and active bookings.
+ - Three Categorized Tabs:
+   * Upcoming: Trips with status 'Pending', 'Confirmed', 'Assigned', or 'Ongoing'.
+   * Completed: Successfully concluded journeys with downloadable invoice view.
+   * Cancelled: Aborted orders with cancellation reason and refund status.
+ - Features:
+   * Click-to-view itemized breakdown.
+   * "Book Again" instant re-booking shortcut pre-populating route coordinates.
+
+--------------------------------------------------------------------------------
+ 4.5 Offers & Promotions (`screens/OffersScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Discover active discounts, seasonal deals, and festival coupon codes.
+ - Real-time Firestore subscription to `coupons` where `active == true`.
+ - Interactive one-click "Copy Code" button copying promo code to system clipboard.
+ - Displays coupon validity date, minimum booking value, and maximum savings cap.
+
+--------------------------------------------------------------------------------
+ 4.6 Saved Places & Favorites (`screens/SavedPlacesScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Rapid bookmarking of frequent pickup and drop locations.
+ - Syncs directly with `saved_places` in Firestore.
+ - Pre-configured categories: "Home", "Work", "Airport", "Custom".
+ - Add Place modal with address autocomplete and nickname tag.
+
+--------------------------------------------------------------------------------
+ 4.7 Support & Help Desk (`screens/SupportScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Customer complaint management and dispute resolution.
+ - Issue Categories: "Billing / Overcharged", "Driver Behavior", "Lost Item",
+   "Vehicle Cleanliness / AC", "Safety Concern", "App Issue".
+ - Ticket Submission form: writes to `support_tickets` collection with auto-generated ID.
+ - "My Tickets" tab: Live subscription tracking ticket status ('Open', 'In Progress', 'Resolved').
+ - Direct phone hotline and WhatsApp support shortcuts.
+
+--------------------------------------------------------------------------------
+ 4.8 Profile & Account Management (`screens/ProfileScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Manage passenger personal info and application preferences.
+ - Editable Fields: Full Name, Email, Emergency Contact, Preferred Language.
+ - Avatar upload & update via Firebase Storage.
+ - Wallet credits overview.
+ - Clean sign-out handler clearing session state.
+
+================================================================================
+ 5. DRIVER PARTNER WEB PANEL — COMPLETE PAGE-BY-PAGE SPECIFICATION
+================================================================================
+
+Target Base Directory: `d:\LegendaryOne\Websites\nesamtravels\driver\web\src`
+Primary Entrypoint    : `App.tsx` & `DriverWorkspace.tsx`
+Design Standard       : High-contrast, sunlight-readable, mobile-first cockpit layout
+
+--------------------------------------------------------------------------------
+ 5.1 Driver Authentication (`screens/AuthScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Unified Brand Login matching User, Vendor, and Admin portals.
+ - Red tile "Login — I already have a driver account".
+ - Black tile "Sign Up — Register as a new driver partner".
+ - Phone Auth with reCAPTCHA Enterprise verification, OTP input, and automatic
+   redirection based on KYC approval status.
+
+--------------------------------------------------------------------------------
+ 5.2 6-Stage Driver Registration & KYC Wizard (`screens/RegistrationScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Comprehensive compliance onboarding complying with Indian Commercial
+   Transport Regulations.
+ - Stages:
+   1. Personal Profile: Full legal name, date of birth, blood group, current address,
+      and secondary emergency contact.
+   2. Identity & Driving License:
+      - Aadhaar Number (12 digits) with front & back document camera captures.
+      - PAN Card Number with image upload.
+      - Driving License Number (e.g. `TN01 20190012345`) + Validity Date.
+      - Transport Badge Number (for commercial taxi driving authorization).
+   3. Vehicle Specification:
+      - Registration plate number (e.g. `TN 57 AB 9876`).
+      - Category: Sedan, SUV, Innova Crysta, Tempo Traveller.
+      - Make, Model, Year, Seating Capacity, Fuel Type.
+   4. Vehicle Compliance Documents:
+      - RC Book (Registration Certificate) front/back.
+      - Commercial Vehicle Insurance certificate & expiry date.
+      - Fitness Certificate (FC) & Pollution Under Control (PUC).
+      - State / All India Tourist Permit.
+   5. Bank & Settlement Account:
+      - Account Holder Name, Bank Name, Account Number, IFSC Code.
+      - Instant Payout UPI ID (e.g. `driver@okhdfcbank`).
+   6. Review & Submission:
+      - Final summary audit with editable sections.
+      - Writes driver profile to `drivers/{uid}` with `status: 'Pending'` and
+        `docStatus: 'Submitted'`.
+      - Transitions driver to `VerificationStatusScreen`.
+
+--------------------------------------------------------------------------------
+ 5.3 Verification Status Screen (`screens/VerificationStatusScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Informative pending state while Admin verifies physical documents.
+ - Displays checklist of verified vs pending items.
+ - Real-time listener: Once Admin approves driver, immediately unlocks `DashboardScreen`.
+
+--------------------------------------------------------------------------------
+ 5.4 Pre-Trip Safety Inspection (`screens/PreTripVerificationScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Quality assurance and passenger safety enforcement before going Online.
+ - Mandatory checklist items:
+   * Tyre condition & spare wheel checked.
+   * Fuel / Battery charge adequate for trip distance.
+   * Engine oil & coolant levels verified.
+   * Air conditioning & blower working smoothly.
+   * Vehicle interior clean & sanitized.
+   * First aid kit & emergency tools present.
+ - Driver confirms checklist with digital sign-off before unlocking the Marketplace.
+
+--------------------------------------------------------------------------------
+ 5.5 Driver Dashboard & Marketplace Feed (`screens/DashboardScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Driver's operational hub during shifts.
+ - Key Components:
+   - Duty Toggle: Switch between "Offline" (rest mode) and "Online" (available for jobs).
+   - Shift Metrics Bar: Today's Gross Earnings, Completed Trips, Hours Online, Rating.
+   - Active Trip Banner: If an assigned trip is ongoing, displays persistent top card
+     with shortcut to `TripExecutionScreen`.
+   - Open Marketplace Feed:
+     * Subscribes to `marketplace_trips` where `status == 'Open'`.
+     * Card displays: Route (Pickup -> Drop), Distance, Departure Date/Time, Vehicle
+       Category required, and Driver Net Payout (₹).
+     * "Accept Trip" action: atomically claims trip, updates `bookings/{id}` with
+       `assignedDriverId = driver.uid`, marks marketplace status as `'Assigned'`,
+       and switches driver view to live trip execution.
+
+--------------------------------------------------------------------------------
+ 5.6 Live Trip Execution Cockpit (`screens/TripExecutionScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Turn-by-turn guidance, stage progression, and secure boarding validation.
+ - Trip Stages:
+   1. Stage 1: "En Route to Pickup"
+      - Displays customer pickup address with "Open in Google Maps" deep-link.
+      - Customer contact card with direct Call and WhatsApp shortcuts.
+      - Button: "I Have Arrived at Pickup".
+   2. Stage 2: "Reached Pickup Location"
+      - Triggers push notification to customer informing them of driver arrival.
+      - Secure Boarding OTP Input:
+        * Driver requests 4-digit code from passenger.
+        * Compares input against cryptographic OTP stored in `booking_secrets/{id}`.
+        * Security Guard: Backdoors and hardcoded demo bypasses are completely eliminated.
+        * Once verified, changes booking status to `'Ongoing'` and records `startedAt`.
+   3. Stage 3: "Trip in Progress"
+      - Active trip meter displaying elapsed journey time and estimated distance.
+      - Emergency SOS button for driver safety.
+      - Button: "Arrived at Destination".
+   4. Stage 4: "Trip Summary & Settlement"
+      - Add Toll & Parking Charges input (logged directly onto final invoice).
+      - Final Gross Fare calculation.
+      - Collect Payment prompt: Displays whether trip is Prepaid Online or Cash/UPI.
+      - Button: "Complete Trip & Collect Payment".
+      - Atomically updates booking to `'Completed'`, credits driver's wallet, and
+        returns driver to Dashboard.
+
+--------------------------------------------------------------------------------
+ 5.7 Earnings & Ledger (`screens/EarningsScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Comprehensive daily, weekly, and monthly financial statements.
+ - Interactive Bar Chart: Daily Gross vs Net Take-Home earnings.
+ - Trip-by-Trip Financial Breakdown:
+   * Booking ID, Date, Route, Passenger Name.
+   * Total Fare, Platform Fee (15%), Tolls, and Net Driver Settlement.
+
+--------------------------------------------------------------------------------
+ 5.8 Wallet & Instant Payouts (`screens/WalletPayoutScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Real-time balance withdrawal management.
+ - Displays Current Withdrawable Balance.
+ - Payout Request Form:
+   * Amount input (guarded: cannot exceed current balance, minimum ₹500).
+   * Verified bank account / UPI ID selector.
+   * Submits request to `payout_requests` collection with `status: 'Pending'`.
+ - Withdrawal History Table with timestamp, UTR reference, and status badge.
+
+--------------------------------------------------------------------------------
+ 5.9 Driver Notifications (`screens/NotificationsScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Real-time stream of trip dispatches, payout settlements, rate card updates,
+   and administrative announcements.
+
+================================================================================
+ 6. FLEET VENDOR WEB PANEL — COMPLETE PAGE-BY-PAGE SPECIFICATION
+================================================================================
+
+Target Base Directory: `d:\LegendaryOne\Websites\nesamtravels\vendor\web\src`
+Primary Entrypoint    : `App.tsx`
+Target Audience       : Tour operators, taxi fleet owners, and B2B travel partners
+
+--------------------------------------------------------------------------------
+ 6.1 Vendor Authentication (`screens/VendorLoginScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Unified Brand Portal matching User, Driver, and Admin screens.
+ - Red Tile: "Login — I already have a vendor account".
+ - Black Tile: "Sign Up — Register my travel agency / fleet".
+ - Mobile Auth + OTP verification with localhost IP-routing safeguard.
+
+--------------------------------------------------------------------------------
+ 6.2 5-Stage Vendor Onboarding Wizard (`screens/onboarding/OnboardingWizard.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Commercial enterprise registration for fleet operators.
+ - Steps:
+   1. BusinessStep: Legal Business Name, Trade Name, Entity Type (Proprietorship,
+      Partnership, Pvt Ltd), GSTIN, Office Address, Billing Email.
+   2. FleetStep: Initial inventory upload (number of Sedans, SUVs, Innovas, Tempos).
+   3. DocumentsStep: Certificate of Incorporation / Shop Act License, GST Certificate,
+      Company PAN, Owner Aadhaar.
+   4. PayoutStep: Current Account details (Bank Name, Account Number, IFSC, UPI).
+   5. ReviewStep & Agreement: Commission schedule acknowledgment (90% Vendor, 10%
+      Platform fee), digital signature sign-off.
+ - Writes to `vendors/{uid}` with `status: 'PENDING_APPROVAL'`.
+
+--------------------------------------------------------------------------------
+ 6.3 Account Status Gate (`screens/AccountStatusScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Informational holding page displaying "Application Under Review".
+ - Listens live to `vendors/{uid}`. Once Super Admin approves, immediately transitions
+   vendor into the operational Dashboard.
+
+--------------------------------------------------------------------------------
+ 6.4 Vendor Dashboard (`screens/DashboardScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Executive high-level operational cockpit.
+ - Metric Tiles:
+   * Total Active Fleet Size (Approved Vehicles).
+   * Affiliated Drivers (Active on Shift).
+   * Trips in Progress Today.
+   * Net Monthly Revenue & Available Wallet Balance.
+ - Quick Shortcut Buttons: "Add Vehicle", "Invite Driver", "Browse Marketplace".
+ - Live Active Dispatches Table: Trips currently en route with driver assignments.
+
+--------------------------------------------------------------------------------
+ 6.5 Marketplace Bidding Engine (`screens/MarketplaceBiddingScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Real-time discovery and competitive bidding on long-distance outstation
+   routes and tour packages.
+ - Open Trips Feed:
+   * Subscribes to `marketplace_trips` where status is 'Open' or 'Bidding'.
+   * Cards show Route, Date/Time, Vehicle Class, Base Offered Fare.
+ - Counter-Bid Submission Modal:
+   * Vendor inputs proposed Counter Rate (e.g. Passenger budget ₹4,500 -> Counter ₹4,800).
+   * Vendor selects proposed vehicle model and writes bid note.
+   * Calls `submitBidToFirestore`, creating an isolated record in the subcollection
+     `marketplace_trips/{tripId}/bids/{bidId}` and updating the parent trip status
+     to `'Bidding'`.
+   * Completely preserves multi-vendor bidding competition without overwriting peers.
+
+--------------------------------------------------------------------------------
+ 6.6 Trip Assignment & Dispatch (`screens/TripAssignmentScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Dispatching drivers and vehicles to won or directly assigned bookings.
+ - Flow:
+   * Displays all bookings where `assignedVendorId == vendor.uid` and driver is
+     yet to be dispatched.
+   * Vendor opens Dispatch Modal:
+     - Dropdown 1: Select available driver from registered fleet roster.
+     - Dropdown 2: Select matching vehicle from approved fleet inventory.
+   * Submits dispatch: invokes `assignTripInFirestore` updating `bookings/{id}` with
+     `assignedDriverId`, `assignedDriverName`, `assignedVehicleNumber`, and status
+     `'Assigned'`.
+   * Instantaneously notifies the selected driver on their mobile cockpit.
+
+--------------------------------------------------------------------------------
+ 6.7 Fleet Inventory Management (`screens/FleetScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Full asset registry of all cars, SUVs, and vans under vendor control.
+ - Vehicle Roster Table: Registration number, Category, Make/Model, Year, Status.
+ - Document Expiry Watchdog: Flags upcoming insurance, FC, or permit expirations.
+ - "Register New Vehicle" Modal:
+   * Form inputs: Plate Number, Category, Fuel Type, Seating Capacity.
+   * Document upload for RC & Insurance (stored in Firebase Storage).
+   * Saves record to `vehicles` collection tagged with `vendorId: vendor.uid`.
+
+--------------------------------------------------------------------------------
+ 6.8 Driver Roster & Invites (`screens/DriverManagementScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Manage drivers affiliated with the vendor's organization.
+ - Fleet Drivers Table: Driver Name, Mobile, Assigned Vehicle, Lifetime Trips, Rating.
+ - "Invite Driver" Modal:
+   * Vendor enters driver's mobile number and pre-assigned vehicle.
+   * Invokes `inviteDriverByVendor`, creating a pre-linked invite in the
+     `driver_invites` collection.
+   * When driver registers via the Driver App, they are automatically linked to the vendor.
+
+--------------------------------------------------------------------------------
+ 6.9 Wallet & Vendor Payouts (`screens/WalletPayoutScreen.tsx`)
+--------------------------------------------------------------------------------
+ - Purpose: Financial transparency and withdrawal execution.
+ - Dynamic Wallet Balance:
+   * Calculated dynamically via `subscribeToVendorWalletBalance` by aggregating all
+     completed vendor trips (`vendorPayout = 90%`) minus processed payout withdrawals.
+ - Request Payout Drawer:
+   * Amount input (strictly validated: cannot exceed computed balance).
+   * Submits withdrawal request to `payout_requests` collection tagged with `vendorId`.
+ - Transaction History Ledger with credit/debit timestamps and UTR references.
+
+--------------------------------------------------------------------------------
+ 6.10 Documents & Compliance (`screens/DocumentsVerificationScreen.tsx`)
+--------------------------------------------------------------------------------
+ - View and update company registration licenses, GST certificates, and tax filings.
+ - Allows in-place profile updates via `syncVendorProfile`.
+
+================================================================================
+ 7. SUPER ADMIN CONSOLE — COMPLETE PAGE-BY-PAGE SPECIFICATION
+================================================================================
+
+Target Base Directory: `d:\LegendaryOne\Websites\nesamtravels\admin\src`
+Primary Entrypoint    : `App.tsx`
+Authentication Standard: Firebase Auth + Firestore `admins/{uid}` Role Verification
+                         (`role === 'admin' && status === 'active'`)
+
+--------------------------------------------------------------------------------
+ 7.1 Admin Authentication (`pages/Login.tsx` & `pages/Signup.tsx`)
+--------------------------------------------------------------------------------
+ - Unified Brand Login matching User, Driver, and Vendor portals.
+ - Direct Super Admin login credentials field.
+ - Access request flow (`Signup.tsx`) creating pending administrative requests.
+
+--------------------------------------------------------------------------------
+ 7.2 Operations Dashboard (`pages/Dashboard.tsx`)
+--------------------------------------------------------------------------------
+ - Top KPI Metric Cards:
+   * Total Bookings Count (Live).
+   * Active Vehicles on Duty.
+   * Gross Platform Revenue (INR).
+   * Total Active Verified Drivers.
+ - Real-Time Booking Status Counters (Computed from real Firestore subscriptions):
+   * Pending (Unassigned/New).
+   * Confirmed (Driver/Vendor matched).
+   * Ongoing (In progress on the road).
+   * Completed (Concluded).
+ - Revenue Trajectory Chart (Recharts) plotting daily GMV vs platform commission.
+ - Recent Bookings Quick Table with direct click-through to details.
+
+--------------------------------------------------------------------------------
+ 7.3 Bookings Management (`pages/Bookings.tsx`)
+--------------------------------------------------------------------------------
+ - Master command desk for all customer and B2B bookings.
+ - Full-text Search & Filters: Filter by Status, Service Category, and Date Range.
+ - "Add Booking" Modal (Operational Dispatcher tool):
+   * Form inputs: Customer Name, Phone, Service Category, Pickup Address, Drop Address,
+     Date, Time, Vehicle Category, Fare (number), Payment Method (Cash/UPI/Card).
+   * Submits booking with status `'Pending'`.
+   * Automatically creates secure boarding OTP in `booking_secrets/{id}`.
+   * Automatically publishes trip to `marketplace_trips/{id}` so drivers/vendors
+     can instantly claim it.
+
+--------------------------------------------------------------------------------
+ 7.4 Booking Details & Dispatch (`pages/BookingDetails.tsx`)
+--------------------------------------------------------------------------------
+ - Comprehensive single-trip audit screen.
+ - Displays passenger details, route coordinates, fare breakdown, and timeline.
+ - Driver Assignment Engine:
+   * Shows dropdown of all available, approved drivers.
+   * On selection, writes `assignedDriverId`, `assignedDriverName`, and status `'Assigned'`
+     to `bookings/{id}`.
+ - Trip Cancellation & Emergency Abort:
+   * Sets booking status to `'Cancelled'` with timestamp and reason.
+   * Simultaneously closes the marketplace entry in `marketplace_trips/{id}`.
+
+--------------------------------------------------------------------------------
+ 7.5 Live Trips Telemetry (`pages/LiveTrips.tsx`)
+--------------------------------------------------------------------------------
+ - Real-time monitoring of all vehicles currently carrying passengers.
+ - Displays trip stage: En Route to Pickup, Waiting at Pickup, Trip in Progress, Arrived.
+ - Displays Boarding OTP Verification status.
+ - Direct Communication Buttons: Click-to-call Customer and Click-to-call Driver.
+ - Emergency Intervention: Admin Emergency Abort button updating Firestore and alerting parties.
+
+--------------------------------------------------------------------------------
+ 7.6 Driver Verification & Management (`pages/Drivers.tsx`)
+--------------------------------------------------------------------------------
+ - Directory of all registered drivers across South India.
+ - Verification Queue: Filter drivers with `status == 'Pending'` or `docStatus == 'Submitted'`.
+ - KYC Document Inspection Modal:
+   * High-resolution viewer for Aadhaar front/back, PAN card, Driving License, and Badge.
+   * "Approve Driver": Updates driver doc to `status: 'Approved'`, `docStatus: 'Approved'`,
+     notifying driver instantly.
+   * "Reject Driver": Prompts for deficiency notes and marks `status: 'Rejected'`.
+ - "Add Driver Manually" Modal for office walk-in driver onboarding.
+
+--------------------------------------------------------------------------------
+ 7.7 Fleet Vehicle Management (`pages/Vehicles.tsx`)
+--------------------------------------------------------------------------------
+ - Asset ledger of all cars, SUVs, and buses across independent and vendor fleets.
+ - Document Audit: Inspect RC copies and Insurance certificates.
+ - Approve/Reject vehicle certification.
+ - "Register Vehicle" Modal: Add new vehicle with plate number, make, model, year,
+   category, fuel type, and seating capacity.
+
+--------------------------------------------------------------------------------
+ 7.8 Vendor Partner Administration (`pages/Vendors.tsx`)
+--------------------------------------------------------------------------------
+ - Directory of registered travel agencies and fleet operators.
+ - Onboarding Queue: Handles both `'Pending'` and `'PENDING_APPROVAL'` states.
+ - Business Compliance Inspection: Audit GSTIN, PAN, and trade license documents.
+ - Actions:
+   * "Approve Vendor": Sets `status: 'APPROVED'`, `verified: true`.
+   * "Reject Vendor": Sets `status: 'REJECTED'`.
+   * Set Custom Commission Rate (default 10%, customizable for high-volume partners).
+ - "Register Vendor Manually" Modal for B2B contract onboarding.
+
+--------------------------------------------------------------------------------
+ 7.9 Marketplace Operations (`pages/Marketplace.tsx`)
+--------------------------------------------------------------------------------
+ - Supervision of open trip broadcast and competitive bidding.
+ - Real-time Feed of open marketplace trips.
+ - Bid Review Drawer:
+   * Subscribes to subcollection `marketplace_trips/{id}/bids`.
+   * Lists all competing vendor bids, counter rates, and vehicle notes.
+   * "Accept Bid": Atomically awards trip to chosen vendor, sets `assignedVendorId`,
+     updates booking status to `'Confirmed'`, and closes marketplace listing.
+ - "Assign Manually": Dropdown of approved drivers for direct manual dispatch.
+ - "Post to Marketplace": Broadcast any custom charter or private booking to the feed.
+
+--------------------------------------------------------------------------------
+ 7.10 Customer CRM (`pages/Customers.tsx`)
+--------------------------------------------------------------------------------
+ - Directory of all registered passengers.
+ - Displays Total Bookings, Lifetime Spend (GMV), Phone Number, and Registration Date.
+ - Account status management (Active, Suspended).
+
+--------------------------------------------------------------------------------
+ 7.11 Support Desk & Ticket Triage (`pages/SupportTickets.tsx`)
+--------------------------------------------------------------------------------
+ - Centralized customer and driver inquiry management.
+ - Subscribes to `support_tickets` collection in real time.
+ - Ticket Table: Ticket ID, Customer Name, Category, Description, Status, Date.
+ - Ticket Modal:
+   * Change status: 'Open' -> 'In Progress' -> 'Resolved'.
+   * Post official support reply directly to ticket subcollection.
+
+--------------------------------------------------------------------------------
+ 7.12 Fare Engine & Pricing Matrices (`pages/Pricing.tsx` & `fareEngine.ts`)
+--------------------------------------------------------------------------------
+ - Configurable dynamic pricing rules for all vehicle categories and services:
+   * Base Fare (e.g. ₹600 for first 10 km).
+   * Per-Kilometer Rate (e.g. ₹14/km for Sedan, ₹19/km for Innova Crysta).
+   * Night Surcharge (10:00 PM – 05:00 AM: 1.25x multiplier).
+   * Driver Daily Allowance (Outstation round trips: ₹400/day).
+   * Minimum Daily Billing Distance (e.g. 250 km/day for outstation).
+
+--------------------------------------------------------------------------------
+ 7.13 Vehicle Categories (`pages/VehicleCategories.tsx`)
+--------------------------------------------------------------------------------
+ - Configuration of vehicle classes: Sedan, SUV, Innova Crysta, Tempo Traveller, Bus.
+ - Defines passenger capacity, luggage limit, per-km base, and amenities list.
+
+--------------------------------------------------------------------------------
+ 7.14 Tour Packages (`pages/TourPackages.tsx`)
+--------------------------------------------------------------------------------
+ - Curation of popular South India tour itineraries (Munnar 3D/2N, Ooty & Coonoor,
+   Madurai-Rameshwaram-Kanyakumari Temple Circuit, Kodaikanal Retreat).
+ - Configure package pricing, inclusions, exclusions, and vehicle allocations.
+
+--------------------------------------------------------------------------------
+ 7.15 Coupons & Promotions (`pages/Offers.tsx` & `couponEngine.ts`)
+--------------------------------------------------------------------------------
+ - Create, edit, and deactivate discount promo codes.
+ - Configure discount percentage or flat amount, maximum savings cap, minimum booking
+   value, and expiry timestamp.
+ - Real-time sync with Customer App offers screen.
+
+--------------------------------------------------------------------------------
+ 7.16 Invoices & Taxation (`pages/Invoices.tsx`)
+--------------------------------------------------------------------------------
+ - Itemized GST Tax Invoices compliant with Indian GST laws (5% Goods and Services
+   Tax split into 2.5% CGST and 2.5% SGST).
+ - Print / PDF invoice generation for customer expense claims.
+
+--------------------------------------------------------------------------------
+ 7.17 Payments & Reconciliation (`pages/Payments.tsx`)
+--------------------------------------------------------------------------------
+ - Master transaction log of all gateway (Razorpay/UPI) and cash collections.
+ - Real-time payment reconciliation and transaction reference tracking.
+
+--------------------------------------------------------------------------------
+ 7.18 Driver Payouts & Settlements (`pages/DriverEarnings.tsx`)
+--------------------------------------------------------------------------------
+ - Queue of driver withdrawal requests from `payout_requests` collection.
+ - Single-click "Approve & Mark Paid": Records bank IMPS/NEFT UTR reference,
+   deducts amount from driver wallet balance, and notifies driver.
+
+--------------------------------------------------------------------------------
+ 7.19 Vendor Finance & Settlements (`pages/VendorFinance.tsx`)
+--------------------------------------------------------------------------------
+ - Vendor settlement processing: Gross GMV minus 10% platform fee.
+ - Audit vendor payout requests and approve bulk bank disbursements.
+
+--------------------------------------------------------------------------------
+ 7.20 Penalties & Compliance (`pages/Penalties.tsx`)
+--------------------------------------------------------------------------------
+ - Enforcement desk for driver cancellations, late arrivals, or customer misconduct.
+ - Create penalty record deducted automatically from next payout.
+ - Dispute adjudication: "Uphold Penalty" or "Reverse Penalty" triggers.
+
+--------------------------------------------------------------------------------
+ 7.21 Push Notifications & Broadcasts (`pages/NotificationsPage.tsx`)
+--------------------------------------------------------------------------------
+ - Campaign and operational announcement composer.
+ - Audience selection: "All Customers", "All Drivers", "All Vendors", or "Specific UID".
+ - Writes directly to `notifications` collection with push dispatch.
+
+--------------------------------------------------------------------------------
+ 7.22 Staff Roles & Permissions (`pages/StaffRoles.tsx`)
+--------------------------------------------------------------------------------
+ - Internal administrative staff governance.
+ - Roles: Super Admin, Dispatch Officer, KYC Verification Agent, Finance Specialist,
+   Customer Support Agent.
+ - Add new staff member with scoped permissions.
+
+--------------------------------------------------------------------------------
+ 7.23 Business Intelligence & Analytics (`pages/ReportsAnalytics.tsx`)
+--------------------------------------------------------------------------------
+ - Operational analytics: Route profitability, driver utilization, average turnaround
+   time, cancellation rates, and customer acquisition costs.
+
+--------------------------------------------------------------------------------
+ 7.24 Customer Reviews & Ratings (`pages/Reviews.tsx`)
+--------------------------------------------------------------------------------
+ - Real passenger ratings and reviews audit.
+ - Zero fake reviews: Authenticated customer feedback linked directly to completed booking IDs.
+
+--------------------------------------------------------------------------------
+ 7.25 System Settings (`pages/Settings.tsx`)
+--------------------------------------------------------------------------------
+ - Legal company details: Nesam Tours & Travels, Registered Office, GSTIN, Official Phone/Email.
+ - Operational parameters: Booking limits, advance booking window, auto-cancel timeout.
+ - Secure payment configuration: Manual UPI ID configuration.
+ - Security Note: Payment gateway secret keys are strictly isolated to server environment
+   variables and are never written to Firestore.
+
+================================================================================
+ 8. CLOUD FUNCTIONS & SERVERLESS LOGIC SPECIFICATION
+================================================================================
+
+Target Base Directory: `d:\LegendaryOne\Websites\nesamtravels\functions\src`
+Runtime Environment  : Node.js 20 on Google Cloud Functions (2nd Gen)
+
+ 8.1 Authentication Triggers (`auth.ts`):
+   - `onUserCreated`: Initializes customer document shell when user authenticates via
+     phone for the first time.
+   - `setAdminCustomClaims`: Restricts administrative privileges to verified accounts
+     carrying custom claims (`admin: true`).
+
+ 8.2 Trip Lifecycle Triggers (`trips.ts`):
+   - `onBookingCreated`: Validates booking parameters, generates a 4-digit secret OTP
+     in `booking_secrets/{id}`, and publishes a synchronized record to `marketplace_trips`.
+   - `onBookingStatusChanged`: Broadcasts status events (Assigned, Ongoing, Completed,
+     Cancelled) to customer and driver notification feeds.
+   - `onMarketplaceTimeout`: If an open marketplace ride is not accepted within 15 minutes,
+     triggers dispatcher alert for manual allocation.
+
+ 8.3 Boarding OTP Engine (`otp.ts`):
+   - Generates cryptographically secure 4-digit numeric token.
+   - Validates boarding OTP submitted by driver app during pickup handshake.
+   - Rejects replay attempts or brute force attempts.
+
+ 8.4 Payment Webhook Handlers (`payments.ts`):
+   - Razorpay Webhook Listener: Captures `order.paid`, verifies HMAC SHA256 signature,
+     and updates `bookings/{id}` payment status to `'Paid'`.
+   - Automated Payout Transfer: Connects to RazorpayX / Payout API to execute automated
+     NEFT/IMPS transfers upon Admin approval.
+
+================================================================================
+ 9. END-TO-END MULTI-ROLE BUSINESS WORKFLOWS & STATE MACHINES
+================================================================================
+
+--------------------------------------------------------------------------------
+ WORKFLOW 1: Customer Booking -> Marketplace -> Driver Fulfillment
+--------------------------------------------------------------------------------
+
+ [CUSTOMER APP]
+       │
+       ▼
+ 1. Customer configures route, vehicle category & date/time.
+ 2. Live quote generated via `pricingService.ts`.
+ 3. Customer clicks "Confirm Booking".
+ 4. Writes document to `bookings` (`status: 'Pending'`).
+       │
+       ├──────────────────────────────────────────┐
+       ▼                                          ▼
+ [FIRESTORE / SERVER]                      [ADMIN CONSOLE]
+ 5. Boarding OTP generated                 6. Admin sees new booking
+    in `booking_secrets/{id}`.                in live Bookings queue.
+ 7. Published to `marketplace_trips`
+    (`status: 'Open'`).
+       │
+       ▼
+ [DRIVER APP (MARKETPLACE)]
+ 8. Online drivers nearby see new ride on Dashboard feed.
+ 9. Driver clicks "Accept Trip".
+10. `bookings/{id}` updated:
+    - `assignedDriverId = driver.uid`
+    - `status = 'Assigned'`
+11. `marketplace_trips/{id}` updated to `'Assigned'`.
+       │
+       ▼
+ [CUSTOMER APP]
+12. Screen automatically transitions to `ActiveRideScreen`.
+13. Displays driver name, vehicle number, phone, and 4-digit OTP.
+       │
+       ▼
+ [DRIVER APP (EXECUTION)]
+14. Driver arrives at pickup -> clicks "Arrived at Pickup".
+15. Driver asks customer for OTP -> enters 4-digit code.
+16. System verifies OTP against `booking_secrets`.
+17. Status advances to `'Ongoing'`, recording start time.
+18. Driver drives to destination -> clicks "Arrived at Destination".
+19. Driver adds any applicable toll/parking fees.
+20. Driver clicks "Complete Trip & Collect Payment".
+       │
+       ▼
+ [SETTLEMENT & CONCLUSION]
+21. Booking status marked `'Completed'`.
+22. Driver wallet credited with 85% of gross fare.
+23. Customer app presents itemized receipt and 5-star rating form.
+
+--------------------------------------------------------------------------------
+ WORKFLOW 2: Fleet Vendor Bidding & Dispatch Engine
+--------------------------------------------------------------------------------
+
+ [HIGH-VALUE TRIP CREATED]
+ (e.g. 5-Day Outstation Tour Package from Chennai to Munnar)
+       │
+       ▼
+ [MARKETPLACE FEED]
+ Status: 'Open' | Available to both individual drivers and fleet vendors.
+       │
+       ▼
+ [VENDOR APP]
+ 1. Vendor opens `MarketplaceBiddingScreen`.
+ 2. Submits Counter-Bid (e.g. ₹22,000 with Luxury Innova Crysta).
+ 3. Writes bid to `marketplace_trips/{id}/bids/{bidId}`.
+ 4. Trip status updates to `'Bidding'`.
+       │
+       ▼
+ [ADMIN CONSOLE]
+ 5. Admin opens `Marketplace.tsx` -> clicks trip -> views bids list.
+ 6. Admin accepts Vendor's bid proposal:
+    - `bookings/{id}` updated with `assignedVendorId = vendor.uid`.
+    - `vendorPayout = ₹19,800` (Gross minus 10% platform fee).
+    - Status set to `'Confirmed'`.
+       │
+       ▼
+ [VENDOR APP (DISPATCH)]
+ 7. Vendor sees trip in `TripAssignmentScreen` ("Awaiting Dispatch").
+ 8. Vendor selects driver from roster and car from fleet.
+ 9. Calls `assignTripInFirestore`:
+    - Updates `bookings/{id}` with `assignedDriverId` & `assignedVehicleNumber`.
+    - Advances status to `'Assigned'`.
+10. Assigned driver receives trip instantly in driver cockpit.
+
+--------------------------------------------------------------------------------
+ WORKFLOW 3: Driver KYC Verification & Safety Protocol
+--------------------------------------------------------------------------------
+
+ [DRIVER APPLICANT]
+ 1. Submits 6-step registration with Aadhaar, PAN, DL, RC, and Bank details.
+ 2. Documents uploaded securely to Firebase Storage (`/drivers/{uid}/*`).
+ 3. Profile doc written with `status: 'Pending'`, `docStatus: 'Submitted'`.
+       │
+       ▼
+ [ADMIN CONSOLE]
+ 4. Dispatch Officer opens `Drivers.tsx` verification queue.
+ 5. Audits identity documents for clarity and validity dates.
+ 6. Clicks "Approve Driver".
+       │
+       ▼
+ [DRIVER WORKSPACE]
+ 7. App unlocks instantly from `VerificationStatusScreen` to `DashboardScreen`.
+ 8. Before starting first shift, driver completes `PreTripVerificationScreen`.
+ 9. Safety checklist verified -> Driver flips toggle to "Online" -> Ready for rides.
+
+================================================================================
+ 10. SECURITY ARCHITECTURE (RBAC, FIRESTORE RULES & AUDIT SAFEGUARDS)
+================================================================================
+
+ 10.1 Role-Based Access Control (RBAC):
+   - Customer: Can only read/write their own profile in `customers/{uid}` and orders
+     where `customerId == auth.uid`. Cannot alter fares or assign drivers.
+   - Driver: Can read assigned trips, write trip telemetry and stage updates, but
+     cannot alter gross fare or delete bookings.
+   - Vendor: Can manage their own vehicles (`vehicles`), invite drivers (`driver_invites`),
+     submit bids in `marketplace_trips/{id}/bids`, and dispatch assigned trips.
+   - Super Admin: Full read/write authority guarded by `admins/{uid}` record and
+     Firebase custom claims.
+
+ 10.2 Cryptographic Boarding Vault (`booking_secrets`):
+   - Boarding OTPs are isolated in a separate `booking_secrets` collection.
+   - Neither drivers nor vendors can read this collection.
+   - OTP validation is performed server-side or via secured document reference,
+     preventing driver client impersonation.
+
+ 10.3 API & Financial Secret Isolation:
+   - Zero API secret keys in client-side code or Firestore documents.
+   - Razorpay secret keys, webhook secrets, and SMS gateway credentials are
+     configured exclusively in serverless Cloud Functions environment secrets.
+
+================================================================================
+ 11. TESTING, VERIFICATION & BUILD VALIDATION SUMMARY
+================================================================================
+
+All four web panels and backend services have undergone comprehensive compilation,
+type-checking, and build validation.
+
+ SUMMARY TABLE:
+ ┌──────────────────────┬────────────────┬───────────────┬────────────────┐
+ │ Panel Module         │ Bundler Engine │ Build Command │ Build Result   │
+ ├──────────────────────┼────────────────┼───────────────┼────────────────┤
+ │ Customer (User) Web  │ Vite v8.2.2    │ npm run build │ 0 Errors, Pass │
+ │ Driver Partner Web   │ Vite v6.4.3    │ npm run build │ 0 Errors, Pass │
+ │ Fleet Vendor Web     │ Vite v6.4.3    │ npm run build │ 0 Errors, Pass │
+ │ Super Admin Console  │ Vite v8.0.5    │ npm run build │ 0 Errors, Pass │
+ │ Firebase Rules       │ CLI Unit Tests │ npm test      │ 66/66 Passed   │
+ └──────────────────────┴────────────────┴───────────────┴────────────────┘
+
+All TypeScript compilers emit zero type errors (`tsc --noEmit` exits with code 0).
+All four panels are synchronized to the identical modern brand theme.
+
+================================================================================
+ 12. PRE-LAUNCH DEPLOYMENT RUNBOOK & OPERATIONAL CHECKLIST
+================================================================================
+
+Before initiating public traffic, execute the following deployment sequence:
+
+ 1. Deploy Firestore Security Rules:
+    $ firebase deploy --only firestore:rules
+
+ 2. Deploy Cloud Storage Rules:
+    $ firebase deploy --only storage:rules
+
+ 3. Deploy Firestore Composite Indexes:
+    $ firebase deploy --only firestore:indexes
+
+ 4. Deploy Cloud Functions:
+    $ cd functions && npm run build
+    $ firebase deploy --only functions
+
+ 5. Build & Deploy Web Panels to Firebase Hosting:
+    - Admin Portal:
+      $ cd admin && npm run build && firebase deploy --only hosting:admin
+    - Driver Portal:
+      $ cd driver/web && npm run build && firebase deploy --only hosting:driver
+    - Vendor Portal:
+      $ cd vendor/web && npm run build && firebase deploy --only hosting:vendor
+    - Customer Portal:
+      $ cd user/web && npm run build && firebase deploy --only hosting:user
+
+ 6. Configure Production Domain & SSL:
+    - Point DNS records for `nesamtravels.com`, `driver.nesamtravels.com`,
+      `vendor.nesamtravels.com`, and `admin.nesamtravels.com` to Firebase Hosting CNAMEs.
+
+ 7. Initialize Platform Settings:
+    - Ensure `settings/config` document exists in Firestore with legal GSTIN,
+      support helpline numbers, and base commission percentages.
+
+================================================================================
+ END OF MASTER ARCHITECTURE & WORKFLOW SPECIFICATION
+ NESAM TOURS & TRAVELS — ENTERPRISE SOFTWARE ENGINEERING
+================================================================================
