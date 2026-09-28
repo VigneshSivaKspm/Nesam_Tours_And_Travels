@@ -65,10 +65,13 @@ export function FileUploadField({
 }) {
   const [pending, setPending] = useState<Pending[]>([]);
   const [localError, setLocalError] = useState('');
+  // Latest values for async callbacks, synced after each commit.
   const filesRef = useRef(files);
-  filesRef.current = files;
   const pendingRef = useRef(pending);
-  pendingRef.current = pending;
+  useEffect(() => {
+    filesRef.current = files;
+    pendingRef.current = pending;
+  });
 
   const busy = pending.some((p) => !p.error);
   useEffect(() => {

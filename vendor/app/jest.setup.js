@@ -19,5 +19,5 @@ jest.mock('firebase/firestore', () => {
       return new Date(this.ms);
     }
   }
-  return { serverTimestamp: () => ({ __type: 'serverTimestamp' }), Timestamp };
+  return { serverTimestamp: () => ({ __type: 'serverTimestamp' }), increment: (n) => ({ __type: 'increment', n }), Timestamp };
 });

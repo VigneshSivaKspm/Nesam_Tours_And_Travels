@@ -1,3 +1,4 @@
+// Copied unchanged from vendor/web/src/utils/validation.ts — pure validators.
 /**
  * Pure form validators. Each returns an error message, or '' when valid.
  * Formats follow the official Indian specs (GSTIN, PAN, IFSC, Aadhaar

@@ -1,4 +1,5 @@
-import type { BusinessRegType, IdentityProofType, OnboardingSection } from '../types';
+// Copied unchanged from vendor/web/src/config/onboarding.ts (import path adapted).
+import type { BusinessRegType, IdentityProofType, OnboardingSection } from '../types/vendor';
 
 export const VENDOR_KYC_COLLECTION = 'vendor_kyc';
 export const VENDOR_INVITES_COLLECTION = 'vendor_invites';

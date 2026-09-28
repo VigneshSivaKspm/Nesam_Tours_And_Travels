@@ -548,22 +548,7 @@ function ReviewStep({ record, preApproved, onEdit, onBack }: { record: VendorRec
   const missing = missingSections(record);
   const { business: b, documents: d, fleet: f, payoutSummary: p } = record;
   const isResubmission = record.status !== 'INCOMPLETE';
-
-  const Section = ({ id, children }: { id: OnboardingSection; children: React.ReactNode }) => {
-    const isMissing = missing.includes(id);
-    const flagged = record.review?.flaggedSections.includes(id) && isResubmission;
-    return (
-      <View style={[styles.section, isMissing && { borderColor: colors.primaryBorder, backgroundColor: colors.primarySoft }, !isMissing && flagged && { borderColor: colors.warningBorder }]}>
-        <View style={styles.sectionHead}>
-          <Text style={type.h3}>{SECTION_LABELS[id]}</Text>
-          <Text style={styles.edit} onPress={() => onEdit(ONBOARDING_STEPS.findIndex((s) => s.key === id))} accessibilityRole="button">
-            Edit
-          </Text>
-        </View>
-        {isMissing ? <Text style={styles.err}>This section is incomplete.</Text> : children}
-      </View>
-    );
-  };
+  const flaggedNow = isResubmission ? (record.review?.flaggedSections ?? []) : [];
 
   const submit = async () => {
     if (missing.length || !agreed || submitting) return;
@@ -584,33 +569,33 @@ function ReviewStep({ record, preApproved, onEdit, onBack }: { record: VendorRec
 
   return (
     <View>
-      <Section id="business">
+      <ReviewSection id="business" missing={missing} flagged={flaggedNow} onEdit={onEdit}>
         <Row label="Vendor name" value={b?.vendorName ?? ''} />
         <Row label="Business name" value={b?.businessName ?? ''} />
         <Row label="Email" value={b?.email ?? ''} />
         <Row label="Alternate number" value={b?.altPhone ? `+91 ${b.altPhone}` : '—'} />
         <Row label="Address" value={b ? [b.address.line1, b.address.line2, b.address.city, `${b.address.state} ${b.address.pincode}`].filter(Boolean).join(', ') : ''} />
-      </Section>
-      <Section id="documents">
+      </ReviewSection>
+      <ReviewSection id="documents" missing={missing} flagged={flaggedNow} onEdit={onEdit}>
         <Row
           label={BUSINESS_REG_TYPES.find((t) => t.value === d?.businessRegistration.type)?.label ?? 'Registration'}
           value={d ? `${d.businessRegistration.number} · ${d.businessRegistration.files.length} file(s)` : ''}
         />
         <Row label={IDENTITY_PROOF_TYPES.find((t) => t.value === d?.identityProof.type)?.label ?? 'Identity proof'} value={d ? `${d.identityProof.maskedNumber} · ${d.identityProof.files.length} file(s)` : ''} />
-      </Section>
-      <Section id="fleet">
+      </ReviewSection>
+      <ReviewSection id="fleet" missing={missing} flagged={flaggedNow} onEdit={onEdit}>
         <Row label="Vehicle types" value={f?.vehicleTypes.join(', ') ?? ''} />
         <Row label="Fleet size" value={f ? `${f.fleetSize} vehicle(s)` : ''} />
         <Row label="RC documents" value={f ? `${f.rcFiles.length} file(s)` : ''} />
         <Row label="Vehicle photos" value={f ? `${f.vehiclePhotos.length} file(s)` : ''} />
         <Row label="Insurance / fitness" value={f ? `${f.insuranceFiles.length} file(s)` : ''} />
-      </Section>
-      <Section id="payout">
+      </ReviewSection>
+      <ReviewSection id="payout" missing={missing} flagged={flaggedNow} onEdit={onEdit}>
         <Row label="Account holder" value={p?.accountHolderName ?? ''} />
         <Row label="Account" value={p ? `••••${p.bankLast4}` : ''} />
         <Row label="IFSC" value={p?.ifsc ?? ''} />
         <Row label="UPI" value={p?.upiId || '—'} />
-      </Section>
+      </ReviewSection>
       <Pressable style={styles.agree} onPress={() => setAgreed((a) => !a)} accessibilityRole="checkbox" accessibilityState={{ checked: agreed }}>
         <Switch value={agreed} onValueChange={setAgreed} trackColor={{ true: colors.primary, false: colors.border }} />
         <Text style={[type.small, { flex: 1 }]}>
@@ -630,6 +615,34 @@ function ReviewStep({ record, preApproved, onEdit, onBack }: { record: VendorRec
           style={{ flex: 2 }}
         />
       </View>
+    </View>
+  );
+}
+
+function ReviewSection({
+  id,
+  missing,
+  flagged,
+  onEdit,
+  children,
+}: {
+  id: OnboardingSection;
+  missing: OnboardingSection[];
+  flagged: OnboardingSection[];
+  onEdit: (i: number) => void;
+  children: React.ReactNode;
+}) {
+  const isMissing = missing.includes(id);
+  const isFlagged = flagged.includes(id);
+  return (
+    <View style={[styles.section, isMissing && { borderColor: colors.primaryBorder, backgroundColor: colors.primarySoft }, !isMissing && isFlagged && { borderColor: colors.warningBorder }]}>
+      <View style={styles.sectionHead}>
+        <Text style={type.h3}>{SECTION_LABELS[id]}</Text>
+        <Text style={styles.edit} onPress={() => onEdit(ONBOARDING_STEPS.findIndex((s) => s.key === id))} accessibilityRole="button">
+          Edit
+        </Text>
+      </View>
+      {isMissing ? <Text style={styles.err}>This section is incomplete.</Text> : children}
     </View>
   );
 }

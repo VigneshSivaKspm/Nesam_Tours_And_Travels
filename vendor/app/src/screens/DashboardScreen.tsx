@@ -35,13 +35,6 @@ export function DashboardScreen() {
   const approvedDrivers = drivers.filter((d) => d.approvalStatus === 'Approved').length;
   const onlineDrivers = drivers.filter((d) => d.presenceStatus === 'Online').length;
 
-  const Action = ({ icon, label, onPress }: { icon: keyof typeof Ionicons.glyphMap; label: string; onPress: () => void }) => (
-    <Pressable style={styles.action} onPress={onPress} accessibilityRole="button">
-      <Ionicons name={icon} size={22} color={colors.primary} />
-      <Text style={styles.actionText}>{label}</Text>
-    </Pressable>
-  );
-
   return (
     <SafeAreaView style={styles.root} edges={['top']}>
       <ScrollView contentContainerStyle={styles.content}>
@@ -99,6 +92,15 @@ export function DashboardScreen() {
         )}
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function Action({ icon, label, onPress }: { icon: keyof typeof Ionicons.glyphMap; label: string; onPress: () => void }) {
+  return (
+    <Pressable style={styles.action} onPress={onPress} accessibilityRole="button">
+      <Ionicons name={icon} size={22} color={colors.primary} />
+      <Text style={styles.actionText}>{label}</Text>
+    </Pressable>
   );
 }
 
