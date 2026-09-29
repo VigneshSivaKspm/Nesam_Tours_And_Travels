@@ -56,3 +56,9 @@ yarn-debug.log*
 yarn-error.log*
 .eslintcache
 *.tmp
+
+# Local verification outputs and private release keys
+**/dist-audit/
+functions/lib/
+*.jks
+*.keystore

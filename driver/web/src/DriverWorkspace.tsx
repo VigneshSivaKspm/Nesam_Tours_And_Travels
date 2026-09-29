@@ -46,7 +46,7 @@ interface DriverWorkspaceProps {
 }
 
 // Payout requests in these states no longer hold money back from the wallet.
-const RELEASED_PAYOUT_STATES = ['Deferred', 'Rejected', 'Cancelled'];
+const RELEASED_PAYOUT_STATES = ['Rejected', 'Cancelled'];
 
 function startOfDay(d: Date) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -133,11 +133,11 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
       .filter((p) => p.status !== 'Paid' && !RELEASED_PAYOUT_STATES.includes(p.status))
       .reduce((s, p) => s + p.amount, 0);
     return {
-      availableBalance: Math.max(0, Math.round(earnings.lifetimeEarnings - paidOut - pending)),
+      availableBalance: Math.max(0, Math.round(completedTrips.reduce((sum, trip) => sum + trip.withdrawableAmount, 0) - paidOut - pending)),
       pendingPayouts: pending,
       totalPaidOut: paidOut,
     };
-  }, [payouts, earnings.lifetimeEarnings]);
+  }, [payouts, completedTrips]);
 
   const unreadCount = notifications.filter((n) => !n.read).length;
 

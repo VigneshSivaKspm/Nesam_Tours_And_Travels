@@ -78,7 +78,7 @@ export const SafetyCenterModal: React.FC<SafetyCenterModalProps> = ({ open, onCl
           🆘 Call Emergency (112)
         </a>
 
-        <a href="tel:+919840012345" className="flex items-center justify-center gap-2 w-full py-3 border-2 border-[#E21B23] text-[#E21B23] font-bold rounded-xl text-[13px]">
+        <a href="tel:+918531970197" className="flex items-center justify-center gap-2 w-full py-3 border-2 border-[#E21B23] text-[#E21B23] font-bold rounded-xl text-[13px]">
           📞 Call NESAM Support
         </a>
 
@@ -97,7 +97,7 @@ export const SafetyCenterModal: React.FC<SafetyCenterModalProps> = ({ open, onCl
 
         <button
           onClick={() => {
-            const shareText = `I'm traveling with NESAM Tours & Travels. Track my trip or contact support: +919840012345`;
+            const shareText = `I'm traveling with NESAM Tours & Travels. Track my trip or contact support: +918531970197`;
             if (navigator.share) {
               try { navigator.share({ title: 'NESAM Trip Share', text: shareText }); } catch {}
             } else {

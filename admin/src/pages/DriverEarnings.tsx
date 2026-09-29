@@ -1,9 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { Booking, Driver } from "../types";
-import {
-  driverEarnings as mockDriverEarnings,
-  tdsRecords as mockTdsRecords,
-} from "../data/mockData";
+const mockDriverEarnings: any[] = []; // Production never substitutes or seeds demo records.
+const mockTdsRecords: any[] = []; // Production never substitutes or seeds demo records.
 import {
   subscribeDrivers,
   subscribeBookings,
@@ -153,7 +151,7 @@ export default function DriverEarnings() {
       COMMISSION_RATE *
       TDS_RATE;
     if (computed > 0) return computed;
-    return 3842; // default standard TDS for month
+    return 0; // No recorded deduction.
   }, [liveBookings]);
 
   const kpis = [

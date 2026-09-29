@@ -1,4 +1,8 @@
 {
+  "functions": {
+    "source": "functions",
+    "predeploy": ["npm --prefix functions run build"]
+  },
   "firestore": {
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
@@ -7,10 +11,11 @@
     "rules": "storage.rules"
   },
   "emulators": {
+    "functions": { "port": 5001 },
     "auth": { "port": 9099 },
     "firestore": { "port": 8080 },
     "storage": { "port": 9199 },
     "ui": { "enabled": true },
-    "singleProject": true
+    "singleProjectMode": true
   }
 }

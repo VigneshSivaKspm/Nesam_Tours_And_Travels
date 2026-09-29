@@ -9,7 +9,7 @@ interface WalletPayoutScreenProps {
   wallet: WalletDetails;
   payoutRequests: PayoutRequest[];
   transactions: TransactionRecord[];
-  onRequestPayout: (amount: number, method: 'UPI' | 'Bank Transfer', details: string) => void;
+  onRequestPayout: (amount: number, method: 'UPI' | 'Bank Transfer', details: string) => Promise<void>;
 }
 
 export const WalletPayoutScreen: React.FC<WalletPayoutScreenProps> = ({
@@ -26,6 +26,7 @@ export const WalletPayoutScreen: React.FC<WalletPayoutScreenProps> = ({
   const [targetDetails, setTargetDetails] = useState<string>(`${wallet.bankAccountName} - ${wallet.bankAccountNumber}`);
   const [payoutSuccess, setPayoutSuccess] = useState<boolean>(false);
   const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   React.useEffect(() => {
     if (!vendorId) return;
@@ -37,17 +38,23 @@ export const WalletPayoutScreen: React.FC<WalletPayoutScreenProps> = ({
     setPayoutAmount(walletBalance);
   }, [walletBalance]);
 
-  const handleSubmitPayout = (e: React.FormEvent) => {
+  const handleSubmitPayout = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
+    if (!Number.isSafeInteger(payoutAmount) || payoutAmount < 500) { setError('Minimum payout is ₹500, in whole rupees.'); return; }
     if (payoutAmount > walletBalance) {
       setError('Requested amount exceeds available balance of ₹' + walletBalance.toLocaleString('en-IN'));
       return;
     }
 
-    onRequestPayout(payoutAmount, payoutMethod, targetDetails);
+    setSubmitting(true); setError('');
+    try {
+    await onRequestPayout(payoutAmount, payoutMethod, targetDetails);
     setShowPayoutModal(false);
     setPayoutSuccess(true);
     setTimeout(() => setPayoutSuccess(false), 4000);
+    } catch (e) { setError(e instanceof Error ? e.message : 'Payout request failed. Please retry.'); }
+    finally { setSubmitting(false); }
   };
 
   return (
@@ -62,7 +69,7 @@ export const WalletPayoutScreen: React.FC<WalletPayoutScreenProps> = ({
             <span className="text-[10px] uppercase font-extrabold tracking-widest text-[#E21E26]">
               NESAM VENDOR FLEET WALLET
             </span>
-            <p className="text-xs text-gray-400 mt-0.5">Available for instant corporate payout withdrawal</p>
+            <p className="text-xs text-gray-400 mt-0.5">Available from verified non-cash payments; requests use your saved payout account</p>
             <div className="text-4xl font-black text-white mt-2">
               ₹{walletBalance.toLocaleString('en-IN')}
             </div>
@@ -161,7 +168,7 @@ export const WalletPayoutScreen: React.FC<WalletPayoutScreenProps> = ({
                   Cancel
                 </button>
                 <button
-                  type="submit"
+                  type="submit" disabled={submitting}
                   className="px-6 py-2 bg-[#E21E26] hover:bg-[#C9141B] text-white text-xs font-bold rounded-xl shadow"
                 >
                   Confirm Payout Request

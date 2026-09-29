@@ -1,7 +1,7 @@
 rules_version = '2';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CLIENT-SIDE ONLY MODEL (no Cloud Functions, no custom claims)
+// DOCUMENT-BASED ROLES + SERVER-AUTHORITATIVE BOOKING/PAYOUT CREATION
 //
 // Identity/role is derived entirely from Firestore documents:
 //   • admins/{uid}   with role == 'admin'       → platform admin
@@ -13,7 +13,7 @@ rules_version = '2';
 //   • drivers/{uid}   with status == 'Approved' → active driver
 // A user's profile doc id always equals their auth uid.
 //
-// There is no server, so anything a signed-in user is allowed to write here
+// Anything a signed-in user is allowed to write here
 // they can write directly. Every non-admin update is therefore pinned to an
 // explicit allow-list of fields (affectedKeys().hasOnly) and, where it
 // matters, to a legal state transition.
@@ -41,13 +41,15 @@ service cloud.firestore {
     function isAdmin() {
       return isSignedIn()
              && exists(docPath('admins', uid()))
-             && get(docPath('admins', uid())).data.role == 'admin';
+             && get(docPath('admins', uid())).data.role == 'admin'
+             && get(docPath('admins', uid())).data.status == 'active';
     }
     function isOwner(id) {
       return isSignedIn() && uid() == id;
     }
     function isCustomer() {
-      return isSignedIn() && exists(docPath('customers', uid()));
+      return isSignedIn() && exists(docPath('customers', uid()))
+             && get(docPath('customers', uid())).data.status == 'Approved';
     }
     function isVendor() {
       return isSignedIn() && exists(docPath('vendors', uid()));
@@ -62,7 +64,8 @@ service cloud.firestore {
       return isVendor() && isApprovedVendorStatus(get(docPath('vendors', uid())).data.status);
     }
     function isApprovedDriver() {
-      return isDriver() && get(docPath('drivers', uid())).data.status == 'Approved';
+      return isDriver() && get(docPath('drivers', uid())).data.status == 'Approved'
+             && get(docPath('drivers', uid())).data.get('fleetStatus', 'Active') != 'Suspended';
     }
     // E.164 phone number from a phone-auth token ('' when absent).
     function authPhone() {
@@ -243,7 +246,11 @@ service cloud.firestore {
                      || (d.status == 'Approved' && hasDriverInvite()
                          && driverInvite().get('preApproved', false) == true);
       return d.role == 'driver' && vendorOk && statusOk
-             && d.get('verified', false) == false;
+             && d.get('verified', false) == false
+             && d.get('walletBalance', 0) == 0
+             && d.get('docStatus', 'Pending') == 'Pending'
+             && !d.keys().hasAny(['bank', 'identity'])
+             && d.get('rating', 5) == 5 && d.get('totalTrips', 0) == 0;
     }
     match /drivers/{id} {
       allow create: if isAdmin() || (isOwner(id) && driverSelfCreateOk());
@@ -259,6 +266,13 @@ service cloud.firestore {
                         && unchanged('role')
                         && unchanged('vendorId') && unchanged('verified')
                         && unchanged('rating') && unchanged('fleetStatus')
+                        && onlyChanges(['name', 'email', 'photoUrl', 'dob', 'gender', 'address', 'city', 'pincode',
+                           'emergencyContactName', 'emergencyContact', 'licenseInfo', 'vehicleInfo',
+                           'licenseNumber', 'licenseExpiry', 'license', 'vehicleNumber', 'vehicleType', 'vehicle',
+                           'docStatus', 'submittedAt', 'updatedAt', 'presenceStatus', 'lastSeenAt', 'status', 'rejectionReason'])
+                        && (unchanged('licenseInfo') && unchanged('vehicleInfo') && unchanged('licenseNumber')
+                            && unchanged('licenseExpiry') && unchanged('vehicleNumber') && unchanged('vehicleType')
+                            || request.resource.data.docStatus == 'Pending')
                         && (unchanged('docStatus') || request.resource.data.docStatus == 'Pending'))
                     // The owning vendor manages fleet-side fields only.
                     || (isApprovedVendor() && resource.data.get('vendorId', '') == uid()
@@ -267,6 +281,16 @@ service cloud.firestore {
       allow delete: if isAdmin();
     }
 
+    // Full bank/identity information is visible only to this driver and active admins.
+    match /driver_private/{id} {
+      allow read: if isOwner(id) || isAdmin();
+      allow create, update: if isAdmin() || (isOwner(id)
+        && existsAfter(docPath('drivers', id))
+        && request.resource.data.keys().hasOnly(['bank', 'identity', 'updatedAt'])
+        && (!request.resource.data.keys().hasAny(['identity']) || (resource != null && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['identity']))
+            || getAfter(docPath('drivers', id)).data.docStatus == 'Pending'));
+      allow delete: if isAdmin();
+    }
     // ── Fleet ───────────────────────────────────────────────────────────────
     match /vehicles/{vehicleId} {
       allow read: if isSignedIn();
@@ -349,6 +373,9 @@ service cloud.firestore {
              && marketplaceStatus(id) in ['Open', 'Bidding']
              && d.assignedVendorId == uid()
              && d.status == 'Confirmed'
+             && resource.data.get('fareVerified', false) == true
+             && d.vendorPayout == get(docPath('marketplace_trips', id)).data.offeredPayout
+             && getAfter(docPath('marketplace_trips', id)).data.assignedVendorId == uid()
              && onlyChanges(['status', 'assignedVendorId', 'assignedVendorName',
                              'vendorPayout', 'confirmedAt', 'updatedAt']);
     }
@@ -361,6 +388,8 @@ service cloud.firestore {
              && resource.data.status in ['Confirmed', 'Assigned']
              && d.status == 'Assigned'
              && get(docPath('drivers', d.assignedDriverId)).data.get('vendorId', '') == uid()
+             && get(docPath('drivers', d.assignedDriverId)).data.status == 'Approved'
+             && get(docPath('drivers', d.assignedDriverId)).data.get('fleetStatus', 'Active') != 'Suspended'
              && onlyChanges(['status', 'tripStage', 'assignedDriverId', 'assignedDriverName',
                              'driver', 'driverPhone', 'assignedVehicleNumber',
                              'assignedAt', 'updatedAt']);
@@ -375,6 +404,9 @@ service cloud.firestore {
              && marketplaceStatus(id) == 'Open'
              && d.assignedDriverId == uid()
              && d.status == 'Assigned'
+             && resource.data.get('fareVerified', false) == true
+             && d.driverPayout == get(docPath('marketplace_trips', id)).data.offeredPayout
+             && getAfter(docPath('marketplace_trips', id)).data.assignedDriverId == uid()
              && onlyChanges(['status', 'tripStage', 'assignedDriverId', 'assignedDriverName',
                              'driver', 'driverPhone', 'assignedVehicleNumber',
                              'driverPayout', 'assignedAt', 'updatedAt']);
@@ -391,6 +423,8 @@ service cloud.firestore {
                           'completedAt', 'driverLocation', 'updatedAt'];
       return isApprovedDriver()
              && resource.data.get('assignedDriverId', '') == uid()
+             && d.get('tollCharges', 0) is number
+             && d.get('tollCharges', 0) >= 0 && d.get('tollCharges', 0) <= 50000
              && (
                   // progress without a status change
                   (unchanged('status') && before in ['Assigned', 'Ongoing']
@@ -406,7 +440,7 @@ service cloud.firestore {
     }
 
     match /bookings/{bookingId} {
-      allow create: if isAdmin() || validNewCustomerBooking();
+      allow create: if isAdmin(); // Customer creation goes through createBooking.
       allow read: if isAdmin()
                   || (isSignedIn() && resource.data.customerId == uid())
                   || (isVendor() && resource.data.assignedVendorId == uid())
@@ -458,13 +492,7 @@ service cloud.firestore {
     // Boarding OTP lives apart from the booking so drivers/vendors (who can
     // read the booking) never see it. Doc id == booking id.
     match /booking_secrets/{bookingId} {
-      allow create: if isAdmin() || (
-                       isCustomer()
-                       && request.resource.data.customerId == uid()
-                       && bookingAfter(bookingId).customerId == uid()
-                       && request.resource.data.otp is string
-                       && request.resource.data.otp.size() == 4
-                     );
+      allow create: if isAdmin();
       allow read: if isAdmin() || (isSignedIn() && resource.data.customerId == uid());
       allow update, delete: if isAdmin();
     }
@@ -473,13 +501,8 @@ service cloud.firestore {
     // Doc id == booking id.
     match /marketplace_trips/{tripId} {
       // Vendors see open trips only once approved.
-      allow read: if isAdmin() || isApprovedVendor() || isDriver();
-      allow create: if isAdmin() || (
-                       isCustomer()
-                       && bookingAfter(tripId).customerId == uid()
-                       && bookingAfter(tripId).status == 'Pending'
-                       && request.resource.data.status == 'Open'
-                     );
+      allow read: if isAdmin() || isApprovedVendor() || isApprovedDriver();
+      allow create: if isAdmin(); // Created atomically by createBooking.
       allow update: if isAdmin()
                     // vendor counter-bid bookkeeping
                     || (isApprovedVendor()
@@ -512,7 +535,11 @@ service cloud.firestore {
         allow create: if isApprovedVendor()
                        && request.resource.data.vendorId == uid()
                        && request.resource.data.tripId == tripId
-                       && request.resource.data.status == 'Pending Review';
+                       && request.resource.data.status == 'Pending Review'
+                       && get(docPath('marketplace_trips', tripId)).data.status in ['Open', 'Bidding']
+                       && request.resource.data.vendorCounterRate is number
+                       && request.resource.data.vendorCounterRate > 0
+                       && request.resource.data.vendorCounterRate <= 1000000;
         allow read: if isAdmin() || (isVendor() && resource.data.vendorId == uid());
         allow update: if isAdmin();
         allow delete: if isAdmin()
@@ -528,15 +555,7 @@ service cloud.firestore {
 
     // ── Payouts ─────────────────────────────────────────────────────────────
     match /payout_requests/{requestId} {
-      allow create: if request.resource.data.status == 'Pending'
-                     && request.resource.data.amount is number
-                     && request.resource.data.amount > 0
-                     && (
-                          (isApprovedVendor() && request.resource.data.vendorId == uid()
-                           && request.resource.data.get('driverId', '') == '')
-                       || (isApprovedDriver() && request.resource.data.driverId == uid()
-                           && request.resource.data.get('vendorId', '') == '')
-                        );
+      allow create: if false; // requestPartnerPayout checks and reserves settled funds.
       allow read: if isAdmin()
                   || (isVendor() && resource.data.vendorId == uid())
                   || (isDriver() && resource.data.driverId == uid());

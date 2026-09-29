@@ -1,18 +1,10 @@
+import { getFunctions, httpsCallable } from 'firebase/functions';
 // Ride lifecycle for the customer: request → dispatch → live tracking →
 // completion, cancellation, rating and SOS.
 //
-// Copied from user/web/src/services/rideService.ts and adapted for React
-// Native. Every write matches the allow-lists in firestore.rules as they are
-// today; multi-document writes are batched so the rules can cross-check them
-// atomically. Differences from the Web copy (see audit report):
-//   • no bookings/{id}/events writes — no rule covers that sub-collection yet,
-//     and a rejected event would reject the whole batch (BKD-01);
-//   • cancellation does not write `cancellationFee` — not in the customer
-//     allow-list (BKD-02); the fee is shown to the rider from the same policy;
-//   • live driver position comes from `driverLocation` on the booking, which
-//     the assigned driver's app writes (driver_presence has no rule, BKD-04);
-//   • "Assigned" with no driver yet (Admin awarded a vendor) is shown as
-//     partner-confirmed instead of "driver on the way".
+// Booking creation uses the server callable for pricing and atomic dispatch.
+// Customer updates remain constrained by firestore.rules. Live location comes
+// from the assigned driver's driverLocation field on the booking.
 
 import { collection, doc, onSnapshot, query, serverTimestamp, Timestamp, where, writeBatch } from 'firebase/firestore';
 import * as Crypto from 'expo-crypto';
@@ -363,37 +355,20 @@ export function buildRideRequestDocs(input: RideRequestInput, bookingDocId: stri
   };
 }
 
+// Reuse a request ID after an uncertain transport failure; the server deduplicates it.
+const pendingBookingIds = new Map<string, string>();
 export async function createRideRequest(input: RideRequestInput): Promise<RideRequestResult> {
-  const { pickup, drop, fare } = input;
-  if (!isValidLatLng(pickup) || !isValidLatLng(drop)) throw new Error('Pickup and destination must be set.');
-  if (!(fare.total >= 0)) throw new Error('Could not calculate a fare for this ride.');
-
-  const now = new Date();
-  const bookingRef = doc(collection(db, BOOKINGS));
-  const docs = buildRideRequestDocs(input, bookingRef.id, now, generateOtp(), generateBookingCode(now));
-
-  const batch = writeBatch(db);
-  batch.set(bookingRef, docs.booking);
-  batch.set(doc(db, SECRETS, bookingRef.id), docs.secret);
-  batch.set(doc(db, MARKETPLACE, bookingRef.id), docs.marketplace);
-
-  // The SDK retries a queued write on its own until the server accepts or
-  // rejects it, so we never re-issue it (that could double-book). If there's
-  // no ack in time we hand back the id; the ride screen shows "sending" and
-  // reacts when the server answers.
-  const committed = batch.commit();
-  try {
-    await withTimeout(committed, 15000);
-    return { id: bookingRef.id, unconfirmed: false };
-  } catch (err) {
-    if (errorCode(err) === 'timeout') {
-      committed.catch(() => undefined);
-      return { id: bookingRef.id, unconfirmed: true };
-    }
-    throw err;
-  }
+  const key = JSON.stringify([input.profile.uid, input.pickup.lat, input.pickup.lng, input.drop.lat, input.drop.lng, input.category.id, input.tripType, input.scheduledAt?.toISOString(), input.couponCode]);
+  const requestId = pendingBookingIds.get(key) ?? doc(collection(db, BOOKINGS)).id;
+  pendingBookingIds.set(key, requestId);
+  const call = httpsCallable(getFunctions(), 'createBooking', { timeout: 60000 });
+  await call({ requestId, pickup: input.pickup, drop: input.drop,
+    categoryId: input.category.id, tripType: input.tripType, expectedFare: input.fare.total,
+    paymentMethod: input.paymentMethod, couponCode: input.couponCode, notes: input.notes,
+    scheduledAt: input.scheduledAt?.toISOString() ?? null });
+  pendingBookingIds.delete(key);
+  return { id: requestId, unconfirmed: false };
 }
-
 // ── Cancel ──────────────────────────────────────────────────────────────────
 
 export interface CancellationQuote {
@@ -436,10 +411,11 @@ export function cancellationQuote(t: TripRecord, now = Date.now()): Cancellation
 }
 
 /** Booking fields a customer cancellation writes (customerUpdateOk allow-list). */
-export function buildCancelUpdate(reason: string) {
+export function buildCancelUpdate(reason: string, cancellationFee = 0) {
   return {
     status: 'Cancelled',
     cancelReason: reason.slice(0, 200),
+    cancellationFee,
     cancelledBy: 'customer',
     cancelledAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -453,7 +429,7 @@ export async function cancelRide(trip: TripRecord, reason: string): Promise<void
 
   const build = (withMarketplace: boolean) => {
     const batch = writeBatch(db);
-    batch.update(bookingRef, buildCancelUpdate(reason));
+    batch.update(bookingRef, buildCancelUpdate(reason, quote.fee));
     // Withdraw the open marketplace offer so no partner can still claim it.
     if (withMarketplace) batch.update(doc(db, MARKETPLACE, trip.id), { status: 'Closed', updatedAt: serverTimestamp() });
     return batch;

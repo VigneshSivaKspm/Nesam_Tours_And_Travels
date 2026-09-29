@@ -2,7 +2,7 @@ import React from 'react';
 import { Clock, XCircle, Ban, CheckCircle2, FileText, LogOut, PhoneCall, UserX, Car, CreditCard, Landmark } from 'lucide-react';
 import type { DriverAccount } from '../types';
 
-export const SUPPORT_PHONE = '+919840012345';
+export const SUPPORT_PHONE = '+918531970197';
 
 const Shell: React.FC<{ children: React.ReactNode; onSignOut: () => void }> = ({ children, onSignOut }) => (
   <div className="min-h-screen bg-[#F7F7F7] flex flex-col items-center justify-center p-4 sm:p-6">

@@ -1,4 +1,4 @@
-export { registerUser, setUserRole, onVendorApproved, onDriverApproved } from './auth';
-export { generateBoardingOtp, verifyBoardingOtp } from './otp';
-export { createRazorpayOrder, verifyRazorpayPayment } from './payments';
+// Profile onboarding and boarding OTP use the document-based rules contract.
+// Legacy claim/OTP/payment callables are not part of this deployment.
+export { createBooking, requestPartnerPayout } from './commerce';
 export { onTripCompleted } from './trips';

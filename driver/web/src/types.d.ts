@@ -150,6 +150,7 @@ export interface TripDetails {
   scheduledDate: string;
   scheduledTime: string;
   paymentMode: string;
+  withdrawableAmount: number;
   startOdometer?: number;
   endOdometer?: number;
   preTrip?: PreTripPhotos;

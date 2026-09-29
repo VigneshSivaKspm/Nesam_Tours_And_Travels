@@ -1,3 +1,5 @@
+import { doc, onSnapshot } from 'firebase/firestore';
+import { db } from '../services/firebase';
 import { useEffect, useMemo, useState } from "react";
 import {
   subscribeToCollection,
@@ -122,7 +124,13 @@ export default function Drivers() {
   useEffect(() => subscribeToCollection<DriverDoc>(COLLECTIONS.DRIVERS, setDrivers), []);
 
   // Keep the open review modal in sync with live data.
-  const live = selected ? drivers.find((d) => d.id === selected.id) ?? selected : null;
+  const [privateData, setPrivateData] = useState<{ id: string; fields: Partial<DriverDoc> } | null>(null);
+  useEffect(() => {
+    if (!selected) return;
+    return onSnapshot(doc(db, 'driver_private', selected.id), snap => setPrivateData({ id: selected.id, fields: snap.data() ?? {} }), () => setActionError('Could not load private driver details.'));
+  }, [selected?.id]);
+  const publicDriver = selected ? drivers.find((d) => d.id === selected.id) ?? selected : null;
+  const live = publicDriver ? { ...publicDriver, ...(privateData?.id === publicDriver.id ? privateData.fields : {}) } : null;
 
   const counts = useMemo(
     () => ({

@@ -1,3 +1,4 @@
+import { getFunctions, httpsCallable } from 'firebase/functions';
 // Ride lifecycle for the customer: request → dispatch → live tracking →
 // completion, cancellation, rating and SOS. All writes match the allow-lists
 // in firestore.rules; multi-document writes are batched so the rules can
@@ -265,10 +266,10 @@ export function isPresenceFresh(p: DriverPresence, now = Date.now()): boolean {
   return !!p.updatedAt && now - p.updatedAt.getTime() < PRESENCE_STALE_MS && isValidLatLng(p);
 }
 
-export function subscribeToDriverPresence(driverId: string, cb: (p: DriverPresence | null) => void): () => void {
+export function subscribeToDriverPresence(bookingId: string, cb: (p: DriverPresence | null) => void): () => void {
   return onSnapshot(
-    doc(db, PRESENCE, driverId),
-    (snap) => cb(snap.exists() ? mapPresence(snap.id, snap.data()) : null),
+    doc(db, BOOKINGS, bookingId),
+    (snap) => { const b = snap.data(); cb(b?.driverLocation ? mapPresence(b.assignedDriverId, { ...b.driverLocation, online: true, onTrip: true }) : null); },
     (err) => {
       console.warn('[rides] driver presence unavailable:', err);
       cb(null);
@@ -276,17 +277,11 @@ export function subscribeToDriverPresence(driverId: string, cb: (p: DriverPresen
   );
 }
 
+// Nearby idle-driver broadcast is not enabled; trip tracking uses the private booking location.
 export function subscribeToOnlineDrivers(cb: (drivers: DriverPresence[]) => void): () => void {
-  return onSnapshot(
-    query(collection(db, PRESENCE), where('online', '==', true)),
-    (snap) => cb(snap.docs.map((d) => mapPresence(d.id, d.data()))),
-    (err) => {
-      console.warn('[rides] online drivers unavailable:', err);
-      cb([]);
-    },
-  );
+  cb([]);
+  return () => {};
 }
-
 export function nearbyDrivers(all: DriverPresence[], center: LatLng, radiusKm: number, now = Date.now()): NearbyDriver[] {
   return all
     .filter((p) => !p.onTrip && isPresenceFresh(p, now))
@@ -357,105 +352,20 @@ export interface RideRequestResult {
   unconfirmed: boolean;
 }
 
+// Reuse a request ID after an uncertain transport failure; the server deduplicates it.
+const pendingBookingIds = new Map<string, string>();
 export async function createRideRequest(input: RideRequestInput): Promise<RideRequestResult> {
-  const { profile, pickup, drop, category, route, fare, tripType, paymentMethod, couponCode, notes, scheduledAt } = input;
-  if (!isValidLatLng(pickup) || !isValidLatLng(drop)) throw new Error('Pickup and destination must be set on the map.');
-  if (!(fare.total >= 0)) throw new Error('Could not calculate a fare for this ride.');
-
-  const now = new Date();
-  const when = scheduledAt ?? now;
-  const bookingRef = doc(collection(db, BOOKINGS));
-  const bookingCode = generateBookingCode(now);
-  const service = serviceName(pickup, drop, route.distanceKm);
-  const date = formatDate(when);
-  const time = scheduledAt ? formatTime(scheduledAt) : 'Now';
-
-  const batch = writeBatch(db);
-  batch.set(bookingRef, {
-    id: bookingRef.id,
-    bookingId: bookingCode,
-    customerId: profile.uid,
-    customer: profile.name,
-    phone: profile.phone,
-    customerEmail: profile.email,
-    pickup: pickup.name,
-    pickupAddress: pickup.address,
-    pickupLat: pickup.lat,
-    pickupLng: pickup.lng,
-    pickupType: pickup.type,
-    drop: drop.name,
-    dropAddress: drop.address,
-    dropLat: drop.lat,
-    dropLng: drop.lng,
-    dropType: drop.type,
-    service,
-    tripType,
-    vehicle: category.name,
-    vehicleCategory: category.name,
-    vehicleCategoryId: category.id,
-    fare: fare.total,
-    fareBreakdown: fare,
-    distanceKm: fare.distanceKm,
-    durationMin: fare.durationMin,
-    routeEstimated: route.estimated,
-    couponCode: couponCode || '',
-    discount: fare.discount,
-    notes: notes.trim().slice(0, 300),
-    payment: 'Pending',
-    paymentMethod,
-    rideTiming: scheduledAt ? 'scheduled' : 'now',
-    scheduledAt: scheduledAt ? Timestamp.fromDate(scheduledAt) : null,
-    date,
-    time,
-    status: 'Pending',
-    source: 'customer-web',
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-  batch.set(doc(db, SECRETS, bookingRef.id), {
-    customerId: profile.uid,
-    otp: generateOtp(),
-    createdAt: serverTimestamp(),
-  });
-  batch.set(doc(db, MARKETPLACE, bookingRef.id), {
-    id: bookingRef.id,
-    bookingId: bookingCode,
-    route: `${pickup.name} ➔ ${drop.name}`,
-    pickup: { address: pickup.address, city: pickup.name, lat: pickup.lat, lng: pickup.lng, time },
-    drop: { address: drop.address, city: drop.name, lat: drop.lat, lng: drop.lng },
-    travelDate: date,
-    service,
-    tripType,
-    vehicleCategory: category.name,
-    vehicleCategoryId: category.id,
-    distanceKm: fare.distanceKm,
-    offeredPayout: Math.round(fare.total * PARTNER_PAYOUT_SHARE),
-    status: 'Open',
-    createdAt: serverTimestamp(),
-  });
-  addEvent(batch, bookingRef, profile.uid, 'created', {
-    toStatus: 'Pending',
-    fare: fare.total,
-    paymentMethod,
-  });
-
-  // The SDK retries a queued write on its own until the server accepts or
-  // rejects it, so we never re-issue it (that could double-book). If there's
-  // no ack in time we hand back the id; the ride screen shows "sending" from
-  // the local cache and reacts when the server answers.
-  const committed = batch.commit();
-  try {
-    await withTimeout(committed, 15000);
-    return { id: bookingRef.id, unconfirmed: false };
-  } catch (err) {
-    if (errorCode(err) === 'timeout') {
-      committed.catch((e) => console.error('[rides] ride request rejected after timeout:', e));
-      return { id: bookingRef.id, unconfirmed: true };
-    }
-    throw err;
-  }
+  const key = JSON.stringify([input.profile.uid, input.pickup.lat, input.pickup.lng, input.drop.lat, input.drop.lng, input.category.id, input.tripType, input.scheduledAt?.toISOString(), input.couponCode]);
+  const requestId = pendingBookingIds.get(key) ?? doc(collection(db, BOOKINGS)).id;
+  pendingBookingIds.set(key, requestId);
+  const call = httpsCallable(getFunctions(), 'createBooking', { timeout: 60000 });
+  await call({ requestId, pickup: input.pickup, drop: input.drop,
+    categoryId: input.category.id, tripType: input.tripType, expectedFare: input.fare.total,
+    paymentMethod: input.paymentMethod, couponCode: input.couponCode, notes: input.notes,
+    scheduledAt: input.scheduledAt?.toISOString() ?? null });
+  pendingBookingIds.delete(key);
+  return { id: requestId, unconfirmed: false };
 }
-
 // ── Cancel ──────────────────────────────────────────────────────────────────
 
 export interface CancellationQuote {

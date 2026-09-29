@@ -1,3 +1,4 @@
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import {
   collection,
   doc,
@@ -200,24 +201,27 @@ function pickStrings(src: Record<string, any>, keys: string[]): Record<string, s
 
 export async function getDriverAccount(uid: string): Promise<DriverAccount | null> {
   const snap = await getDoc(doc(db, DRIVERS_COLLECTION, uid));
-  return snap.exists() ? mapDriverDoc(uid, snap.data()) : null;
+  const privateSnap = await getDoc(doc(db, 'driver_private', uid));
+  return snap.exists() ? mapDriverDoc(uid, { ...snap.data(), ...privateSnap.data() }) : null;
 }
 
-export function subscribeToDriverAccount(
-  uid: string,
-  callback: (account: DriverAccount | null) => void,
-  onError?: (error: unknown) => void,
-) {
-  return onSnapshot(
-    doc(db, DRIVERS_COLLECTION, uid),
-    (snap) => callback(snap.exists() ? mapDriverDoc(uid, snap.data()) : null),
-    (err) => {
-      console.warn('Driver profile subscription error:', err);
-      onError?.(err);
-    },
-  );
+export function subscribeToDriverAccount(uid: string, callback: (account: DriverAccount | null) => void, onError?: (error: unknown) => void) {
+  let profile: Record<string, unknown> | null | undefined;
+  let privateFields: Record<string, unknown> | undefined;
+  const emit = () => {
+    if (profile === undefined || privateFields === undefined) return;
+    callback(profile ? mapDriverDoc(uid, { ...profile, ...privateFields }) : null);
+  };
+  const a = onSnapshot(doc(db, DRIVERS_COLLECTION, uid), snap => {
+    if (!snap.exists() && snap.metadata.fromCache) return;
+    profile = snap.exists() ? snap.data() : null; emit();
+  }, err => onError?.(err));
+  const b = onSnapshot(doc(db, 'driver_private', uid), snap => {
+    if (!snap.exists() && snap.metadata.fromCache) return;
+    privateFields = snap.data() ?? {}; emit();
+  }, err => onError?.(err));
+  return () => { a(); b(); };
 }
-
 export interface DriverInvite {
   name?: string;
   vendorId?: string;
@@ -240,6 +244,17 @@ export async function getDriverInvite(phoneE164: string): Promise<DriverInvite |
   }
 }
 
+/** Write operational and private fields atomically; no bank/identity data leaks to vendor readers. */
+async function writeDriverProfile(uid: string, payload: Record<string, unknown>, create = false): Promise<void> {
+  const { bank, identity, ...publicFields } = payload;
+  const batch = writeBatch(db);
+  const ref = doc(db, DRIVERS_COLLECTION, uid);
+  if (create) batch.set(ref, publicFields); else batch.update(ref, publicFields);
+  if (bank || identity) batch.set(doc(db, 'driver_private', uid), {
+    ...(bank ? { bank } : {}), ...(identity ? { identity } : {}), updatedAt: serverTimestamp(),
+  }, { merge: true });
+  await batch.commit();
+}
 /** Flattened fields kept alongside the nested records for the admin/vendor panels. */
 function registrationFields(data: RegistrationData) {
   const p = data.profile;
@@ -290,7 +305,7 @@ export async function registerDriver(data: RegistrationData): Promise<void> {
   const phoneE164 = user.phoneNumber || '';
   const invite = await getDriverInvite(phoneE164);
 
-  await setDoc(doc(db, DRIVERS_COLLECTION, user.uid), {
+  await writeDriverProfile(user.uid, {
     ...registrationFields(data),
     uid: user.uid,
     id: user.uid,
@@ -305,7 +320,7 @@ export async function registerDriver(data: RegistrationData): Promise<void> {
     rating: 5,
     totalTrips: 0,
     createdAt: serverTimestamp(),
-  });
+  }, true);
 }
 
 /**
@@ -318,7 +333,7 @@ export async function resubmitDriverDocuments(
   data: RegistrationData,
   currentStatus: ApprovalStatus,
 ): Promise<void> {
-  await updateDoc(doc(db, DRIVERS_COLLECTION, uid), {
+  await writeDriverProfile(uid, {
     ...registrationFields(data),
     ...(currentStatus === 'Rejected' ? { status: 'Pending', rejectionReason: '' } : {}),
   });
@@ -329,7 +344,7 @@ export async function updateDriverContactDetails(
   uid: string,
   fields: Partial<Pick<DriverProfile, 'email' | 'address' | 'city' | 'pincode' | 'emergencyContactName' | 'emergencyContact'>> & { bank?: BankDetails },
 ): Promise<void> {
-  await updateDoc(doc(db, DRIVERS_COLLECTION, uid), { ...fields, updatedAt: serverTimestamp() });
+  await writeDriverProfile(uid, { ...fields, updatedAt: serverTimestamp() });
 }
 
 /**
@@ -337,7 +352,7 @@ export async function updateDriverContactDetails(
  * `status` is the admin approval state and the rules block drivers from it.
  */
 export async function setDriverPresence(uid: string, presence: DriverStatus): Promise<void> {
-  await updateDoc(doc(db, DRIVERS_COLLECTION, uid), {
+  await writeDriverProfile(uid, {
     presenceStatus: presence,
     lastSeenAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -472,6 +487,8 @@ function mapBooking(id: string, data: Record<string, any>): TripDetails {
     scheduledDate: str(data.date),
     scheduledTime: str(data.time),
     paymentMode: str(data.paymentMethod) || 'Cash',
+    withdrawableAmount: data.status === 'Completed' && data.fareVerified === true && data.payment === 'Paid' && data.paymentMethod !== 'Cash' && !data.assignedVendorId
+      ? Math.max(0, parseAmount(data.driverPayout)) + (data.tollsApproved === true ? Math.max(0, parseAmount(data.tollCharges)) : 0) : 0,
     startOdometer: typeof data.startOdometer === 'number' ? data.startOdometer : undefined,
     endOdometer: typeof data.endOdometer === 'number' ? data.endOdometer : undefined,
     preTrip: preTrip
@@ -579,20 +596,8 @@ export async function requestPayout(
   details: string,
 ): Promise<void> {
   const payoutRef = doc(collection(db, PAYOUT_REQUESTS_COLLECTION));
-  await setDoc(payoutRef, {
-    id: payoutRef.id,
-    driverId: driver.id,
-    driverName: driver.name,
-    driverPhone: driver.phone,
-    amount,
-    method,
-    details,
-    status: 'Pending',
-    requestedAt: formatDateTime(new Date()),
-    createdAt: serverTimestamp(),
-  });
+  await httpsCallable(getFunctions(), 'requestPartnerPayout')({ requestId: payoutRef.id, role: 'driver', amount, method });
 }
-
 export function subscribeToPayoutRequests(driverId: string, callback: (requests: PayoutRequest[]) => void) {
   const q = query(collection(db, PAYOUT_REQUESTS_COLLECTION), where('driverId', '==', driverId));
   return onSnapshot(

@@ -8,7 +8,7 @@
 //   available    = Σ credits − paid payouts − pending payouts
 import type { VendorBooking, VendorPayoutRequest, WalletTransaction } from '../types/operations';
 
-export const RELEASED_PAYOUT_STATES = ['Deferred', 'Rejected', 'Cancelled'];
+export const RELEASED_PAYOUT_STATES = ['Rejected', 'Cancelled'];
 
 export function netPayout(b: VendorBooking, commissionRate: number): number {
   if (b.vendorPayout > 0) return Math.round(b.vendorPayout);
@@ -62,7 +62,7 @@ export function summarizeVendorWallet(bookings: VendorBooking[], payouts: Vendor
     tolls: Math.round(tolls),
     paidOut,
     pending,
-    available: Math.max(0, Math.floor(netEarnings + tolls - paidOut - pending)),
+    available: Math.max(0, Math.floor(done.reduce((sum, b) => sum + b.withdrawableAmount, 0) - paidOut - pending)),
     todayNet,
     monthNet,
   };

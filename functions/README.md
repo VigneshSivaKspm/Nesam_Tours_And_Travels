@@ -1,79 +1,28 @@
-# Cloud Functions — Phase 1 (Security & Identity Foundation)
+# Cloud Functions
 
-This is the first Cloud Functions codebase for the platform. It exists to move
-security-critical logic (role assignment, boarding OTP verification, payment
-order/signature verification, commission + wallet math) off the client, where
-none of it can be trusted, and onto a server that Firestore rules can defer to.
+The supported deployment exports exactly three functions from `src/index.ts`:
 
-## Functions in this codebase
+- `createBooking`: authenticated callable; validates the customer, obtains a road route, calculates the fare and coupon eligibility on the server, then atomically creates the booking, private boarding OTP and marketplace offer. The client reviews a changed fare before retrying. Request IDs make successful retries idempotent.
+- `requestPartnerPayout`: authenticated callable; validates approved partner status, saved private payout details and available settled revenue. Transactions serialize competing requests. Cash collections, unpaid/unverified trips and vendor-owned driver revenue are excluded. Deferred requests continue to reserve funds.
+- `onTripCompleted`: writes one deterministic audit ledger entry per verified completed booking. Repeated event delivery cannot credit the same trip twice. Withdrawable balance is calculated from settled bookings and payout reservations, not a client-editable wallet field.
 
-- **`registerUser`** — callable. Called once by a client right after a brand-new
-  Firebase Auth user completes phone verification (or, for admin-created
-  accounts, right after admin creates them). Writes the initial Firestore
-  profile doc (`customers/{uid}`, `vendors/{uid}`, or `drivers/{uid}`) and sets
-  initial custom claims (`role`, `status`). Customers are auto-`Approved`;
-  vendors/drivers start `Pending` until an admin approves them.
-- **`setUserRole`** — callable, admin-only. Lets an admin directly assign/change
-  a user's role and claims (used for provisioning admin accounts and manual
-  overrides).
-- **`onVendorApproved` / `onDriverApproved`** — Firestore triggers on
-  `vendors/{uid}` / `drivers/{uid}`. When an admin flips `status` to
-  `Approved`, upgrades that user's custom claims to match.
-- **`generateBoardingOtp`** — callable. The *customer* calls this from their own
-  app right before boarding; it generates a 4-digit code, stores only its hash
-  on the booking doc, and returns the plaintext code to the customer's own
-  screen (the same pattern Uber/Ola use — the rider reads the code aloud, the
-  driver types it in). No SMS dispatch yet — that's wired up in the
-  Notifications phase.
-- **`verifyBoardingOtp`** — callable. The *driver* calls this with what the
-  customer told them; verified server-side against the stored hash, never a
-  client-side string compare.
-- **`createRazorpayOrder` / `verifyRazorpayPayment`** — callable, gated on the
-  `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` secrets. Until real keys are
-  configured, both throw a `failed-precondition` error with message
-  `PAYMENT_NOT_CONFIGURED` — they never fabricate a fake order or mark a
-  booking "Paid" without a verified signature.
-- **`onTripCompleted`** — Firestore trigger on `bookings/{id}`. When a booking's
-  `status` transitions to `Completed`, looks up the assigned vendor's actual
-  `commissionRate` field (falls back to 15% if unset), writes an audit entry to
-  `wallet_ledger`, and atomically credits the vendor's and/or driver's
-  `walletBalance` via `FieldValue.increment` — replacing the old client-only
-  "local state" wallet math.
+Roles are read from Firestore profile documents. The old auth, OTP and Razorpay modules are retained as historical source but are not exported. Existing boarding OTP verification uses the booking-secret Firestore rules; this release does not activate those legacy callable implementations.
 
-## Important: refreshing custom claims client-side
+## Verification
 
-Custom claims only take effect on a user's **next** ID token. After calling
-`registerUser`, `setUserRole`, or after an admin approves a vendor/driver, the
-affected client must call:
+From this directory:
 
-```ts
-await auth.currentUser?.getIdToken(true); // force refresh
+```powershell
+npm.cmd ci
+npm.cmd test
 ```
 
-before it will see the new `role`/`status`/`vendorId`/`driverId` in
-`request.auth.token` on subsequent calls, and before Firestore rules that key
-off those claims will behave as expected for that session.
+The test command compiles functions and runs the local Firestore emulator suite, including rules, real callable handlers and actual admin transaction operations. It requires Java, a cached Firebase Firestore emulator, and installed dependencies in `../tests/firestore-rules` and `../admin`. Handler tests mock routing HTTP responses; they do not exercise deployed HTTPS transport or real routing availability.
 
-## Local development
+## Rollout
 
-```bash
-cd functions
-npm install
-npm run build
-firebase emulators:start --only functions,firestore,auth,storage
-```
+Follow [DEPLOYMENT.md](DEPLOYMENT.md). Updated clients depend on these callables. Deploying only the new rules breaks old clients that directly create bookings and payouts. Migrate existing public driver bank/identity fields with the dry-run-first script before releasing the new private-data contract.
 
-Point each web app's Firebase SDK at the emulators during local testing
-(`connectAuthEmulator`, `connectFirestoreEmulator`, `connectFunctionsEmulator`,
-`connectStorageEmulator`) rather than the live project.
+In Admin Booking Details, record a UPI payment only after confirming receipt in the company account. Exact fare plus approved tolls is required. This records manual reconciliation; it is not gateway checkout or an actual bank transfer. Payout processing remains an administrator operation.
 
-## Deploying (manual step — requires your Firebase CLI login)
-
-```bash
-firebase deploy --only firestore:rules,storage:rules,functions
-```
-
-If you haven't set the Razorpay secrets yet, deployment still succeeds —
-payments simply stay in the "not configured" state until you run
-`firebase functions:secrets:set RAZORPAY_KEY_ID` and
-`firebase functions:secrets:set RAZORPAY_KEY_SECRET`.
+Phone testing, upload signing, production routing capacity, gateway integration and push notification delivery are separate rollout requirements. No production data migration or deployment is performed by the test command.

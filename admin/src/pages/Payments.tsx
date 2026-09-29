@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { PaymentTransaction } from "../types";
-import { payments as defaultPayments } from "../data/mockData";
+const defaultPayments: any[] = []; // Production never substitutes or seeds demo records.
 import {
   subscribePayments,
   setFirestoreDocument,
@@ -161,7 +161,7 @@ export default function Payments() {
   // Weekly trend for chart
   const weekData = useMemo(() => {
     const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    const baseAmounts = [12500, 18400, 24800, 31200, 42000, 58400, 49200];
+    const baseAmounts = [0, 0, 0, 0, 0, 0, 0];
     const multiplier = paymentList.length > 0 ? paymentList.length / 6 : 1;
     return days.map((day, i) => ({
       day,
@@ -225,13 +225,7 @@ export default function Payments() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleSyncDefaults}
-            disabled={syncing}
-            className="flex items-center gap-1.5 px-3 py-2 text-[12px] font-semibold text-[#444] bg-white border border-[#DDD] hover:bg-gray-50 rounded-lg cursor-pointer transition-colors shadow-xs"
-          >
-            ⚡ {syncing ? "Syncing..." : "Sync Sample Records"}
-          </button>
+
           <button
             onClick={() => setShowAddModal(true)}
             className="flex items-center gap-1.5 px-4 py-2 text-[12px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 cursor-pointer transition-all"

@@ -24,7 +24,7 @@ export class TimeoutError extends Error {
 export function errorCode(error: unknown): string {
   const raw = (error as { code?: string })?.code ?? '';
   // Firestore codes arrive as 'unavailable' or 'firestore/unavailable'.
-  return raw.replace(/^firestore\//, '');
+  return raw.replace(/^(?:firestore|functions)\//, '');
 }
 
 export function isTransientError(error: unknown): boolean {
@@ -76,6 +76,9 @@ export function describeError(error: unknown, fallback = 'Something went wrong. 
     return 'You are offline. Check your internet connection and try again.';
   }
   switch (code) {
+    case 'failed-precondition':
+    case 'invalid-argument':
+      return (error as { message?: string })?.message || fallback;
     case 'permission-denied':
       return 'This action is not allowed for your account. If this keeps happening, contact support.';
     case 'unauthenticated':
@@ -110,6 +113,9 @@ export function describeDataError(error: unknown): string {
     case 'unavailable':
     case 'deadline-exceeded':
       return 'The server is taking too long to respond. Check your connection and try again.';
+    case 'failed-precondition':
+    case 'invalid-argument':
+      return (error as { message?: string })?.message || 'Please check your request and try again.';
     case 'permission-denied':
     case 'storage/unauthorized':
       return 'You are not allowed to make this change right now. If your application is under review, please wait for the outcome.';

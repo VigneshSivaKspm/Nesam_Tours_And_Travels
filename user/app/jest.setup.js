@@ -21,3 +21,6 @@ jest.mock('firebase/firestore', () => {
   }
   return { serverTimestamp: () => ({ __type: 'serverTimestamp' }), Timestamp };
 });
+
+// Callable transport is covered by the backend emulator integration suite.
+jest.mock('firebase/functions', () => ({ getFunctions: jest.fn(), httpsCallable: jest.fn() }));

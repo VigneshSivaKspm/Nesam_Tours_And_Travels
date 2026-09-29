@@ -76,8 +76,8 @@ describe('earnings & wallet', () => {
     const p = (amount: number, status: string): PayoutRequest => ({ id: status + amount, amount, requestedAt: '', method: 'UPI', details: '', status, utr: '', processedAt: '' });
     const w = summarizeWallet(1850, [p(500, 'Paid'), p(300, 'Pending'), p(400, 'Rejected'), p(100, 'Deferred')]);
     expect(w.totalPaidOut).toBe(500);
-    expect(w.pendingPayouts).toBe(300);
-    expect(w.availableBalance).toBe(1050);
+    expect(w.pendingPayouts).toBe(400);
+    expect(w.availableBalance).toBe(950);
     expect(summarizeWallet(100, [p(500, 'Paid')]).availableBalance).toBe(0);
   });
 
@@ -110,5 +110,17 @@ describe('category matching', () => {
     expect(categoryMatches('Mini', 'Hatchback')).toBe(true);
     expect(categoryMatches('', 'Sedan')).toBe(true);
     expect(categoryMatches('Tempo Traveller', 'Sedan')).toBe(false);
+  });
+});
+
+
+describe('settled withdrawable balance', () => {
+  it('excludes cash, unpaid and fleet trips, and unapproved tolls', () => {
+    const base = { status: 'Completed', fare: 1000, driverPayout: 850, fareVerified: true, payment: 'Paid', paymentMethod: 'UPI', tollCharges: 50 };
+    expect(mapBooking('p', base).withdrawableAmount).toBe(850);
+    expect(mapBooking('p', { ...base, tollsApproved: true }).withdrawableAmount).toBe(900);
+    expect(mapBooking('p', { ...base, paymentMethod: 'Cash' }).withdrawableAmount).toBe(0);
+    expect(mapBooking('p', { ...base, assignedVendorId: 'vendor' }).withdrawableAmount).toBe(0);
+    expect(mapBooking('p', { ...base, payment: 'Pending' }).withdrawableAmount).toBe(0);
   });
 });

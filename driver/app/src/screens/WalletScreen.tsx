@@ -23,6 +23,7 @@ export function WalletScreen() {
         <Card>
           <Text style={type.tiny}>AVAILABLE TO WITHDRAW</Text>
           <Text style={styles.balance}>{formatINR(wallet.availableBalance)}</Text>
+            <Text style={type.small}>Withdrawals include settled non-cash independent trips only. Fleet earnings are paid through your vendor.</Text>
           <Text style={type.small}>
             {formatINR(wallet.pendingPayouts)} in pending requests • {formatINR(wallet.totalPaidOut)} paid out
           </Text>

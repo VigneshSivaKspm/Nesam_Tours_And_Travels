@@ -146,7 +146,7 @@ describe('wallet', () => {
     expect(w.commission).toBe(450);
     expect(w.netEarnings).toBe(2550);
     expect(w.tolls).toBe(100);
-    expect(w.available).toBe(2550 + 100 - 500 - 300);
+    expect(w.available).toBe(0);
     expect(w.todayNet).toBe(850);
   });
   it('lists credits and debits newest first', () => {
@@ -174,5 +174,16 @@ describe('mapping & storage', () => {
     expect(validateUploadFile({ name: 'a.exe', mimeType: 'application/x-msdownload', size: 1000 })).toBeTruthy();
     expect(validateUploadFile({ name: 'big.jpg', mimeType: 'image/jpeg', size: 11 * 1024 * 1024 })).toMatch(/10 MB/);
     expect(validateUploadFile({ name: 'empty.png', mimeType: 'image/png', size: 0 })).toMatch(/empty/);
+  });
+});
+
+
+describe('settled fleet balance', () => {
+  it('includes verified non-cash payouts and holds Deferred requests', () => {
+    const trip = mapVendorBooking('settled', { status: 'Completed', fare: 1000, vendorPayout: 850, fareVerified: true, payment: 'Paid', paymentMethod: 'UPI' });
+    expect(trip.withdrawableAmount).toBe(850);
+    const payout: VendorPayoutRequest = { id: 'p', amount: 500, method: 'UPI', details: '', status: 'Deferred', requestedAt: '', utr: '', processedAt: '', createdMs: 0 };
+    expect(summarizeVendorWallet([trip], [payout], 0.15).available).toBe(350);
+    expect(mapVendorBooking('cash', { ...trip, paymentMethod: 'Cash' }).withdrawableAmount).toBe(0);
   });
 });

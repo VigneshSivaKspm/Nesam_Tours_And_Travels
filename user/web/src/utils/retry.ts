@@ -23,7 +23,7 @@ export class TimeoutError extends Error {
 export function errorCode(error: unknown): string {
   const raw = (error as { code?: string })?.code ?? '';
   // Firestore codes arrive as 'unavailable' or 'firestore/unavailable'.
-  return raw.replace(/^firestore\//, '');
+  return raw.replace(/^(?:firestore|functions)\//, '');
 }
 
 export function isTransientError(error: unknown): boolean {
@@ -75,6 +75,9 @@ export function describeError(error: unknown, fallback = 'Something went wrong. 
     return 'You are offline. Check your internet connection and try again.';
   }
   switch (code) {
+    case 'failed-precondition':
+    case 'invalid-argument':
+      return (error as { message?: string })?.message || fallback;
     case 'permission-denied':
       return 'This action is not allowed for your account. If this keeps happening, contact support.';
     case 'unauthenticated':

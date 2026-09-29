@@ -1,3 +1,4 @@
+import { getFunctions, httpsCallable } from 'firebase/functions';
 // Vendor operations: marketplace, bidding, dispatch, fleet, drivers, invites
 // and payouts.
 //
@@ -236,6 +237,8 @@ export function mapVendorBooking(id: string, d: DocumentData): VendorBooking {
     fare: num(d.fare),
     vendorPayout: num(d.vendorPayout),
     tollCharges: num(d.tollCharges),
+    withdrawableAmount: d.status === 'Completed' && d.fareVerified === true && d.payment === 'Paid' && d.paymentMethod !== 'Cash'
+      ? Math.max(0, num(d.vendorPayout)) + (d.tollsApproved === true ? Math.max(0, num(d.tollCharges)) : 0) : 0,
     paymentMethod: str(d.paymentMethod),
     confirmedAt: toDate(d.confirmedAt),
     completedAt: toDate(d.completedAt),
@@ -525,20 +528,5 @@ export async function requestVendorPayout(vendor: VendorIdentity, amount: number
   const invalid = validateVendorPayout(amount, available);
   if (invalid) throw new VendorActionError('invalid-amount', invalid);
   const ref = doc(collection(db, 'payout_requests'));
-  await withTimeout(
-    setDoc(ref, {
-      id: ref.id,
-      vendorId: vendor.id,
-      vendorName: vendor.companyName,
-      vendorPhone: vendor.phone,
-      amount,
-      method,
-      details,
-      status: 'Pending',
-      source: 'vendor-app',
-      requestedAt: new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }),
-      createdAt: serverTimestamp(),
-    }),
-    15000,
-  );
+  await httpsCallable(getFunctions(), 'requestPartnerPayout')({ requestId: ref.id, role: 'vendor', amount, method });
 }

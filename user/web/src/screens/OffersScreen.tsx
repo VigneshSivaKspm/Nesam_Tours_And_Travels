@@ -8,7 +8,7 @@ export const OffersScreen: React.FC<{ onBack?: () => void }> = ({ onBack }) => {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
   useEffect(() => {
-    const q = query(collection(db, 'coupons'), where('active', '==', true));
+    const q = query(collection(db, 'coupons'), where('status', '==', 'Active'));
     const unsub = onSnapshot(q, (snap) => {
       setCoupons(snap.docs.map(d => ({ id: d.id, ...d.data() })));
     }, () => {});

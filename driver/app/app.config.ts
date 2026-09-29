@@ -1,10 +1,12 @@
 import type { ExpoConfig } from 'expo/config';
 
 const config: ExpoConfig = {
+  owner: 'vigneshsivakspm',
   name: 'NESAM Driver',
-  slug: 'nesam-driver-app',
+  slug: 'nesam-travels-driver',
   scheme: 'nesamdriver',
   version: '1.0.0',
+  platforms: ['android', 'ios'],
   orientation: 'portrait',
   icon: './assets/icon.png',
   userInterfaceStyle: 'light',
@@ -74,6 +76,11 @@ const config: ExpoConfig = {
       },
     ],
   ],
+  extra: {
+    eas: {
+      projectId: '7e71d505-8893-42c6-8091-852c9a15622c',
+    },
+  },
 };
 
 export default config;

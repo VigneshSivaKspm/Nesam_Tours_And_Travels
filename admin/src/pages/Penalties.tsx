@@ -9,11 +9,9 @@ import {
   setFirestoreDocument,
   COLLECTIONS,
 } from "../services/adminFirestoreService";
-import {
-  penalties as mockPenalties,
-  drivers as mockDrivers,
-  vendors as mockVendors,
-} from "../data/mockData";
+const mockPenalties: any[] = []; // Production never substitutes or seeds demo records.
+const mockDrivers: any[] = []; // Production never substitutes or seeds demo records.
+const mockVendors: any[] = []; // Production never substitutes or seeds demo records.
 
 const penaltyTypeStyle: Record<string, string> = {
   Driver: "bg-blue-50 text-blue-700 border-blue-200",
@@ -206,15 +204,7 @@ export default function Penalties() {
       <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4">
         <div className="flex items-center justify-between mb-3">
           <span className="text-[12px] font-bold text-[#111]">Cancellation & Penalty Workflow</span>
-          {penaltyList.length === 0 && (
-            <button
-              onClick={handleSeedPenalties}
-              disabled={seeding}
-              className="text-[11px] px-3 py-1 bg-red-50 text-[#E21B23] border border-red-200 rounded-lg font-semibold hover:bg-red-100 transition-colors cursor-pointer"
-            >
-              {seeding ? "Syncing..." : "⚡ Sync Sample Penalties to Database"}
-            </button>
-          )}
+
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {["Booking Cancelled", "Reason Assessed", "Penalty Calculated", "Wallet Deducted", "Customer Compensated"].map((step, i) => (
@@ -607,4 +597,3 @@ export default function Penalties() {
     </div>
   );
 }
-

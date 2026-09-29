@@ -153,6 +153,7 @@ export interface TripDetails {
   scheduledDate: string;
   scheduledTime: string;
   paymentMode: string;
+  withdrawableAmount: number;
   /** Rider's note for the driver (gate number, landmark, luggage). */
   notes: string;
   startOdometer?: number;

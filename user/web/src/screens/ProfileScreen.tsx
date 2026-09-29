@@ -128,8 +128,8 @@ const EditProfileModal: React.FC<{ open: boolean; user: UserProfile; onClose: ()
     try {
       const allowedFields = {
         name,
-        email: email.toLowerCase() || null,
-        emergencyContact: `+91 ${emergency}` || null,
+        email: email.trim().toLowerCase(),
+        emergencyContact: `+91 ${emergency}`,
       };
       await updateCustomerProfile(user.uid, allowedFields);
       onClose();

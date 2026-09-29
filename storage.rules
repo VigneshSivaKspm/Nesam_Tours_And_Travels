@@ -24,7 +24,8 @@ service firebase.storage {
     function isAdmin() {
       return isSignedIn()
              && firestore.exists(fsDoc('admins', uid()))
-             && firestore.get(fsDoc('admins', uid())).data.role == 'admin';
+             && firestore.get(fsDoc('admins', uid())).data.role == 'admin'
+             && firestore.get(fsDoc('admins', uid())).data.status == 'active';
     }
     function isVendorUser() {
       return isSignedIn() && firestore.exists(fsDoc('vendors', uid()));
@@ -67,10 +68,7 @@ service firebase.storage {
 
     // Driver KYC + pre-trip photos. The driver's own vendor may view them.
     match /drivers/{driverId}/{allPaths=**} {
-      allow read: if isAdmin()
-                  || (isSignedIn() && uid() == driverId)
-                  || (isVendorUser()
-                      && firestore.get(fsDoc('drivers', driverId)).data.get('vendorId', '') == uid());
+      allow read: if isAdmin() || (isSignedIn() && uid() == driverId);
       allow write: if (isAdmin() || (isSignedIn() && uid() == driverId)) && validUpload();
     }
 

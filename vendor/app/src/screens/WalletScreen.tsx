@@ -31,6 +31,7 @@ export function WalletScreen() {
       <Card>
         <Text style={type.tiny}>AVAILABLE TO WITHDRAW</Text>
         <Text style={styles.balance}>{formatINR(wallet.available)}</Text>
+        <Text style={type.small}>Withdrawals include verified non-cash payments only. Cash collected is already with your fleet; tolls need finance approval.</Text>
         <Text style={type.small}>
           {formatINR(wallet.pending)} pending · {formatINR(wallet.paidOut)} paid out
         </Text>

@@ -95,8 +95,8 @@ export const ActiveRideScreen: React.FC<ActiveRideScreenProps> = ({ bookingId, p
       setPresence(null);
       return undefined;
     }
-    return subscribeToDriverPresence(driverId, setPresence);
-  }, [driverId, tracking]);
+    return subscribeToDriverPresence(bookingId, setPresence);
+  }, [bookingId, driverId, tracking]);
 
   const driverFresh = presence ? isPresenceFresh(presence, now) : false;
   const driverPos: LatLng | null = presence && isValidLatLng(presence) ? presence : null;

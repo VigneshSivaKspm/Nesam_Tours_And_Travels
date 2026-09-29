@@ -1,0 +1,13 @@
+{
+  "name": "nesam-firestore-rules-tests",
+  "private": true,
+  "type": "module",
+  "description": "Emulator tests for firestore.rules against the mobile apps' write shapes.",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "dependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "firebase": "^12.19.0"
+  }
+}

@@ -114,7 +114,7 @@ export function DriverDataProvider({ account, children }: { account: DriverAccou
       notifications,
       unreadCount: notifications.filter((n) => !n.read).length,
       earnings,
-      wallet: summarizeWallet(earnings.lifetimeEarnings, payouts),
+      wallet: summarizeWallet(completedTrips.reduce((sum, trip) => sum + trip.withdrawableAmount, 0), payouts),
     };
   }, [account, bookings, bookingsLoaded, bookingsError, activeTrip, canBrowse, offers, offersError, payouts, notifications]);
 

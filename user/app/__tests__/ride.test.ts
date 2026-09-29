@@ -83,7 +83,7 @@ describe('cancellation policy', () => {
     expect(cancellationQuote(trip({ status: 'Completed' }), now).allowed).toBe(false);
   });
   it('writes only the fields the customer cancel rule allows', () => {
-    expect(Object.keys(buildCancelUpdate('Changed my plans')).sort()).toEqual(['cancelReason', 'cancelledAt', 'cancelledBy', 'status', 'updatedAt']);
+    expect(Object.keys(buildCancelUpdate('Changed my plans')).sort()).toEqual(['cancelReason', 'cancellationFee', 'cancelledAt', 'cancelledBy', 'status', 'updatedAt']);
     expect(buildCancelUpdate('x'.repeat(500)).cancelReason).toHaveLength(200);
   });
 });
@@ -110,7 +110,7 @@ describe('ride request payload', () => {
     'NT260928-ABCDE',
   );
 
-  it('creates a booking the customer create rule accepts', () => {
+  it('preserves the legacy booking shape for mapping compatibility', () => {
     expect(docs.booking).toMatchObject({ customerId: 'cust1', status: 'Pending', payment: 'Pending', fare: fare.total, source: 'customer-app' });
     expect(docs.booking).not.toHaveProperty('assignedDriverId');
     expect(docs.booking).not.toHaveProperty('assignedVendorId');

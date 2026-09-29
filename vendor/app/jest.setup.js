@@ -21,3 +21,9 @@ jest.mock('firebase/firestore', () => {
   }
   return { serverTimestamp: () => ({ __type: 'serverTimestamp' }), increment: (n) => ({ __type: 'increment', n }), Timestamp };
 });
+
+// Storage calls are never made by the pure logic under test.
+jest.mock('firebase/storage', () => ({}));
+
+// Callable transport is covered by the backend emulator integration suite.
+jest.mock('firebase/functions', () => ({ getFunctions: jest.fn(), httpsCallable: jest.fn() }));

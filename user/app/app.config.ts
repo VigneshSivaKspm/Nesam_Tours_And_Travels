@@ -6,10 +6,12 @@ import type { ExpoConfig } from 'expo/config';
 const mapsKey = process.env.GOOGLE_MAPS_ANDROID_API_KEY?.trim() ?? '';
 
 const config: ExpoConfig = {
+  owner: 'vigneshsivakspm',
   name: 'NESAM Customer',
   slug: 'nesam-customer-app',
   scheme: 'nesamcustomer',
   version: '1.0.0',
+  platforms: ['android', 'ios'],
   orientation: 'portrait',
   icon: './assets/icon.png',
   userInterfaceStyle: 'light',
@@ -83,6 +85,9 @@ const config: ExpoConfig = {
   ],
   extra: {
     mapsEnabled: !!mapsKey,
+    eas: {
+      projectId: '94ce7c34-2741-4406-803d-09ad8d519bbf',
+    },
   },
 };
 

@@ -53,6 +53,7 @@ const pageMeta: Record<string, { title: string; breadcrumb: string[] }> = {
 };
 
 import {
+  acceptOfferedRate,
   saveVehicleToFirestore,
   inviteDriverByVendor,
   subscribeToOpenMarketplaceTrips,
@@ -352,37 +353,14 @@ function VendorDashboard({
   };
 
   // Marketplace & Bidding Handlers
-  const handleAcceptOfferedRate = (trip: OpenTrip) => {
-    const newVendorTrip: VendorTrip = {
-      id: `VTRIP-${Date.now()}`,
-      bookingId: trip.bookingId,
-      customerName: "Verified Booking Customer",
-      customerPhone: "+91 98400 11223",
-      pickupAddress: trip.pickup.address,
-      dropAddress: trip.drop.address,
-      scheduledTime: `${trip.travelDate}, ${trip.pickup.time}`,
-      vehicleNumber: vehicles[0]?.vehicleNumber || "TN 09 BX 4821",
-      driverId: drivers[0]?.id || "DRV-7892",
-      driverName: drivers[0]?.name || "Muthu Kumar",
-      driverPhone: drivers[0]?.phone || "+91 98450 12345",
-      grossFare: trip.offeredPayout,
-      platformFee: Math.round(trip.offeredPayout * 0.1),
-      vendorPayout: Math.round(trip.offeredPayout * 0.9),
-      status: "Assigned",
-    };
-
-    setActiveTrips([newVendorTrip, ...activeTrips]);
-    setOpenTrips((prev) => prev.filter((t) => t.id !== trip.id));
-    setActiveTab("trips");
-    assignTripInFirestore(
-      trip.id,
-      newVendorTrip.driverId,
-      newVendorTrip.driverName,
-      newVendorTrip.vehicleNumber,
-      profile.id,
-    );
+  const handleAcceptOfferedRate = async (trip: OpenTrip) => {
+    try {
+      await acceptOfferedRate(trip.id, profile.id, profile.companyName || 'Vendor');
+      setActiveTab('trips');
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : 'Could not accept this trip. Please retry.');
+    }
   };
-
   const handleSubmitCounterBid = (
     trip: OpenTrip,
     counterRate: number,
@@ -440,13 +418,13 @@ function VendorDashboard({
   };
 
   // Wallet Payout Request
-  const handleRequestPayout = (
+  const handleRequestPayout = async (
     amount: number,
     method: "UPI" | "Bank Transfer",
     details: string,
   ) => {
     const newRequest: PayoutRequest = {
-      id: `VPO-${Math.floor(100 + Math.random() * 900)}`,
+      id: `VPO-${crypto.randomUUID()}`,
       amount: amount,
       requestedAt: new Date().toLocaleString("en-IN", {
         dateStyle: "medium",
@@ -457,12 +435,7 @@ function VendorDashboard({
       status: "Pending",
     };
 
-    setPayoutRequests([newRequest, ...payoutRequests]);
-    setWallet((prev) => ({
-      ...prev,
-      availableBalance: prev.availableBalance - amount,
-    }));
-    submitPayoutRequestToFirestore(newRequest, profile.id);
+    await submitPayoutRequestToFirestore(newRequest, profile.id);
   };
 
   return (

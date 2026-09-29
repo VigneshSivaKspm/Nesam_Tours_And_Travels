@@ -1,3 +1,4 @@
+import { getFunctions, httpsCallable } from 'firebase/functions';
 // Driver data layer. Copied from driver/web/src/services/driverFirestoreService.ts
 // and adapted for the mobile app:
 //   • the marketplace claim runs in a transaction that re-checks the offer is
@@ -9,6 +10,7 @@
 //     never reads booking_secrets; a wrong code is rejected by the rules.
 
 import {
+  writeBatch,
   collection,
   doc,
   getDoc,
@@ -16,7 +18,6 @@ import {
   query,
   runTransaction,
   serverTimestamp,
-  setDoc,
   Timestamp,
   updateDoc,
   where,
@@ -220,18 +221,22 @@ export function mapDriverDoc(uid: string, data: DocumentData): DriverAccount {
 }
 
 export function subscribeToDriverAccount(uid: string, callback: (account: DriverAccount | null) => void, onError?: (error: unknown) => void) {
-  return onSnapshot(
-    doc(db, DRIVERS_COLLECTION, uid),
-    (snap) => {
-      // A cache miss while offline looks like "no document" — wait for the
-      // server rather than sending an existing driver to sign-up.
-      if (!snap.exists() && snap.metadata.fromCache) return;
-      callback(snap.exists() ? mapDriverDoc(uid, snap.data()) : null);
-    },
-    (err) => onError?.(err),
-  );
+  let profile: Record<string, unknown> | null | undefined;
+  let privateFields: Record<string, unknown> | undefined;
+  const emit = () => {
+    if (profile === undefined || privateFields === undefined) return;
+    callback(profile ? mapDriverDoc(uid, { ...profile, ...privateFields }) : null);
+  };
+  const a = onSnapshot(doc(db, DRIVERS_COLLECTION, uid), snap => {
+    if (!snap.exists() && snap.metadata.fromCache) return;
+    profile = snap.exists() ? snap.data() : null; emit();
+  }, err => onError?.(err));
+  const b = onSnapshot(doc(db, 'driver_private', uid), snap => {
+    if (!snap.exists() && snap.metadata.fromCache) return;
+    privateFields = snap.data() ?? {}; emit();
+  }, err => onError?.(err));
+  return () => { a(); b(); };
 }
-
 export interface DriverInvite {
   name?: string;
   vendorId?: string;
@@ -250,6 +255,17 @@ export async function getDriverInvite(phoneE164: string): Promise<DriverInvite |
   }
 }
 
+/** Write operational and private fields atomically; no bank/identity data leaks to vendor readers. */
+async function writeDriverProfile(uid: string, payload: Record<string, unknown>, create = false): Promise<void> {
+  const { bank, identity, ...publicFields } = payload;
+  const batch = writeBatch(db);
+  const ref = doc(db, DRIVERS_COLLECTION, uid);
+  if (create) batch.set(ref, publicFields); else batch.update(ref, publicFields);
+  if (bank || identity) batch.set(doc(db, 'driver_private', uid), {
+    ...(bank ? { bank } : {}), ...(identity ? { identity } : {}), updatedAt: serverTimestamp(),
+  }, { merge: true });
+  await batch.commit();
+}
 /** Flattened fields kept alongside the nested records for the admin/vendor panels. */
 export function registrationFields(data: RegistrationData) {
   const p = data.profile;
@@ -311,7 +327,7 @@ export async function registerDriver(data: RegistrationData): Promise<void> {
   if (!user) throw new DriverActionError('unauthenticated', 'Your session has expired. Please sign in again.');
   const phoneE164 = user.phoneNumber || '';
   const invite = await getDriverInvite(phoneE164);
-  await withTimeout(setDoc(doc(db, DRIVERS_COLLECTION, user.uid), buildNewDriverDoc(user.uid, phoneE164, data, invite)), WRITE_TIMEOUT_MS);
+  await withTimeout(writeDriverProfile(user.uid, buildNewDriverDoc(user.uid, phoneE164, data, invite), true), WRITE_TIMEOUT_MS);
 }
 
 /**
@@ -320,7 +336,7 @@ export async function registerDriver(data: RegistrationData): Promise<void> {
  */
 export async function resubmitDriverDocuments(uid: string, data: RegistrationData, currentStatus: ApprovalStatus): Promise<void> {
   await withTimeout(
-    updateDoc(doc(db, DRIVERS_COLLECTION, uid), {
+    writeDriverProfile(uid, {
       ...registrationFields(data),
       ...(currentStatus === 'Rejected' ? { status: 'Pending', rejectionReason: '' } : {}),
     }),
@@ -334,13 +350,13 @@ export type ContactFields = Pick<DriverProfile, 'email' | 'address' | 'city' | '
 
 /** Contact / payout details that don't need re-verification. */
 export async function updateDriverContactDetails(uid: string, fields: ContactFields): Promise<void> {
-  await withTimeout(updateDoc(doc(db, DRIVERS_COLLECTION, uid), { ...fields, updatedAt: serverTimestamp() }), WRITE_TIMEOUT_MS);
+  await withTimeout(writeDriverProfile(uid, { ...fields, updatedAt: serverTimestamp() }), WRITE_TIMEOUT_MS);
 }
 
 /** Online/offline presence: `presenceStatus`, never `status` (admin approval). */
 export async function setDriverPresence(uid: string, presence: DriverStatus): Promise<void> {
   await withTimeout(
-    updateDoc(doc(db, DRIVERS_COLLECTION, uid), { presenceStatus: presence, lastSeenAt: serverTimestamp(), updatedAt: serverTimestamp() }),
+    writeDriverProfile(uid, { presenceStatus: presence, lastSeenAt: serverTimestamp(), updatedAt: serverTimestamp() }),
     WRITE_TIMEOUT_MS,
   );
 }
@@ -482,6 +498,8 @@ export function mapBooking(id: string, data: DocumentData): TripDetails {
     scheduledDate: str(data.date),
     scheduledTime: str(data.time),
     paymentMode: str(data.paymentMethod) || 'Cash',
+    withdrawableAmount: data.status === 'Completed' && data.fareVerified === true && data.payment === 'Paid' && data.paymentMethod !== 'Cash' && !data.assignedVendorId
+      ? Math.max(0, parseAmount(data.driverPayout)) + (data.tollsApproved === true ? Math.max(0, parseAmount(data.tollCharges)) : 0) : 0,
     notes: str(data.notes),
     startOdometer: typeof data.startOdometer === 'number' ? data.startOdometer : undefined,
     endOdometer: typeof data.endOdometer === 'number' ? data.endOdometer : undefined,
@@ -620,24 +638,8 @@ export async function requestPayout(
   const invalid = validatePayoutAmount(amount, available);
   if (invalid) throw new DriverActionError('invalid-amount', invalid);
   const payoutRef = doc(collection(db, PAYOUT_REQUESTS_COLLECTION));
-  await withTimeout(
-    setDoc(payoutRef, {
-      id: payoutRef.id,
-      driverId: driver.id,
-      driverName: driver.name,
-      driverPhone: driver.phone,
-      amount,
-      method,
-      details,
-      status: 'Pending',
-      source: 'driver-app',
-      requestedAt: formatDateTime(new Date()),
-      createdAt: serverTimestamp(),
-    }),
-    WRITE_TIMEOUT_MS,
-  );
+  await httpsCallable(getFunctions(), 'requestPartnerPayout')({ requestId: payoutRef.id, role: 'driver', amount, method });
 }
-
 export function subscribeToPayoutRequests(driverId: string, callback: (requests: PayoutRequest[]) => void, onError?: (e: unknown) => void) {
   return onSnapshot(
     query(collection(db, PAYOUT_REQUESTS_COLLECTION), where('driverId', '==', driverId)),

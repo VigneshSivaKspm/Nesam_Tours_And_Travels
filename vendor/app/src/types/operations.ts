@@ -51,6 +51,7 @@ export interface VendorBooking {
   fare: number;
   vendorPayout: number;
   tollCharges: number;
+  withdrawableAmount: number;
   paymentMethod: string;
   confirmedAt: Date | null;
   completedAt: Date | null;

@@ -5,7 +5,7 @@
 import type { DriverEarningsSummary, PayoutRequest, TripDetails } from '../types/driver';
 
 /** Payout requests in these states no longer hold money back from the wallet. */
-export const RELEASED_PAYOUT_STATES = ['Deferred', 'Rejected', 'Cancelled'];
+export const RELEASED_PAYOUT_STATES = ['Rejected', 'Cancelled'];
 
 function startOfDay(d: Date): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();

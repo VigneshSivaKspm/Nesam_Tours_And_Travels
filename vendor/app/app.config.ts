@@ -1,10 +1,12 @@
 import type { ExpoConfig } from 'expo/config';
 
 const config: ExpoConfig = {
+  owner: 'vigneshsivakspm',
   name: 'NESAM Vendor',
-  slug: 'nesam-vendor-app',
+  slug: 'nesam-travels-vendor',
   scheme: 'nesamvendor',
   version: '1.0.0',
+  platforms: ['android', 'ios'],
   orientation: 'portrait',
   icon: './assets/icon.png',
   userInterfaceStyle: 'light',
@@ -65,6 +67,11 @@ const config: ExpoConfig = {
       },
     ],
   ],
+  extra: {
+    eas: {
+      projectId: 'eb480650-0772-4aac-9367-4b99095eb41d',
+    },
+  },
 };
 
 export default config;

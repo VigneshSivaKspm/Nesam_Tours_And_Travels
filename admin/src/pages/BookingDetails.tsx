@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import PaymentReconciliation from '../components/PaymentReconciliation';
 import { Booking } from "../types";
 import {
   subscribeBookings,
@@ -713,6 +714,7 @@ export default function BookingDetails({
 
         {/* Right Column - Payment & Status */}
         <div className="space-y-5">
+          <PaymentReconciliation bookingId={booking.id} />
           {/* Payment Summary */}
           <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
             <h3 className="text-[13px] font-bold text-[#111] mb-4 flex items-center gap-2">

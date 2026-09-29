@@ -205,6 +205,8 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
   }, [timing, scheduledAt, now]);
   const pickupTime = scheduledAt ?? new Date(now);
 
+  const [serverQuote, setServerQuote] = useState<{ key: string; fare: FareBreakdown } | null>(null);
+  const priceKey = JSON.stringify([pickup?.lat, pickup?.lng, drop?.lat, drop?.lng, categoryId, tripType, scheduledAt?.toISOString(), coupon?.code]);
   const quotes = useMemo(() => {
     const m = new Map<string, FareBreakdown>();
     if (!route) return m;
@@ -280,7 +282,7 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
     }
   };
 
-  const quote = category ? quotes.get(category.id) ?? null : null;
+  const quote = serverQuote?.key === priceKey ? serverQuote.fare : category ? quotes.get(category.id) ?? null : null;
   const walletShort = payment === 'Wallet' && quote ? quote.total > profile.walletBalance : false;
   const tooClose = pickup && drop ? haversineKm(pickup, drop) < 0.2 : false;
   const tooFar = route ? route.distanceKm > 1500 : false;
@@ -324,7 +326,9 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
       });
       onRideRequested(res.id, res.unconfirmed);
     } catch (e) {
-      setSubmitError(describeError(e, 'We couldn’t place your ride request. Please try again.'));
+      const currentFare = (e as { details?: { fare?: FareBreakdown } }).details?.fare;
+      if (currentFare && Number.isFinite(currentFare.total)) setServerQuote({ key: priceKey, fare: currentFare });
+      setSubmitError(currentFare ? `Fare updated to ₹${currentFare.total}. Review it and tap Book again to confirm.` : describeError(e, 'We couldn’t place your ride request. Please try again.'));
       setSubmitting(false);
     }
   };
@@ -609,8 +613,8 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
                 <p className="text-[11px] font-bold uppercase tracking-wider text-gray-500 mb-1.5">Payment</p>
                 <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Payment method">
                   {PAYMENT_OPTIONS.map((p) => {
-                    const disabled = p.id === 'Card' || (p.id === 'Wallet' && (!quote || profile.walletBalance < quote.total));
-                    const hint = p.id === 'Wallet' ? `Balance ${formatINR(profile.walletBalance)}` : p.hint;
+                    const disabled = p.id === 'Card' || p.id === 'Wallet';
+                    const hint = p.id === 'Wallet' ? 'Coming soon' : p.hint;
                     return (
                       <button
                         key={p.id}

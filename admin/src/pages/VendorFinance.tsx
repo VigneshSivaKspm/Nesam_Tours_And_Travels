@@ -7,11 +7,9 @@ import {
   subscribePayments,
   subscribePayoutRequests,
 } from "../services/adminFirestoreService";
-import {
-  vendors as mockVendors,
-  payments as mockPayments,
-  gstRecords as mockGstRecords,
-} from "../data/mockData";
+const mockVendors: any[] = []; // Production never substitutes or seeds demo records.
+const mockPayments: any[] = []; // Production never substitutes or seeds demo records.
+const mockGstRecords: any[] = []; // Production never substitutes or seeds demo records.
 
 const razorpayStyle: Record<string, string> = {
   Settled: "text-green-700 bg-green-50",
@@ -646,4 +644,3 @@ export default function VendorFinance() {
     </div>
   );
 }
-

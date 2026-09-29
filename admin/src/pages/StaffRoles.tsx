@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { StaffMember } from "../types";
 import { roles as initialRoles } from "../config/constants";
-import { staff as defaultMockStaff } from "../data/mockData";
+const defaultMockStaff: any[] = []; // Production never substitutes or seeds demo records.
 import { subscribeStaff, setFirestoreDocument, updateFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
 
 const statusStyle: Record<string, string> = {
@@ -154,16 +154,7 @@ export default function Staff() {
           ))}
         </div>
 
-        {staffList.length === 0 && (
-          <button
-            onClick={handleSeedStaff}
-            disabled={seedingStaff}
-            className="px-4 py-2 border border-amber-300 rounded-xl text-xs font-bold text-amber-900 bg-amber-50 hover:bg-amber-100 shadow-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-          >
-            <span>⚡</span>
-            <span>{seedingStaff ? "Syncing..." : "Sync Standard Staff to Cloud"}</span>
-          </button>
-        )}
+
       </div>
 
       {/* Staff Table */}
@@ -387,7 +378,7 @@ export default function Staff() {
               <select className="w-full p-2 border rounded text-xs" onChange={(e) => setNewStaff({...newStaff, status: e.target.value})}>
                 <option>Active</option><option>Inactive</option>
               </select>
-              
+
               <button
                 type="button"
                 onClick={handleAddStaff}

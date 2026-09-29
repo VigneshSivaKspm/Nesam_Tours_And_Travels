@@ -1,4 +1,6 @@
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import {
+  runTransaction,
   collection,
   doc,
   setDoc,
@@ -311,22 +313,9 @@ export async function assignTripInFirestore(
 /**
  * Save Payout Request to Firestore
  */
-export async function submitPayoutRequestToFirestore(
-  request: PayoutRequest,
-  vendorId: string,
-) {
-  try {
-    const payoutRef = doc(db, PAYOUTS_COLLECTION, request.id);
-    await setDoc(
-      payoutRef,
-      { ...request, vendorId, createdAt: serverTimestamp() },
-      { merge: true },
-    );
-  } catch (error) {
-    console.warn("Submit payout request error:", error);
-  }
+export async function submitPayoutRequestToFirestore(request: PayoutRequest, _vendorId: string) {
+  await httpsCallable(getFunctions(), 'requestPartnerPayout')({ requestId: request.id, role: 'vendor', amount: request.amount, method: request.payoutMethod });
 }
-
 export function subscribeToVendorActiveTrips(
   vendorId: string,
   callback: (trips: VendorTrip[]) => void,
@@ -402,6 +391,8 @@ export function subscribeToVendorPayouts(
         const payouts = snap.docs.map((d) => ({
           id: d.id,
           ...d.data(),
+          payoutMethod: d.data().method || d.data().payoutMethod,
+          targetDetails: d.data().details || d.data().targetDetails,
         })) as PayoutRequest[];
         callback(payouts);
       },
@@ -414,47 +405,30 @@ export function subscribeToVendorPayouts(
   }
 }
 
-export function subscribeToVendorWalletBalance(
-  vendorId: string,
-  callback: (balance: number) => void,
-) {
-  try {
-    const q = query(
-      collection(db, "bookings"),
-      where("assignedVendorId", "==", vendorId),
-      where("status", "==", "Completed"),
-    );
-    const unsubTrips = onSnapshot(
-      q,
-      async (tripSnap) => {
-        const totalEarned = tripSnap.docs.reduce((sum, d) => {
-          const data = d.data();
-          const fare =
-            typeof data.fare === "number"
-              ? data.fare
-              : parseInt(String(data.fare || "0").replace(/[^0-9]/g, "")) || 0;
-          const vendorPayout = data.vendorPayout || Math.round(fare * 0.9);
-          return sum + vendorPayout;
-        }, 0);
-
-        const payoutsQ = query(
-          collection(db, "payout_requests"),
-          where("vendorId", "==", vendorId),
-          where("status", "==", "Paid"),
-        );
-        const payoutsSnap = await getDocs(payoutsQ);
-        const totalPaid = payoutsSnap.docs.reduce(
-          (sum, d) => sum + (d.data().amount || 0),
-          0,
-        );
-
-        callback(totalEarned - totalPaid);
-      },
-      () => callback(0),
-    );
-    return unsubTrips;
-  } catch {
-    callback(0);
-    return () => {};
-  }
+export function subscribeToVendorWalletBalance(vendorId: string, callback: (balance: number) => void) {
+  let earned = 0, reserved = 0;
+  const emit = () => callback(Math.max(0, Math.floor(earned - reserved)));
+  const a = onSnapshot(query(collection(db, 'bookings'), where('assignedVendorId', '==', vendorId)), snap => {
+    earned = snap.docs.reduce((sum, doc) => {
+      const b = doc.data();
+      if (b.status !== 'Completed' || b.fareVerified !== true || b.payment !== 'Paid' || b.paymentMethod === 'Cash') return sum;
+      return sum + Math.max(0, Number(b.vendorPayout || 0)) + (b.tollsApproved === true ? Math.max(0, Number(b.tollCharges || 0)) : 0);
+    }, 0); emit();
+  }, () => { earned = 0; emit(); });
+  const b = onSnapshot(query(collection(db, 'payout_requests'), where('vendorId', '==', vendorId)), snap => {
+    reserved = snap.docs.reduce((sum, d) => ['Rejected', 'Cancelled'].includes(d.data().status) ? sum : sum + Number(d.data().amount || 0), 0); emit();
+  }, () => callback(0));
+  return () => { a(); b(); };
+}
+export async function acceptOfferedRate(tripId: string, vendorId: string, vendorName: string): Promise<void> {
+  await runTransaction(db, async tx => {
+    const ref = doc(db, 'marketplace_trips', tripId);
+    const snap = await tx.get(ref);
+    if (!snap.exists() || !['Open', 'Bidding'].includes(snap.data().status)) throw new Error('This trip is no longer available.');
+    const payout = Number(snap.data().offeredPayout);
+    if (!Number.isFinite(payout) || payout <= 0) throw new Error('This trip needs an administrator to review its payout.');
+    tx.update(doc(db, 'bookings', tripId), { status: 'Confirmed', assignedVendorId: vendorId, assignedVendorName: vendorName,
+      vendorPayout: payout, confirmedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    tx.update(ref, { status: 'Assigned', assignedVendorId: vendorId, assignedVendorName: vendorName, updatedAt: serverTimestamp() });
+  });
 }
