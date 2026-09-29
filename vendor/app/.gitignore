@@ -1,41 +1,57 @@
-# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+# ── Expo Mobile App (SDK 57 / React Native 0.86) ─────────────────
 
-# dependencies
+# Dependencies
 node_modules/
 
-# Expo
+# Expo generated / cache
 .expo/
+.expo-shared/
 dist/
 web-build/
 expo-env.d.ts
 
-# Native
-.kotlin/
-*.orig.*
+# Generated native folders (Expo CNG — re-created by `expo prebuild`)
+/android/
+/ios/
+
+# Native signing credentials
 *.jks
+*.keystore
 *.p8
 *.p12
-*.key
 *.mobileprovision
+*.pem
+*.cer
+*.key
+!*.key.pub
 
-# Metro
+# Metro bundler
 .metro-health-check*
 
-# debug
+# Kotlin/Java intermediate outputs
+.kotlin/
+*.orig.*
+
+# Logs & caches
+*.log
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+*.tmp
+*.tsbuildinfo
+coverage/
+.eslintcache
+
+# Environment files
+.env
+.env.*
+!.env.example
+.env*.local
 
 # macOS
 .DS_Store
-*.pem
+Thumbs.db
 
-# local env files
-.env*.local
-
-# typescript
-*.tsbuildinfo
-
-# generated native folders
-/ios
-/android
+# VS Code
+.vscode/*
+!.vscode/extensions.json
