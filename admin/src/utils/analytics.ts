@@ -42,3 +42,63 @@ export const pctChange = (current: number, previous: number): number | null =>
 
 export const formatPct = (v: number | null): string =>
   v === null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
+
+/** Passenger transport GST (SAC 9964) applied by the booking backend. */
+export const GST_RATE = 0.05;
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * GST contained in a booking's fare. `fare` is the GST-inclusive total; the
+ * server stores the exact split in `fareBreakdown`, otherwise it is derived.
+ */
+export const bookingGst = (b: Booking): number => {
+  const gst = (b as { fareBreakdown?: { gst?: unknown } }).fareBreakdown?.gst;
+  if (typeof gst === "number" && Number.isFinite(gst)) return gst;
+  const total = parseAmount(b.fare);
+  return round2(total - total / (1 + GST_RATE));
+};
+
+/** Taxable value (fare excluding GST) of a booking. */
+export const bookingTaxable = (b: Booking): number =>
+  round2(parseAmount(b.fare) - bookingGst(b));
+
+export interface GstMonthRow {
+  month: string;
+  trips: number;
+  taxable: number;
+  gst: number;
+  total: number;
+}
+
+/**
+ * Month-wise GST on completed trips, newest month first. Only months with at
+ * least one completed trip are returned.
+ */
+export const monthlyGstSummary = (bookings: Booking[]): GstMonthRow[] => {
+  const rows = new Map<string, GstMonthRow & { sort: number }>();
+  for (const b of bookings) {
+    if (b.status !== "Completed") continue;
+    const d = bookingDate(b);
+    if (!d) continue;
+    const key = `${d.getFullYear()}-${d.getMonth()}`;
+    const row =
+      rows.get(key) ??
+      {
+        month: d.toLocaleString("en-IN", { month: "short", year: "numeric" }),
+        sort: d.getFullYear() * 12 + d.getMonth(),
+        trips: 0,
+        taxable: 0,
+        gst: 0,
+        total: 0,
+      };
+    row.trips += 1;
+    row.taxable = round2(row.taxable + bookingTaxable(b));
+    row.gst = round2(row.gst + bookingGst(b));
+    row.total = round2(row.total + parseAmount(b.fare));
+    rows.set(key, row);
+  }
+  return [...rows.values()]
+    .sort((a, b) => b.sort - a.sort)
+    .map((r) => ({ month: r.month, trips: r.trips, taxable: r.taxable, gst: r.gst, total: r.total }));
+};

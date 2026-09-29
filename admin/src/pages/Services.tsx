@@ -217,27 +217,6 @@ export default function Services() {
   }, [services, search, statusFilter, typeFilter, sortBy]);
 
   // Modal open
-  const handleSeedDefaultServices = async () => {
-    setSaving(true);
-    try {
-      for (const tmpl of PRESET_SERVICE_TEMPLATES) {
-        const docId = `SRV-${tmpl.code.substring(0, 12)}`;
-        await setFirestoreDocument(COLLECTIONS.SERVICES, docId, {
-          id: docId,
-          ...tmpl,
-          status: "Active",
-          allowedVehicleCategoryIds: [],
-          allowedVehicleCategoryNames: [],
-        });
-      }
-      showToast("Standard service catalog loaded successfully!");
-    } catch (err) {
-      showToast("Failed to load standard services.", "error");
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const handleOpenAdd = () => {
     setIsEditing(false);
     setFormData(defaultFormState);
@@ -466,15 +445,6 @@ export default function Services() {
         </div>
 
         <div className="flex items-center gap-2">
-          {services.length === 0 && (
-            <button
-              onClick={handleSeedDefaultServices}
-              disabled={saving}
-              className="flex items-center gap-1.5 px-4 py-2.5 text-[13px] font-semibold text-[#E21B23] bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg shadow-sm transition-all cursor-pointer"
-            >
-              ⚡ Load Standard Services
-            </button>
-          )}
           <button
             onClick={handleOpenAdd}
             className="flex items-center gap-2 px-4 py-2.5 text-[13px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 transition-all cursor-pointer"
@@ -550,24 +520,17 @@ export default function Services() {
               />
             </svg>
           </div>
-          <h2 className="text-[18px] font-bold text-[#111111] mb-2">Standard Services Catalog</h2>
+          <h2 className="text-[18px] font-bold text-[#111111] mb-2">No services found.</h2>
           <p className="text-[13px] text-[#999999] max-w-sm mb-6">
-            Configure Airport Taxi, Outstation Cab, One Way Taxi, Local Rental, Corporate and Recurring services.
+            Services (for example Airport Taxi or Outstation Cab) are what customers can book. Add the first service to get started.
           </p>
           <div className="flex items-center gap-3">
             <button
-              onClick={handleSeedDefaultServices}
-              disabled={saving}
+              onClick={handleOpenAdd}
               className="px-6 py-2.5 text-[13px] font-semibold text-white rounded-lg hover:opacity-90 transition-opacity cursor-pointer shadow-sm"
               style={{ background: "#E21B23" }}
             >
-              ⚡ Load All 6 Standard Services
-            </button>
-            <button
-              onClick={handleOpenAdd}
-              className="px-5 py-2.5 text-[13px] font-semibold text-[#444] bg-white border border-[#E5E5E5] rounded-lg hover:bg-gray-50 transition-colors cursor-pointer"
-            >
-              + Create Custom Service
+              + Add Service
             </button>
           </div>
         </div>

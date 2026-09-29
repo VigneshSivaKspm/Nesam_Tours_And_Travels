@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
 import { NotificationRecord } from "../types";
-import { notifications as defaultMockNotifs } from "../data/mockData";
 import {
   subscribeAdminNotifications,
   subscribeOutboundNotifications,
@@ -11,8 +10,6 @@ import {
   subscribeCustomers,
   subscribeDrivers,
   subscribeVendors,
-  setFirestoreDocument,
-  COLLECTIONS,
 } from "../services/adminFirestoreService";
 
 interface NotificationsPageProps {
@@ -143,47 +140,8 @@ export default function NotificationsPage({ onNavigate }: NotificationsPageProps
     };
   }, []);
 
-  const fallbackAdminNotifs: NotificationRecord[] = useMemo(() => {
-    return defaultMockNotifs.map((n) => ({
-      id: `notif-${n.id}`,
-      type: n.type as any,
-      title: n.title,
-      message: n.message,
-      time: n.time,
-      createdAt: new Date(Date.now() - n.id * 3600000).toISOString(),
-      read: n.read,
-      target: "admin",
-      channel: "In-App",
-    }));
-  }, []);
-
-  const displayAdminNotifs = adminNotifs.length > 0 ? adminNotifs : fallbackAdminNotifs;
+  const displayAdminNotifs = adminNotifs;
   const unreadCount = displayAdminNotifs.filter((n) => !n.read).length;
-
-  const [seedingAlerts, setSeedingAlerts] = useState(false);
-  const handleSeedAlerts = async () => {
-    setSeedingAlerts(true);
-    try {
-      for (const n of defaultMockNotifs) {
-        await setFirestoreDocument(COLLECTIONS.NOTIFICATIONS, `notif-${n.id}`, {
-          type: n.type,
-          title: n.title,
-          message: n.message,
-          time: n.time,
-          createdAt: new Date(Date.now() - n.id * 3600000).toISOString(),
-          read: n.read,
-          target: "admin",
-          channel: "In-App",
-        });
-      }
-      alert("Operational alerts successfully synchronized to Firestore!");
-    } catch (e: any) {
-      console.error(e);
-      alert("Error syncing alerts: " + (e?.message || e));
-    } finally {
-      setSeedingAlerts(false);
-    }
-  };
 
   // Filtered Admin Inbox Alerts
   const filteredAdminNotifs = useMemo(() => {
@@ -317,17 +275,6 @@ export default function NotificationsPage({ onNavigate }: NotificationsPageProps
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {adminNotifs.length === 0 && (
-            <button
-              onClick={handleSeedAlerts}
-              disabled={seedingAlerts}
-              className="px-3.5 py-2 text-[12px] font-bold text-amber-900 bg-amber-50 border border-amber-300 rounded-xl hover:bg-amber-100 transition-all flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
-            >
-              <span>⚡</span>
-              <span>{seedingAlerts ? "Syncing Alerts…" : "Sync Operational Alerts to Cloud"}</span>
-            </button>
-          )}
-
           {/* Tab Controls */}
           <div className="flex items-center bg-[#F5F5F5] p-1 rounded-xl border border-[#E5E5E5]">
             <button
@@ -463,17 +410,6 @@ export default function NotificationsPage({ onNavigate }: NotificationsPageProps
                     ? "All notifications have been marked as read."
                     : "No active platform alerts match the selected criteria."}
                 </div>
-                {adminNotifs.length === 0 && (
-                  <button
-                    onClick={handleSeedAlerts}
-                    disabled={seedingAlerts}
-                    className="px-4 py-2 text-[12px] font-bold text-white rounded-lg shadow-sm hover:opacity-90 transition-opacity inline-flex items-center gap-2 cursor-pointer"
-                    style={{ background: "#E21B23" }}
-                  >
-                    <span>⚡</span>
-                    <span>Sync Sample Operational Alerts to Cloud</span>
-                  </button>
-                )}
               </div>
             ) : (
               filteredAdminNotifs.map((n) => {

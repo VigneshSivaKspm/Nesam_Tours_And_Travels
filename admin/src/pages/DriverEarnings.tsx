@@ -1,7 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
 import { Booking, Driver } from "../types";
-const mockDriverEarnings: any[] = []; // Production never substitutes or seeds demo records.
-const mockTdsRecords: any[] = []; // Production never substitutes or seeds demo records.
 import {
   subscribeDrivers,
   subscribeBookings,
@@ -75,72 +73,15 @@ export default function DriverEarnings() {
     return rows;
   }, [liveDrivers, liveBookings]);
 
-  // Use real rows if any exist; otherwise fallback to mockDriverEarnings
-  const displayDriverRows = useMemo(() => {
-    if (driverRows.length > 0) return driverRows;
-    return mockDriverEarnings.map((m) => {
-      const gross = parseAmount(m.grossEarnings);
-      const commission = gross * COMMISSION_RATE;
-      const net = gross - commission;
-      const tds = parseAmount(m.tdsDeducted) || commission * TDS_RATE;
-      return {
-        driver: {
-          id: m.driverId,
-          name: m.driver,
-          phone: "+91 94567 12345",
-          vendor: m.vendor,
-          status: "Approved",
-          wallet: m.walletBalance,
-        } as Driver,
-        tripCount: m.tripsThisMonth,
-        gross,
-        commission,
-        net,
-        tds,
-        wallet: parseAmount(m.walletBalance),
-      };
-    });
-  }, [driverRows]);
+  const displayDriverRows = driverRows;
 
-  const pendingPayouts = useMemo(() => {
-    const real = payouts.filter((p) =>
-      ["pending", "requested", "open"].includes((p.status || "").toLowerCase()),
-    );
-    if (real.length > 0) return real;
-    // Default demo payout requests
-    return [
-      {
-        id: "PAY-101",
-        driverId: "DRV-102",
-        driverName: "Rajan P.",
-        amount: 15000,
-        status: "Pending",
-        requestedAt: "Today, 10:30 AM",
-        method: "UPI",
-        details: "rajan@upi",
-      },
-      {
-        id: "PAY-102",
-        driverId: "DRV-104",
-        driverName: "Vijay M.",
-        amount: 8000,
-        status: "Pending",
-        requestedAt: "Yesterday, 04:15 PM",
-        method: "Bank Transfer",
-        details: "HDFC Acc ending 4821",
-      },
-      {
-        id: "PAY-103",
-        driverId: "DRV-105",
-        driverName: "Anand R.",
-        amount: 20000,
-        status: "Pending",
-        requestedAt: "23 Aug 2024",
-        method: "UPI",
-        details: "anand@okaxis",
-      },
-    ];
-  }, [payouts]);
+  const pendingPayouts = useMemo(
+    () =>
+      payouts.filter((p) =>
+        ["pending", "requested", "open"].includes((p.status || "").toLowerCase()),
+      ),
+    [payouts],
+  );
 
   const tdsThisMonth = useMemo(() => {
     const now = new Date();
@@ -198,18 +139,12 @@ export default function DriverEarnings() {
           totalPayouts: gross - commission,
           driverCommissions: commission,
           tdsDeducted: commission * TDS_RATE,
-          status: i === 0 ? "Pending Deposit" : "Filed (Challan ITNS-281)",
+          // Filing is done outside the platform; no challan data is stored.
+          status: "Filing not tracked",
         });
       }
     }
-    if (rows.length > 0) return rows;
-    return mockTdsRecords.map((m) => ({
-      month: m.month,
-      totalPayouts: parseAmount(m.totalPayouts),
-      tdsDeducted: parseAmount(m.tdsDeducted),
-      driverCommissions: parseAmount(m.driverCommissions),
-      status: m.status === "Filed" ? "Filed (Challan ITNS-281)" : "Pending Deposit",
-    }));
+    return rows;
   }, [liveBookings]);
 
   const handleApprovePayout = async (payoutId: string, name: string) => {

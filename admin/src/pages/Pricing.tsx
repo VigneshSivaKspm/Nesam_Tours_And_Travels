@@ -38,108 +38,6 @@ const MODEL_BADGES: Record<PricingModel, { bg: string; text: string; border: str
   PER_DAY: { bg: "bg-indigo-50", text: "text-indigo-700", border: "border-indigo-200" },
 };
 
-// Preset Baseline Fare Rules for Tamil Nadu Operations
-const PRESET_FARE_RULES: Partial<FareRule>[] = [
-  {
-    name: "Airport Taxi Sedan Standard",
-    serviceName: "Airport Taxi",
-    pricingType: "BASE_PLUS_PER_KM",
-    baseFare: 350,
-    baseKm: 10,
-    perKmRate: 13,
-    driverBatta: 250,
-    waitingChargePerHour: 80,
-    nightChargeEnabled: true,
-    nightStartTime: "22:00",
-    nightEndTime: "05:00",
-    nightChargeType: "Percentage",
-    nightChargeValue: 15,
-    status: "Active",
-    priority: 1,
-  },
-  {
-    name: "Airport Taxi Innova SUV Standard",
-    serviceName: "Airport Taxi",
-    pricingType: "BASE_PLUS_PER_KM",
-    baseFare: 550,
-    baseKm: 10,
-    perKmRate: 19,
-    driverBatta: 350,
-    waitingChargePerHour: 100,
-    nightChargeEnabled: true,
-    nightStartTime: "22:00",
-    nightEndTime: "05:00",
-    nightChargeType: "Percentage",
-    nightChargeValue: 15,
-    status: "Active",
-    priority: 1,
-  },
-  {
-    name: "Outstation Sedan Daily Rate",
-    serviceName: "Outstation Cab",
-    pricingType: "PER_DAY",
-    baseFare: 0,
-    baseKm: 0,
-    perKmRate: 14,
-    minimumKmPerDay: 250,
-    driverBatta: 300,
-    nightChargeEnabled: true,
-    nightStartTime: "22:00",
-    nightEndTime: "05:00",
-    nightChargeType: "Fixed",
-    nightChargeValue: 200,
-    status: "Active",
-    priority: 1,
-  },
-  {
-    name: "Outstation Innova Crysta Premium",
-    serviceName: "Outstation Cab",
-    pricingType: "PER_DAY",
-    baseFare: 0,
-    baseKm: 0,
-    perKmRate: 20,
-    minimumKmPerDay: 250,
-    driverBatta: 450,
-    nightChargeEnabled: true,
-    nightStartTime: "22:00",
-    nightEndTime: "05:00",
-    nightChargeType: "Fixed",
-    nightChargeValue: 300,
-    status: "Active",
-    priority: 1,
-  },
-  {
-    name: "Local Rental 4Hrs / 40Kms Package",
-    serviceName: "Local Rental",
-    pricingType: "HOURLY_RENTAL",
-    baseFare: 900,
-    baseKm: 40,
-    includedHours: 4,
-    perKmRate: 12,
-    extraKmRate: 14,
-    extraHourRate: 120,
-    driverBatta: 150,
-    waitingChargePerHour: 100,
-    status: "Active",
-    priority: 1,
-  },
-  {
-    name: "Local Rental 8Hrs / 80Kms Full Day",
-    serviceName: "Local Rental",
-    pricingType: "HOURLY_RENTAL",
-    baseFare: 1700,
-    baseKm: 80,
-    includedHours: 8,
-    perKmRate: 12,
-    extraKmRate: 14,
-    extraHourRate: 120,
-    driverBatta: 250,
-    waitingChargePerHour: 100,
-    status: "Active",
-    priority: 1,
-  },
-];
-
 export default function Pricing() {
   const [fareRules, setFareRules] = useState<FareRule[]>([]);
   const [services, setServices] = useState<TravelService[]>([]);
@@ -593,35 +491,6 @@ export default function Pricing() {
     setDeletingRule(null);
   };
 
-  // Auto-Populate Baseline Fare Rules
-  const handleLoadPresets = async () => {
-    setLoading(true);
-    let count = 0;
-
-    for (const preset of PRESET_FARE_RULES) {
-      const exists = fareRules.some((r) => r.name.toLowerCase() === preset.name?.toLowerCase());
-      if (!exists) {
-        const cat = categories.find((c) => c.status === "Active") || categories[0];
-        const srv = services.find((s) => s.name === preset.serviceName) || services[0];
-
-        const payload: Partial<FareRule> = {
-          ...preset,
-          vehicleCategoryId: cat ? cat.id : "cat-sedan",
-          vehicleCategoryName: cat ? cat.name : "Sedan",
-          serviceId: srv ? srv.id : undefined,
-          serviceName: srv ? srv.name : preset.serviceName,
-          code: `FARE-${Math.floor(1000 + Math.random() * 9000)}`,
-        };
-
-        await addFirestoreDocument(COLLECTIONS.FARE_RULES, payload);
-        count++;
-      }
-    }
-
-    setLoading(false);
-    showToast(`Loaded ${count > 0 ? count : 'all'} preset fare rules successfully!`);
-  };
-
   return (
     <div className="p-4 lg:p-6 space-y-6 max-w-[1600px] mx-auto min-h-screen">
       {/* Toast Notification */}
@@ -642,16 +511,6 @@ export default function Pricing() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleLoadPresets}
-            className="px-3 py-2 text-xs font-semibold text-[#E21B23] bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-          >
-            <svg className="w-3.5 h-3.5 text-[#E21B23]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
-            Auto-Populate Presets
-          </button>
-
           <button
             onClick={handleOpenCreate}
             className="px-4 py-2 text-xs font-semibold text-white rounded-xl hover:opacity-90 active:scale-95 transition-all shadow-md flex items-center gap-2"
@@ -866,9 +725,9 @@ export default function Pricing() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
             </svg>
           </div>
-          <h2 className="text-lg font-bold text-[#111111] mb-2">Pricing & Fare Management</h2>
+          <h2 className="text-lg font-bold text-[#111111] mb-2">No fare rules found.</h2>
           <p className="text-xs text-[#666] mb-6 leading-relaxed max-w-md mx-auto">
-            Set base fare, per-km rates, driver batta, waiting charges, toll handling and night surcharges for all service types.
+            Set base fare, per-km rates, driver batta, waiting charges, toll handling and night surcharges for each service and vehicle category.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
             <button
@@ -876,13 +735,7 @@ export default function Pricing() {
               className="w-full sm:w-auto px-6 py-2.5 text-xs font-semibold text-white rounded-xl hover:opacity-90 active:scale-95 transition-all shadow-md"
               style={{ background: "#E21B23" }}
             >
-              Get Started
-            </button>
-            <button
-              onClick={handleLoadPresets}
-              className="w-full sm:w-auto px-5 py-2.5 text-xs font-semibold text-[#111111] bg-gray-50 border border-[#E5E5E5] rounded-xl hover:bg-gray-100 transition-all"
-            >
-              Load Preset Fare Rules
+              Add Fare Rule
             </button>
           </div>
         </div>

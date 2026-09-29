@@ -45,181 +45,6 @@ const TYPE_BADGES: Record<LocationType, { bg: string; text: string; border: stri
   Other: { bg: "bg-gray-50", text: "text-gray-700", border: "border-gray-200" },
 };
 
-// Preset Baseline Locations across Tamil Nadu & Transport Hubs
-const PRESET_LOCATIONS: Partial<MasterLocation>[] = [
-  {
-    name: "Chennai International Airport (MAA)",
-    code: "MAA",
-    type: "Airport",
-    state: "Tamil Nadu",
-    district: "Chengalpattu",
-    city: "Chennai",
-    area: "Meenambakkam",
-    pincode: "600027",
-    address: "Grand Southern Trunk Rd, Meenambakkam, Chennai, Tamil Nadu 600027",
-    lat: 12.9941,
-    lng: 80.1709,
-    pickupEnabled: true,
-    dropEnabled: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    status: "Active",
-    displayOrder: 1,
-  },
-  {
-    name: "Coimbatore International Airport (CJB)",
-    code: "CJB",
-    type: "Airport",
-    state: "Tamil Nadu",
-    district: "Coimbatore",
-    city: "Coimbatore",
-    area: "Peelamedu",
-    pincode: "641014",
-    address: "Civil Aerodrome Post, Peelamedu, Coimbatore, Tamil Nadu 641014",
-    lat: 11.03,
-    lng: 77.0434,
-    pickupEnabled: true,
-    dropEnabled: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    status: "Active",
-    displayOrder: 2,
-  },
-  {
-    name: "Chennai Central Railway Station (MAS)",
-    code: "MAS",
-    type: "Railway Station",
-    state: "Tamil Nadu",
-    district: "Chennai",
-    city: "Chennai",
-    area: "Park Town",
-    pincode: "600003",
-    address: "Kannappar Thidal, Park Town, Chennai, Tamil Nadu 600003",
-    lat: 13.0827,
-    lng: 80.2756,
-    pickupEnabled: true,
-    dropEnabled: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    status: "Active",
-    displayOrder: 3,
-  },
-  {
-    name: "Madurai Junction Railway Station (MDU)",
-    code: "MDU",
-    type: "Railway Station",
-    state: "Tamil Nadu",
-    district: "Madurai",
-    city: "Madurai",
-    area: "West Veli Street",
-    pincode: "625001",
-    address: "Railway Colony, Madurai, Tamil Nadu 625001",
-    lat: 9.9195,
-    lng: 78.1193,
-    pickupEnabled: true,
-    dropEnabled: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    status: "Active",
-    displayOrder: 4,
-  },
-  {
-    name: "Coimbatore City Center",
-    code: "CBE-CITY",
-    type: "City",
-    state: "Tamil Nadu",
-    district: "Coimbatore",
-    city: "Coimbatore",
-    area: "Gandhipuram",
-    pincode: "641012",
-    address: "Gandhipuram, Coimbatore, Tamil Nadu 641012",
-    lat: 11.0168,
-    lng: 76.9558,
-    pickupEnabled: true,
-    dropEnabled: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    status: "Active",
-    displayOrder: 5,
-  },
-  {
-    name: "Salem Central Bus Stand",
-    code: "SLM-BUS",
-    type: "Bus Stand",
-    state: "Tamil Nadu",
-    district: "Salem",
-    city: "Salem",
-    area: "Zaheerabad",
-    pincode: "636004",
-    address: "Meyyanur, Salem, Tamil Nadu 636004",
-    lat: 11.6643,
-    lng: 78.146,
-    pickupEnabled: true,
-    dropEnabled: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    status: "Active",
-    displayOrder: 6,
-  },
-  {
-    name: "Gobichettipalayam Town",
-    code: "GOBI-CITY",
-    type: "City",
-    state: "Tamil Nadu",
-    district: "Erode",
-    city: "Gobichettipalayam",
-    area: "Kutchery Street",
-    pincode: "638452",
-    address: "Gobichettipalayam, Erode District, Tamil Nadu 638452",
-    lat: 11.4549,
-    lng: 77.4382,
-    pickupEnabled: true,
-    dropEnabled: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    status: "Active",
-    displayOrder: 7,
-  },
-  {
-    name: "Tiruchirappalli International Airport (TRZ)",
-    code: "TRZ",
-    type: "Airport",
-    state: "Tamil Nadu",
-    district: "Tiruchirappalli",
-    city: "Tiruchirappalli",
-    area: "Airport Post",
-    pincode: "620007",
-    address: "Airport Road, Tiruchirappalli, Tamil Nadu 620007",
-    lat: 10.7654,
-    lng: 78.7097,
-    pickupEnabled: true,
-    dropEnabled: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    status: "Active",
-    displayOrder: 8,
-  },
-  {
-    name: "Pondicherry Promenade Beach",
-    code: "PDY-BEACH",
-    type: "Tourist Place",
-    state: "Puducherry",
-    district: "Puducherry",
-    city: "Pondicherry",
-    area: "White Town",
-    pincode: "605001",
-    address: "Goubert Ave, White Town, Pondicherry 605001",
-    lat: 11.9338,
-    lng: 79.8356,
-    pickupEnabled: true,
-    dropEnabled: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    status: "Active",
-    displayOrder: 9,
-  },
-];
-
 export default function Locations() {
   const [locations, setLocations] = useState<MasterLocation[]>([]);
   const [services, setServices] = useState<TravelService[]>([]);
@@ -596,25 +421,6 @@ export default function Locations() {
     setDeletingLocation(null);
   };
 
-  // One-click Preset Importer
-  const handleLoadPresets = async () => {
-    setLoading(true);
-    let addedCount = 0;
-
-    for (const preset of PRESET_LOCATIONS) {
-      const exists = locations.some(
-        (l) => l.name.toLowerCase() === preset.name?.toLowerCase()
-      );
-      if (!exists) {
-        await addFirestoreDocument(COLLECTIONS.LOCATIONS, preset);
-        addedCount++;
-      }
-    }
-
-    setLoading(false);
-    showToast(`Successfully loaded ${addedCount > 0 ? addedCount : 'all'} preset master locations!`);
-  };
-
   return (
     <div className="p-4 lg:p-6 space-y-6 max-w-[1600px] mx-auto min-h-screen">
       {/* Toast Notification */}
@@ -635,17 +441,6 @@ export default function Locations() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleLoadPresets}
-            className="px-3 py-2 text-xs font-semibold text-[#E21B23] bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl transition-all flex items-center gap-1.5 shadow-sm cursor-pointer"
-            title="Quickly populate major Tamil Nadu transport hubs & cities"
-          >
-            <svg className="w-3.5 h-3.5 text-[#E21B23]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
-            Auto-Populate Presets
-          </button>
-
           <button
             onClick={handleOpenCreate}
             className="px-4 py-2 text-xs font-semibold text-white rounded-xl hover:opacity-90 active:scale-95 transition-all shadow-md flex items-center gap-2"
@@ -728,9 +523,9 @@ export default function Locations() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
           </div>
-          <h2 className="text-lg font-bold text-[#111111] mb-2">Locations</h2>
+          <h2 className="text-lg font-bold text-[#111111] mb-2">No locations found.</h2>
           <p className="text-xs text-[#666] mb-6 leading-relaxed max-w-md mx-auto">
-            Manage cities, airports, pickup points and drop points across Tamil Nadu and beyond.
+            Add the cities, airports, stations and pickup points your services operate from.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
             <button
@@ -738,13 +533,7 @@ export default function Locations() {
               className="w-full sm:w-auto px-6 py-2.5 text-xs font-semibold text-white rounded-xl hover:opacity-90 active:scale-95 transition-all shadow-md"
               style={{ background: "#E21B23" }}
             >
-              Get Started
-            </button>
-            <button
-              onClick={handleLoadPresets}
-              className="w-full sm:w-auto px-5 py-2.5 text-xs font-semibold text-[#111111] bg-gray-50 border border-[#E5E5E5] rounded-xl hover:bg-gray-100 transition-all"
-            >
-              Load TN Hub Presets
+              Add Location
             </button>
           </div>
         </div>

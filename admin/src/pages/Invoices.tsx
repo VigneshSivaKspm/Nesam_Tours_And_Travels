@@ -296,129 +296,6 @@ export default function Invoices() {
     }
   };
 
-  const handleGenerateSampleInvoices = async () => {
-    setCreating(true);
-    try {
-      const samples = [
-        {
-          no: "INV-2024-001",
-          bookingId: "NTT-2024-4821",
-          cust: "Rajesh Kumar",
-          phone: "+91 98412 33456",
-          svc: "Airport Taxi",
-          pickup: "Anna Nagar, Chennai",
-          drop: "Chennai Airport",
-          veh: "Toyota Innova",
-          driver: "Murugan S.",
-          km: 24,
-          base: 1250,
-          status: "Paid" as const,
-        },
-        {
-          no: "INV-2024-002",
-          bookingId: "NTT-2024-4820",
-          cust: "Priya Sharma",
-          phone: "+91 87654 21098",
-          svc: "Outstation Cab",
-          pickup: "T. Nagar, Chennai",
-          drop: "Bangalore",
-          veh: "Toyota Innova Crysta",
-          driver: "Rajan P.",
-          km: 350,
-          base: 4800,
-          status: "Paid" as const,
-        },
-        {
-          no: "INV-2024-003",
-          bookingId: "NTT-2024-4817",
-          cust: "Karthik Sundaram",
-          phone: "+91 99887 76543",
-          svc: "Tour Package",
-          pickup: "Mylapore, Chennai",
-          drop: "Ooty",
-          veh: "Tempo Traveller",
-          driver: "Anand R.",
-          km: 540,
-          base: 12500,
-          status: "Paid" as const,
-        },
-      ];
-
-      for (const s of samples) {
-        const rateGst = 5;
-        const taxable = s.base / 1.05;
-        const totalTax = s.base - taxable;
-        const cgst = totalTax / 2;
-        const sgst = totalTax / 2;
-        const docId = s.no;
-
-        const inv: Invoice = {
-          id: docId,
-          invoiceNumber: s.no,
-          bookingId: s.bookingId,
-          customerId: "CUS-" + s.cust.replace(/\s+/g, ""),
-          invoiceDate: new Date().toISOString().split("T")[0],
-          dueDate: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
-          companySnapshot: {
-            name: companySettings.name,
-            gstin: companySettings.gstin,
-            address: companySettings.address,
-            phone: companySettings.phone,
-            email: companySettings.email,
-            sacCode: companySettings.sacCode,
-          },
-          customerSnapshot: {
-            name: s.cust,
-            phone: s.phone,
-            email: s.cust.toLowerCase().replace(/\s+/g, ".") + "@email.com",
-            address: "Chennai, Tamil Nadu",
-          },
-          tripSnapshot: {
-            service: s.svc,
-            pickup: s.pickup,
-            drop: s.drop,
-            travelDate: new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }),
-            travelTime: "08:00 AM",
-            vehicle: s.veh,
-            driverName: s.driver,
-            distanceKm: s.km,
-          },
-          items: [
-            {
-              description: `${s.svc} Transfer (${s.pickup} → ${s.drop})`,
-              sacCode: companySettings.sacCode,
-              quantity: 1,
-              rate: Math.round(taxable),
-              amount: Math.round(taxable),
-            },
-          ],
-          subtotal: Math.round(taxable),
-          discount: 0,
-          taxableAmount: Math.round(taxable),
-          gstRate: rateGst,
-          cgst: Math.round(cgst * 100) / 100,
-          sgst: Math.round(sgst * 100) / 100,
-          totalTax: Math.round(totalTax * 100) / 100,
-          grandTotal: s.base,
-          paidAmount: s.base,
-          balanceAmount: 0,
-          paymentStatus: s.status,
-          invoiceStatus: "Issued",
-          terms: "1. Goods once rendered are non-refundable. 2. Payments via UPI, Card, or Cash. 3. This is a computer-generated tax invoice.",
-          createdAt: new Date().toISOString(),
-        };
-
-        await setFirestoreDocument(COLLECTIONS.INVOICES, docId, inv);
-      }
-      showToast("Standard GST invoices generated successfully!", "success");
-    } catch (err: any) {
-      console.warn("Error generating sample invoices:", err);
-      showToast("Failed to generate invoices: " + err.message, "error");
-    } finally {
-      setCreating(false);
-    }
-  };
-
   // Void/Cancel Invoice
   const handleVoidInvoice = async (inv: Invoice) => {
     if (!window.confirm(`Are you sure you want to void invoice ${inv.invoiceNumber}?`)) return;
@@ -486,13 +363,6 @@ export default function Invoices() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleGenerateSampleInvoices}
-            disabled={creating}
-            className="flex items-center gap-2 px-3.5 py-2.5 text-[13px] font-semibold text-[#333] bg-white border border-[#DDD] rounded-lg shadow-xs hover:bg-gray-50 active:scale-95 transition-all cursor-pointer"
-          >
-            ⚡ {creating ? "Generating..." : "Generate Sample Invoices"}
-          </button>
           <button
             onClick={() => {
               setCreateError(null);
@@ -571,18 +441,11 @@ export default function Invoices() {
               />
             </svg>
           </div>
-          <h2 className="text-[18px] font-bold text-[#111111] mb-2">Invoices</h2>
+          <h2 className="text-[18px] font-bold text-[#111111] mb-2">No invoices found.</h2>
           <p className="text-[13px] text-[#999999] max-w-sm mb-6">
-            View, download and manage GST-compliant tax invoices for all completed bookings. Auto-generate customer receipts.
+            GST tax invoices are created from real bookings. Create the first invoice from a booking to get started.
           </p>
           <div className="flex items-center gap-3">
-            <button
-              onClick={handleGenerateSampleInvoices}
-              disabled={creating}
-              className="px-5 py-2.5 text-[13px] font-semibold text-[#111] bg-white border border-[#DDD] rounded-lg hover:bg-gray-50 transition-all cursor-pointer shadow-xs"
-            >
-              ⚡ {creating ? "Generating..." : "Generate Sample Invoices"}
-            </button>
             <button
               onClick={() => {
                 setCreateError(null);

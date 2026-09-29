@@ -34,71 +34,6 @@ const STATUS_BADGES: Record<CouponStatus, { bg: string; text: string; border: st
   Archived: { bg: "bg-red-50", text: "text-red-700", border: "border-red-200" },
 };
 
-// Preset Baseline Offers for Nesam Tours & Travels
-const PRESET_COUPONS: Partial<MasterCoupon>[] = [
-  {
-    name: "Flat ₹200 OFF Welcome Offer",
-    code: "NESAM200",
-    description: "Flat ₹200 discount on all taxi bookings above ₹1,000.",
-    discountType: "FIXED_AMOUNT",
-    discountValue: 200,
-    minimumBookingAmount: 1000,
-    validFrom: new Date().toISOString().split("T")[0],
-    validUntil: "2026-12-31",
-    totalUsageLimit: 500,
-    usedCount: 14,
-    perCustomerLimit: 1,
-    status: "Active",
-  },
-  {
-    name: "Airport Taxi 10% Special",
-    code: "AIRPORT10",
-    description: "10% OFF on all Airport Pickup & Drop bookings (Max discount ₹300).",
-    discountType: "PERCENTAGE",
-    discountValue: 10,
-    maximumDiscount: 300,
-    minimumBookingAmount: 800,
-    serviceNames: ["Airport Taxi"],
-    validFrom: new Date().toISOString().split("T")[0],
-    validUntil: "2026-12-31",
-    totalUsageLimit: 250,
-    usedCount: 28,
-    perCustomerLimit: 2,
-    status: "Active",
-  },
-  {
-    name: "Outstation Flat ₹500 Mega Discount",
-    code: "OUTSTATION500",
-    description: "Flat ₹500 OFF on multi-day outstation trips over ₹3,000.",
-    discountType: "FIXED_AMOUNT",
-    discountValue: 500,
-    minimumBookingAmount: 3000,
-    serviceNames: ["Outstation Cab", "One Way Taxi"],
-    validFrom: new Date().toISOString().split("T")[0],
-    validUntil: "2026-12-31",
-    totalUsageLimit: 100,
-    usedCount: 8,
-    perCustomerLimit: 1,
-    status: "Active",
-  },
-  {
-    name: "First Time Customer 15% OFF",
-    code: "FIRSTFEST",
-    description: "15% discount for first-time customer bookings (Max ₹400).",
-    discountType: "PERCENTAGE",
-    discountValue: 15,
-    maximumDiscount: 400,
-    minimumBookingAmount: 500,
-    firstBookingOnly: true,
-    validFrom: new Date().toISOString().split("T")[0],
-    validUntil: "2026-12-31",
-    totalUsageLimit: 1000,
-    usedCount: 42,
-    perCustomerLimit: 1,
-    status: "Active",
-  },
-];
-
 export default function Offers() {
   const [coupons, setCoupons] = useState<MasterCoupon[]>([]);
   const [services, setServices] = useState<TravelService[]>([]);
@@ -467,25 +402,6 @@ export default function Offers() {
     setDeletingCoupon(null);
   };
 
-  // Preset Auto-Populate
-  const handleLoadPresets = async () => {
-    setLoading(true);
-    let count = 0;
-
-    for (const preset of PRESET_COUPONS) {
-      const exists = coupons.some(
-        (c) => normalizeCouponCode(c.code) === normalizeCouponCode(preset.code || "")
-      );
-      if (!exists) {
-        await addFirestoreDocument(COLLECTIONS.COUPONS, preset);
-        count++;
-      }
-    }
-
-    setLoading(false);
-    showToast(`Successfully loaded ${count > 0 ? count : 'all'} preset offers!`);
-  };
-
   return (
     <div className="p-4 lg:p-6 space-y-6 max-w-[1600px] mx-auto min-h-screen">
       {/* Toast Notification */}
@@ -506,16 +422,6 @@ export default function Offers() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleLoadPresets}
-            className="px-3 py-2 text-xs font-semibold text-[#E21B23] bg-red-50 hover:bg-red-100 border border-red-200 rounded-xl transition-all flex items-center gap-1.5 shadow-xs cursor-pointer"
-          >
-            <svg className="w-3.5 h-3.5 text-[#E21B23]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
-            Auto-Populate Presets
-          </button>
-
           <button
             onClick={handleOpenCreate}
             className="px-4 py-2 text-xs font-semibold text-white rounded-xl hover:opacity-90 active:scale-95 transition-all shadow-md flex items-center gap-2"
@@ -695,7 +601,7 @@ export default function Offers() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 5v2m0 4v2m0 4v2M5 5a2 2 0 00-2 2v3a2 2 0 110 4v3a2 2 0 002 2h14a2 2 0 002-2v-3a2 2 0 110-4V7a2 2 0 00-2-2H5z" />
             </svg>
           </div>
-          <h2 className="text-lg font-bold text-[#111111] mb-2">Offers & Coupons</h2>
+          <h2 className="text-lg font-bold text-[#111111] mb-2">No offers found.</h2>
           <p className="text-xs text-[#666] mb-6 leading-relaxed max-w-md mx-auto">
             Create discount codes and promotional coupons with usage limits, expiry dates and service restrictions.
           </p>
@@ -705,13 +611,7 @@ export default function Offers() {
               className="w-full sm:w-auto px-6 py-2.5 text-xs font-semibold text-white rounded-xl hover:opacity-90 active:scale-95 transition-all shadow-md"
               style={{ background: "#E21B23" }}
             >
-              Get Started
-            </button>
-            <button
-              onClick={handleLoadPresets}
-              className="w-full sm:w-auto px-5 py-2.5 text-xs font-semibold text-[#111111] bg-gray-50 border border-[#E5E5E5] rounded-xl hover:bg-gray-100 transition-all"
-            >
-              Load Preset Offers
+              Create Offer
             </button>
           </div>
         </div>

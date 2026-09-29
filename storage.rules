@@ -7,6 +7,7 @@ rules_version = '2';
 //   drivers/{driverId}/kyc/{file}                 driver KYC documents
 //   drivers/{driverId}/pretrip/{bookingId}/{file} pre-trip safety photos
 //   vendors/{vendorId}/...                        vendor business + vehicle docs
+//   fleet/{vehicleId}/...                         NESAM-owned vehicle docs (admin)
 //   bookings/{bookingId}/tolls/{file}             toll receipts (assigned driver)
 
 service firebase.storage {
@@ -58,6 +59,13 @@ service firebase.storage {
                        && validUpload();
       allow update: if isAdmin() && validUpload();
       allow delete: if isAdmin() || (isSignedIn() && uid() == vendorId && vendorEditable(vendorId));
+    }
+
+    // Documents of NESAM-owned (non-vendor) vehicles, managed from the admin
+    // panel: fleet/{vehicleId}/{kind}-{ts}.{ext}. Admin only.
+    match /fleet/{vehicleId}/{allPaths=**} {
+      allow read: if isAdmin();
+      allow write: if isAdmin() && validUpload();
     }
 
     // Customer profile photos: customers/{uid}/profile/avatar-{ts}.jpg

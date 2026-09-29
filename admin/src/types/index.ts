@@ -1,5 +1,31 @@
 export interface Booking {
   id: string;
+  /** Human-facing booking code; `id` is the Firestore document id. */
+  bookingId?: string;
+  customerId?: string;
+  assignedVendorId?: string;
+  assignedVendorName?: string;
+  assignedDriverId?: string;
+  assignedDriverName?: string;
+  assignedVehicleNumber?: string;
+  tripStage?: string;
+  vehicleCategoryId?: string;
+  driverPayout?: number;
+  vendorPayout?: number;
+  tollCharges?: number;
+  tollsApproved?: boolean;
+  fareVerified?: boolean;
+  couponCode?: string;
+  discount?: number;
+  fareBreakdown?: {
+    subtotal?: number;
+    discount?: number;
+    taxableAmount?: number;
+    gstRate?: number;
+    gst?: number;
+    total?: number;
+  };
+  completedAt?: any;
   customer: string;
   customerName?: string;
   customerPhone?: string;
@@ -32,11 +58,15 @@ export interface Driver {
   name: string;
   phone: string;
   vehicle?: string;
+  assignedVehicleId?: string;
   assignedVehicleNumber?: string;
   vehicleNumber?: string;
   vehicleType?: string;
   presenceStatus?: string;
   docStatus?: string;
+  /** Owning vendor (fleet driver); empty for independent drivers. */
+  vendorId?: string;
+  fleetStatus?: string;
   vendor?: string | null;
   license?: string;
   licenseNumber?: string;
@@ -104,34 +134,49 @@ export interface VehicleCategory {
   createdBy?: string;
 }
 
+/** Operational state set by the owner. "On Trip" is derived from bookings. */
+export type VehicleStatus = "Active" | "Maintenance" | "Inactive";
+/** NESAM document review, shared with the vendor app and firestore.rules. */
+export type VehicleDocStatus = "Pending" | "Approved" | "Rejected";
+
+/**
+ * vehicles/{id} — canonical fields are the ones the vendor app writes
+ * (vendor/app/src/services/vendorService.ts). The legacy prototype fields at
+ * the end are read for old documents only and never written.
+ */
 export interface Vehicle {
   id: string;
-  name?: string;
+  vehicleNumber?: string;
+  category?: string;
+  categoryId?: string;
   make?: string;
   model?: string;
   year?: string;
-  number: string;
-  vehicleNumber?: string;
-  category: string;
-  seats?: number;
   seatingCapacity?: number;
-  fuel?: string;
   fuelType?: string;
-  driver?: string;
+  status?: string;
+  docStatus?: string;
+  rejectionReason?: string;
+  vendorId?: string;
+  vendorName?: string;
   assignedDriverId?: string;
   assignedDriverName?: string;
-  vendor?: string | null;
-  vendorName?: string;
-  status: string;
-  rate?: string;
-  docs?: {
-    rc?: string;
-    insurance?: string;
-    fitness?: string;
-    permit?: string;
-  };
-  docStatus?: string;
+  rcNumber?: string;
+  rcDocUrl?: string;
+  insuranceExpiry?: string;
+  insuranceDocUrl?: string;
+  fitnessExpiry?: string;
+  fitnessDocUrl?: string;
+  permitExpiry?: string;
+  statePermitDocUrl?: string;
   createdAt?: any;
+  updatedAt?: any;
+  // Legacy prototype fields (read-only).
+  name?: string;
+  number?: string;
+  seats?: number;
+  fuel?: string;
+  driver?: string;
 }
 
 export interface Vendor {

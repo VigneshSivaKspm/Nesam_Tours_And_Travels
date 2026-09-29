@@ -27,7 +27,6 @@ import SupportTickets from "./pages/SupportTickets";
 import Offers from "./pages/Offers";
 import Reviews from "./pages/Reviews";
 import Settings from "./pages/Settings";
-import GenericPage from "./pages/GenericPage";
 
 // Pages — New (Enterprise Multi-Vendor)
 import Vendors from "./pages/Vendors";
@@ -109,9 +108,6 @@ const pageMeta: Record<string, { title: string; breadcrumb: string[] }> = {
     breadcrumb: ["Help & Support", "Support Tickets"],
   },
 };
-
-// Generic placeholder pages (content pages not yet built)
-const genericPages: Record<string, { desc: string; icon: string }> = {};
 
 function AdminShell({ session }: { session: AdminSession }) {
   const [activePage, setActivePage] = useState("dashboard");
@@ -207,18 +203,7 @@ function AdminShell({ session }: { session: AdminSession }) {
       case "support":
         return <SupportTickets />;
 
-      // Generic placeholder pages
       default:
-        const gp = genericPages[activePage];
-        if (gp) {
-          return (
-            <GenericPage
-              title={meta.title}
-              description={gp.desc}
-              icon={gp.icon}
-            />
-          );
-        }
         return <Dashboard onNavigate={navigate} />;
     }
   };

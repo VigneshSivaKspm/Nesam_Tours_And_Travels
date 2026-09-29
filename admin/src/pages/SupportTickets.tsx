@@ -2,7 +2,6 @@ import { useState, useEffect } from "react";
 import {
   subscribeToCollection,
   updateFirestoreDocument,
-  setFirestoreDocument,
 } from "../services/adminFirestoreService";
 
 const SUPPORT_COLLECTION = "support_tickets";
@@ -14,101 +13,22 @@ const statusColor: Record<string, string> = {
   Closed: "bg-gray-50 text-gray-600 border-gray-200",
 };
 
-const defaultMockTickets = [
-  {
-    id: "TCK-8021",
-    customerName: "Meenakshi Sundaram",
-    customerPhone: "+91 98410 77665",
-    category: "Airport Pickup Query",
-    description: "Flight 6E-241 landing at Chennai Terminal 4 was delayed by 45 minutes. Need confirmation that driver will wait without extra waiting fee.",
-    priority: "High",
-    status: "Open",
-    createdAt: new Date(Date.now() - 3600000 * 2).toISOString(),
-    bookingId: "NTT-2024-4826",
-    assignedTo: "Pradeep Kumar",
-  },
-  {
-    id: "TCK-8022",
-    customerName: "Venkatesh Prasad",
-    customerPhone: "+91 97909 33445",
-    category: "Refund Request",
-    description: "Cancelled Outstation booking NTT-2024-4780 24 hours in advance. Requesting status of advance ₹2,500 refund to original payment source.",
-    priority: "Medium",
-    status: "In Progress",
-    createdAt: new Date(Date.now() - 3600000 * 18).toISOString(),
-    bookingId: "NTT-2024-4780",
-    assignedTo: "Kiran Raj",
-  },
-  {
-    id: "TCK-8023",
-    customerName: "Cognizant Travel Desk (Anand)",
-    customerPhone: "+91 99401 55667",
-    category: "Corporate GST Invoice",
-    description: "Need revised tax invoice with corporate GSTIN 33AAACC1234D1Z8 for 4 airport cabs booked on 22nd Aug.",
-    priority: "High",
-    status: "In Progress",
-    createdAt: new Date(Date.now() - 3600000 * 30).toISOString(),
-    bookingId: "NTT-2024-4820",
-    assignedTo: "Kiran Raj",
-  },
-  {
-    id: "TCK-8024",
-    customerName: "Saravanan Natarajan",
-    customerPhone: "+91 94432 99887",
-    category: "Tour Package Itinerary",
-    description: "Can we include Pykara Lake boating on Day 2 of the 3-day Ooty Tour Package instead of Doddabetta Peak?",
-    priority: "Low",
-    status: "Resolved",
-    createdAt: new Date(Date.now() - 86400000 * 3).toISOString(),
-    bookingId: "NTT-2024-4815",
-    assignedTo: "Sumathi Devi",
-  },
-  {
-    id: "TCK-8025",
-    customerName: "Rajesh Kannan",
-    customerPhone: "+91 98844 22331",
-    category: "Driver Feedback",
-    description: "Driver Anand R. on trip NTT-2024-4712 was extremely helpful with luggage and elderly parents. Highly recommended!",
-    priority: "Low",
-    status: "Closed",
-    createdAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-    bookingId: "NTT-2024-4712",
-    assignedTo: "Sumathi Devi",
-  },
-];
-
 export default function SupportTickets() {
   const [tickets, setTickets] = useState<any[]>([]);
   const [selected, setSelected] = useState<any>(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
-  const [seeding, setSeeding] = useState(false);
 
   useEffect(() => {
     const unsub = subscribeToCollection<any>(SUPPORT_COLLECTION, setTickets);
     return () => unsub();
   }, []);
 
-  const displayTickets = tickets.length > 0 ? tickets : defaultMockTickets;
-
-  const handleSeedTickets = async () => {
-    setSeeding(true);
-    try {
-      for (const t of defaultMockTickets) {
-        await setFirestoreDocument(SUPPORT_COLLECTION, t.id, t);
-      }
-      alert("Sample support tickets synchronized to Firestore!");
-    } catch (e: any) {
-      console.error(e);
-      alert("Error saving tickets: " + (e?.message || e));
-    } finally {
-      setSeeding(false);
-    }
-  };
+  const displayTickets = tickets;
 
   const updateStatus = async (id: string, status: string) => {
     setTickets((prev) =>
-      (prev.length > 0 ? prev : defaultMockTickets).map((item) =>
+      prev.map((item) =>
         item.id === id ? { ...item, status, updatedAt: new Date().toISOString() } : item,
       ),
     );
@@ -148,17 +68,6 @@ export default function SupportTickets() {
             {openCount} open ticket{openCount !== 1 ? "s" : ""}
           </p>
         </div>
-
-        {tickets.length === 0 && (
-          <button
-            onClick={handleSeedTickets}
-            disabled={seeding}
-            className="px-4 py-2 border border-amber-300 rounded-xl text-xs font-bold text-amber-900 bg-amber-50 hover:bg-amber-100 shadow-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-          >
-            <span>⚡</span>
-            <span>{seeding ? "Syncing..." : "Sync Sample Tickets to Cloud"}</span>
-          </button>
-        )}
       </div>
 
       {/* Stats */}
@@ -250,17 +159,6 @@ export default function SupportTickets() {
                       ? "No tickets match your filters."
                       : "No support tickets on record."}
                   </div>
-                  {tickets.length === 0 && (
-                    <button
-                      onClick={handleSeedTickets}
-                      disabled={seeding}
-                      className="px-4 py-2 text-xs font-semibold text-white rounded-lg shadow-sm hover:opacity-90 inline-flex items-center gap-2 cursor-pointer"
-                      style={{ backgroundColor: "#E21B23" }}
-                    >
-                      <span>⚡</span>
-                      <span>Sync Sample Support Tickets</span>
-                    </button>
-                  )}
                 </td>
               </tr>
             )}

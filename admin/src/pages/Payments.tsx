@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
 import { PaymentTransaction } from "../types";
-const defaultPayments: any[] = []; // Production never substitutes or seeds demo records.
 import {
   subscribePayments,
   setFirestoreDocument,
@@ -32,10 +31,9 @@ export default function Payments() {
   const [statusFilter, setStatusFilter] = useState("All");
   const [showAddModal, setShowAddModal] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
-  const [syncing, setSyncing] = useState(false);
 
   const [newTxn, setNewTxn] = useState({
-    bookingId: "NTT-2024-" + Math.floor(1000 + Math.random() * 9000),
+    bookingId: "",
     customer: "",
     amount: "1500",
     method: "UPI",
@@ -49,31 +47,9 @@ export default function Payments() {
   };
 
   useEffect(() => {
-    const unsub = subscribePayments((data) => {
-      if (data && data.length > 0) {
-        setPaymentList(data);
-      } else {
-        setPaymentList(defaultPayments as unknown as PaymentTransaction[]);
-      }
-    });
+    const unsub = subscribePayments(setPaymentList);
     return () => unsub();
   }, []);
-
-  const handleSyncDefaults = async () => {
-    setSyncing(true);
-    try {
-      for (const p of defaultPayments) {
-        await setFirestoreDocument(COLLECTIONS.PAYMENTS, p.id, p);
-      }
-      setPaymentList(defaultPayments as unknown as PaymentTransaction[]);
-      showToast("Standard payment records synced to database!");
-    } catch (err: any) {
-      console.warn("Error syncing payments:", err);
-      showToast("Error syncing payments: " + err.message);
-    } finally {
-      setSyncing(false);
-    }
-  };
 
   const handleAddPayment = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -109,7 +85,7 @@ export default function Payments() {
     setPaymentList((prev) => [created, ...prev]);
     setShowAddModal(false);
     setNewTxn({
-      bookingId: "NTT-2024-" + Math.floor(1000 + Math.random() * 9000),
+      bookingId: "",
       customer: "",
       amount: "1500",
       method: "UPI",
@@ -139,13 +115,14 @@ export default function Payments() {
     let pending = 0;
     let refunds = 0;
     let failed = 0;
+    const todayKey = new Date().toDateString();
 
     for (const p of paymentList) {
       const amt = parseAmount(p.amount);
       const status = (p.status || "").toLowerCase();
       if (isSuccess(status)) {
         collected += amt;
-        today += amt > 3000 ? 1250 : 0; // realistic today distribution
+        if (parseDate(p.date)?.toDateString() === todayKey) today += amt;
       }
       if (status === "pending") pending += amt;
       if (status === "refunded" || (p.refund && p.refund !== "—"))
@@ -153,20 +130,27 @@ export default function Payments() {
       if (status === "failed") failed += amt;
     }
 
-    if (today === 0 && collected > 0) today = Math.round(collected * 0.12);
-
     return { collected, today, pending, refunds, failed };
   }, [paymentList]);
 
-  // Weekly trend for chart
+  // Successful collections for each of the last seven days.
   const weekData = useMemo(() => {
-    const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    const baseAmounts = [0, 0, 0, 0, 0, 0, 0];
-    const multiplier = paymentList.length > 0 ? paymentList.length / 6 : 1;
-    return days.map((day, i) => ({
-      day,
-      amount: Math.round(baseAmounts[i] * multiplier),
-    }));
+    const days: { key: string; day: string; amount: number }[] = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      days.push({
+        key: d.toDateString(),
+        day: d.toLocaleDateString("en-IN", { weekday: "short" }),
+        amount: 0,
+      });
+    }
+    for (const p of paymentList) {
+      if (!isSuccess(p.status)) continue;
+      const slot = days.find((d) => d.key === parseDate(p.date)?.toDateString());
+      if (slot) slot.amount += parseAmount(p.amount);
+    }
+    return days.map(({ day, amount }) => ({ day, amount }));
   }, [paymentList]);
 
   const methodBreakdown = useMemo(() => {

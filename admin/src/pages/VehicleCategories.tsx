@@ -415,39 +415,6 @@ export default function VehicleCategories() {
     }
   };
 
-  const handleSeedDefaultCategories = async () => {
-    setSaving(true);
-    try {
-      const seeded: VehicleCategory[] = [];
-      for (const tmpl of PRESET_TEMPLATES) {
-        const id = `CAT-${tmpl.code}`;
-        const cat: VehicleCategory = {
-          id,
-          name: tmpl.name,
-          code: tmpl.code,
-          description: tmpl.description,
-          icon: tmpl.icon,
-          seatingCapacity: tmpl.seatingCapacity,
-          luggageCapacity: tmpl.luggageCapacity,
-          acSupported: tmpl.acSupported as any,
-          recommendedPassengers: tmpl.recommendedPassengers,
-          displayOrder: tmpl.displayOrder,
-          status: "Active",
-          fare: { ...tmpl.fare },
-        };
-        await setFirestoreDocument(COLLECTIONS.VEHICLE_CATEGORIES, id, cat);
-        seeded.push(cat);
-      }
-      setCategories(seeded);
-      showToast("Standard categories (Sedan, SUV, Innova, Crysta, Tempo) loaded!", "success");
-    } catch (err: any) {
-      console.warn("Error seeding vehicle categories:", err);
-      showToast("Failed to seed categories: " + err.message, "error");
-    } finally {
-      setSaving(false);
-    }
-  };
-
   // Toggle status
   const handleToggleStatus = async (cat: VehicleCategory) => {
     const newStatus = cat.status === "Active" ? "Inactive" : "Active";
@@ -517,12 +484,6 @@ export default function VehicleCategories() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleSeedDefaultCategories}
-            className="flex items-center gap-2 px-3.5 py-2.5 text-[13px] font-semibold text-[#333] bg-white border border-[#DDD] rounded-lg shadow-xs hover:bg-gray-50 active:scale-95 transition-all cursor-pointer"
-          >
-            ⚡ Seed Standard Categories
-          </button>
           <button
             onClick={handleOpenAdd}
             className="flex items-center gap-2 px-4 py-2.5 text-[13px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 transition-all cursor-pointer"
@@ -598,23 +559,17 @@ export default function VehicleCategories() {
               />
             </svg>
           </div>
-          <h2 className="text-[18px] font-bold text-[#111111] mb-2">Vehicle Categories</h2>
+          <h2 className="text-[18px] font-bold text-[#111111] mb-2">No vehicle categories found.</h2>
           <p className="text-[13px] text-[#999999] max-w-sm mb-6">
-            Manage vehicle categories including Sedan, SUV, Innova, Tempo Traveller and configure fare rules per category.
+            Vehicle categories (for example Sedan, SUV, Tempo Traveller) define seating and the default fare used for bookings. Add the first category to get started.
           </p>
           <div className="flex items-center gap-3">
-            <button
-              onClick={handleSeedDefaultCategories}
-              className="px-5 py-2.5 text-[13px] font-semibold text-[#111] bg-white border border-[#DDD] rounded-lg hover:bg-gray-50 transition-all cursor-pointer shadow-xs"
-            >
-              ⚡ Load Standard Categories
-            </button>
             <button
               onClick={handleOpenAdd}
               className="px-6 py-2.5 text-[13px] font-semibold text-white rounded-lg hover:opacity-90 transition-opacity cursor-pointer shadow-sm"
               style={{ background: "#E21B23" }}
             >
-              + Create Custom Category
+              + Add Vehicle Category
             </button>
           </div>
         </div>

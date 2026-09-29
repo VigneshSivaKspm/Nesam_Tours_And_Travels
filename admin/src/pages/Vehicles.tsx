@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
 import { Vehicle, VehicleCategory, Driver } from "../types";
-import { vehicles as defaultVehicles } from "../data/mockData";
 import {
   subscribeVehicles,
   subscribeVehicleCategories,
@@ -28,7 +27,6 @@ export default function Vehicles() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
-  const [seeding, setSeeding] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   const [newVehicle, setNewVehicle] = useState({
@@ -49,14 +47,7 @@ export default function Vehicles() {
   };
 
   useEffect(() => {
-    const unsubV = subscribeVehicles((data) => {
-      if (data && data.length > 0) {
-        setVehicleList(data);
-      } else {
-        // Fallback to default operational fleet so the page is never blank
-        setVehicleList(defaultVehicles as Vehicle[]);
-      }
-    });
+    const unsubV = subscribeVehicles(setVehicleList);
     const unsubC = subscribeVehicleCategories(setCategories);
     const unsubD = subscribeDrivers(setDriverList);
 
@@ -66,23 +57,6 @@ export default function Vehicles() {
       unsubD();
     };
   }, []);
-
-  // One-click seed standard fleet into Firestore
-  const handleSeedFleet = async () => {
-    setSeeding(true);
-    try {
-      for (const v of defaultVehicles) {
-        await setFirestoreDocument(COLLECTIONS.VEHICLES, v.id, v);
-      }
-      setVehicleList(defaultVehicles as Vehicle[]);
-      showToast("Standard fleet vehicles successfully synced to database!");
-    } catch (err: any) {
-      console.warn("Error seeding fleet:", err);
-      showToast("Failed to sync fleet: " + (err.message || "Unknown error"));
-    } finally {
-      setSeeding(false);
-    }
-  };
 
   const handleAddVehicle = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -174,16 +148,7 @@ export default function Vehicles() {
     });
   }, [vehicleList, search, statusFilter]);
 
-  const activeCategories = categories.length > 0
-    ? categories.filter((c) => c.status === "Active")
-    : [
-        { id: "c1", name: "Sedan", seatingCapacity: 4 },
-        { id: "c2", name: "SUV", seatingCapacity: 6 },
-        { id: "c3", name: "Innova", seatingCapacity: 7 },
-        { id: "c4", name: "Innova Crysta", seatingCapacity: 7 },
-        { id: "c5", name: "Tempo Traveller", seatingCapacity: 12 },
-        { id: "c6", name: "Luxury", seatingCapacity: 4 },
-      ];
+  const activeCategories = categories.filter((c) => c.status === "Active");
 
   return (
     <div className="p-6 space-y-5">
@@ -251,18 +216,6 @@ export default function Vehicles() {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            <button
-              onClick={handleSeedFleet}
-              disabled={seeding}
-              className="flex items-center gap-1.5 px-3 py-2 text-[12px] font-semibold text-[#444] bg-white border border-[#DDD] hover:bg-gray-50 rounded-lg cursor-pointer transition-colors shadow-xs"
-              title="Populate standard vehicles into database"
-            >
-              <svg className="w-3.5 h-3.5 text-[#E21B23]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-              </svg>
-              {seeding ? "Syncing..." : "Sync Standard Fleet"}
-            </button>
-
             <button
               onClick={() => setShowAddModal(true)}
               className="flex items-center gap-1.5 px-4 py-2 text-[12px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 cursor-pointer transition-all"
@@ -469,14 +422,16 @@ export default function Vehicles() {
               <p className="text-[11px] text-gray-500 mb-4">
                 {search || statusFilter !== "All"
                   ? "Try adjusting your search query or filters"
-                  : "Sync the standard fleet or register a new vehicle to get started"}
+                  : "Register the first vehicle to get started"}
               </p>
-              <button
-                onClick={handleSeedFleet}
-                className="px-4 py-2 bg-[#E21B23] text-white text-xs font-semibold rounded-lg hover:opacity-90 transition-opacity cursor-pointer shadow-sm"
-              >
-                Sync Standard Fleet Now
-              </button>
+              {!search && statusFilter === "All" && (
+                <button
+                  onClick={() => setShowAddModal(true)}
+                  className="px-4 py-2 bg-[#E21B23] text-white text-xs font-semibold rounded-lg hover:opacity-90 transition-opacity cursor-pointer shadow-sm"
+                >
+                  Register Vehicle
+                </button>
+              )}
             </div>
           )}
         </div>

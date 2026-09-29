@@ -9,9 +9,6 @@ import {
   setFirestoreDocument,
   COLLECTIONS,
 } from "../services/adminFirestoreService";
-const mockPenalties: any[] = []; // Production never substitutes or seeds demo records.
-const mockDrivers: any[] = []; // Production never substitutes or seeds demo records.
-const mockVendors: any[] = []; // Production never substitutes or seeds demo records.
 
 const penaltyTypeStyle: Record<string, string> = {
   Driver: "bg-blue-50 text-blue-700 border-blue-200",
@@ -55,7 +52,6 @@ export default function Penalties() {
   const [penaltyList, setPenaltyList] = useState<PenaltyRecord[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [vendors, setVendors] = useState<Vendor[]>([]);
-  const [seeding, setSeeding] = useState(false);
 
   useEffect(() => {
     const unsubPenalties = subscribePenalties(setPenaltyList);
@@ -69,27 +65,9 @@ export default function Penalties() {
     };
   }, []);
 
-  const displayPenalties: any[] = penaltyList.length > 0 ? penaltyList : mockPenalties;
-  const availableDrivers = drivers.length > 0 ? drivers : (mockDrivers as any[]);
-  const availableVendors = vendors.length > 0 ? vendors : (mockVendors as any[]);
-
-  const handleSeedPenalties = async () => {
-    setSeeding(true);
-    try {
-      for (const p of mockPenalties) {
-        await setFirestoreDocument(COLLECTIONS.PENALTIES, p.id, {
-          ...p,
-          entityType: p.type,
-          entityName: p.entity,
-          createdAt: new Date().toISOString(),
-        });
-      }
-    } catch (err) {
-      console.warn("Error seeding penalties:", err);
-    } finally {
-      setSeeding(false);
-    }
-  };
+  const displayPenalties: any[] = penaltyList;
+  const availableDrivers: any[] = drivers;
+  const availableVendors: any[] = vendors;
 
   const handleAddPenalty = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -110,7 +88,7 @@ export default function Penalties() {
       custCompensation: `₹${Math.round((newPenalty.amount || 500) * 0.5)}`,
       date: new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }),
       status: "Applied",
-      bookingId: newPenalty.bookingId.trim() || "NTT-2024-DIRECT",
+      bookingId: newPenalty.bookingId.trim(),
     };
 
     setPenaltyList((prev) => [createdPenalty, ...prev]);

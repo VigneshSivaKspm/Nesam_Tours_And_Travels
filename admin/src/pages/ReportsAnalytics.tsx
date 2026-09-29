@@ -28,14 +28,9 @@ import {
   inMonth,
   pctChange,
   formatPct,
+  monthlyGstSummary,
+  GST_RATE,
 } from "../utils/analytics";
-import {
-  reportData as mockReportData,
-  revenueData as mockRevenueData,
-  gstRecords as mockGstRecords,
-  vendors as mockVendors,
-  kpiData,
-} from "../data/mockData";
 
 const COLORS = ["#E21B23", "#111111", "#444444", "#777777", "#AAAAAA"];
 
@@ -101,46 +96,38 @@ export default function Reports() {
   const lastAvg =
     lastMonthBookings.length > 0 ? lastMonthRevenue / lastMonthBookings.length : 0;
 
-  // Use fallback KPI data if live database is bootstrapping
-  const isBootstrapping = liveBookings.length === 0;
-
   const summaryCards = [
     {
       label: "Total Bookings (Month)",
-      value: isBootstrapping
-        ? "1,248"
-        : thisMonthBookings.length.toLocaleString(),
-      change: isBootstrapping ? 12.5 : pctChange(thisMonthBookings.length, lastMonthBookings.length),
+      value: thisMonthBookings.length.toLocaleString(),
+      change: pctChange(thisMonthBookings.length, lastMonthBookings.length),
       invert: false,
       color: "#E21B23",
     },
     {
       label: "Gross Revenue (Month)",
-      value: isBootstrapping ? "₹3,84,200" : formatINR(monthRevenue),
-      change: isBootstrapping ? 18.3 : pctChange(monthRevenue, lastMonthRevenue),
+      value: formatINR(monthRevenue),
+      change: pctChange(monthRevenue, lastMonthRevenue),
       invert: false,
       color: "#111",
     },
     {
       label: "Cancellations (Month)",
-      value: isBootstrapping ? "42" : cancellations.toString(),
-      change: isBootstrapping ? -4.2 : pctChange(cancellations, lastMonthCancellations),
+      value: cancellations.toString(),
+      change: pctChange(cancellations, lastMonthCancellations),
       invert: true,
       color: "#F59E0B",
     },
     {
       label: "Avg Booking Value",
-      value: isBootstrapping ? "₹2,280" : formatINR(avgBookingValue),
-      change: isBootstrapping ? 5.8 : pctChange(avgBookingValue, lastAvg),
+      value: formatINR(avgBookingValue),
+      change: pctChange(avgBookingValue, lastAvg),
       invert: false,
       color: "#10B981",
     },
   ];
 
   const bookingsByType = useMemo(() => {
-    if (isBootstrapping) {
-      return mockReportData.bookingsByType;
-    }
     const count = (list: Booking[], match: string) =>
       list.filter((b) =>
         (b.service || b.serviceType || "").toLowerCase().includes(match),
@@ -150,12 +137,9 @@ export default function Reports() {
       thisMonth: count(thisMonthBookings, t.match),
       lastMonth: count(lastMonthBookings, t.match),
     }));
-  }, [thisMonthBookings, lastMonthBookings, isBootstrapping]);
+  }, [thisMonthBookings, lastMonthBookings]);
 
   const revenueTrend = useMemo(() => {
-    if (isBootstrapping) {
-      return mockRevenueData;
-    }
     const buckets: { label: string; start: Date; end: Date }[] = [];
     for (let i = 5; i >= 0; i--) {
       const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
@@ -173,16 +157,9 @@ export default function Reports() {
         .reduce((s, b) => s + parseAmount(b.fare), 0);
       return { month: bk.label, total, booking: total - tour, tour };
     });
-  }, [liveBookings, isBootstrapping]);
+  }, [liveBookings]);
 
   const cancellationReasons = useMemo(() => {
-    if (isBootstrapping) {
-      return mockReportData.cancellationReasons.map((r) => ({
-        reason: r.reason,
-        count: r.count,
-        pct: `${r.pct}%`,
-      }));
-    }
     const cancelled = liveBookings.filter((b) => b.status === "Cancelled");
     const counts = new Map<string, number>();
     for (const b of cancelled) {
@@ -197,9 +174,10 @@ export default function Reports() {
         count,
         pct: total > 0 ? `${Math.round((count / total) * 100)}%` : "0%",
       }));
-  }, [liveBookings, isBootstrapping]);
+  }, [liveBookings]);
 
-  const displayVendors = liveVendors.length > 0 ? liveVendors : (mockVendors as any[]);
+  const displayVendors = liveVendors;
+  const gstRows = useMemo(() => monthlyGstSummary(liveBookings), [liveBookings]);
 
   const handleExportReport = () => {
     if (activeTab === "bookings") {
@@ -225,8 +203,8 @@ export default function Reports() {
       const rows = cancellationReasons.map((c: any) => [c.reason, c.count, c.pct]);
       downloadCsv("nesam_cancellations_root_cause.csv", headers, rows);
     } else {
-      const headers = ["Month", "Total Trip Revenue", "GST Rate", "GST Collected", "GST Payable", "Filing Status"];
-      const rows = mockGstRecords.map((g: any) => [g.month, g.totalTripRevenue, g.gstRate, g.gstCollected, g.gstPayable, g.status]);
+      const headers = ["Month", "Completed Trips", "Taxable Value", "GST Rate", "GST Collected", "Gross (incl. GST)"];
+      const rows = gstRows.map((g) => [g.month, g.trips, g.taxable, `${GST_RATE * 100}%`, g.gst, g.total]);
       downloadCsv("nesam_gst_compliance_overview.csv", headers, rows);
     }
   };
@@ -471,24 +449,27 @@ export default function Reports() {
             <table className="w-full min-w-[700px]">
               <thead>
                 <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
-                  {["Month", "Trip Revenue", "GST Rate", "GST Collected", "GST Payable", "Status"].map((h) => (
+                  {["Month", "Completed Trips", "Taxable Value", "GST Rate", "GST Collected", "Gross (incl. GST)"].map((h) => (
                     <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-[#999] uppercase tracking-wide">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {mockGstRecords.map((r: any, i: number) => (
-                  <tr key={i} className="border-b border-[#F5F5F5] last:border-0 text-[12px] hover:bg-[#FAFAFA]">
-                    <td className="px-4 py-3 font-semibold text-[#111]">{r.month}</td>
-                    <td className="px-4 py-3 text-[#444]">{r.totalTripRevenue}</td>
-                    <td className="px-4 py-3 font-semibold text-[#E21B23]">{r.gstRate}</td>
-                    <td className="px-4 py-3 font-bold text-[#111]">{r.gstCollected}</td>
-                    <td className="px-4 py-3 font-bold text-[#111]">{r.gstPayable}</td>
-                    <td className="px-4 py-3">
-                      <span className={`text-[11px] font-semibold px-2 py-0.5 rounded ${r.status === "Filed" ? "text-green-700 bg-green-50" : "text-yellow-700 bg-yellow-50"}`}>
-                        {r.status}
-                      </span>
+                {gstRows.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-10 text-center text-[12px] text-[#999]">
+                      No completed trips yet, so there is no GST to report.
                     </td>
+                  </tr>
+                )}
+                {gstRows.map((r) => (
+                  <tr key={r.month} className="border-b border-[#F5F5F5] last:border-0 text-[12px] hover:bg-[#FAFAFA]">
+                    <td className="px-4 py-3 font-semibold text-[#111]">{r.month}</td>
+                    <td className="px-4 py-3 text-[#444]">{r.trips}</td>
+                    <td className="px-4 py-3 text-[#444]">₹{r.taxable.toLocaleString("en-IN")}</td>
+                    <td className="px-4 py-3 font-semibold text-[#E21B23]">{GST_RATE * 100}%</td>
+                    <td className="px-4 py-3 font-bold text-[#111]">₹{r.gst.toLocaleString("en-IN")}</td>
+                    <td className="px-4 py-3 font-bold text-[#111]">₹{r.total.toLocaleString("en-IN")}</td>
                   </tr>
                 ))}
               </tbody>

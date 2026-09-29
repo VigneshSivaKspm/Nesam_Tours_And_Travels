@@ -7,9 +7,6 @@ import {
   subscribePayments,
   subscribePayoutRequests,
 } from "../services/adminFirestoreService";
-const mockVendors: any[] = []; // Production never substitutes or seeds demo records.
-const mockPayments: any[] = []; // Production never substitutes or seeds demo records.
-const mockGstRecords: any[] = []; // Production never substitutes or seeds demo records.
 
 const razorpayStyle: Record<string, string> = {
   Settled: "text-green-700 bg-green-50",
@@ -58,11 +55,10 @@ export default function VendorFinance() {
     };
   }, []);
 
-  // Use mock fallback when live records are empty
-  const displayVendors = liveVendors.length > 0 ? liveVendors : (mockVendors as any[]);
-  const displayPayments = payments.length > 0 ? payments : (mockPayments as any[]);
+  const displayVendors = liveVendors;
+  const displayPayments = payments;
 
-  // Compute stats from actual database records or fall back to realistic defaults
+  // Totals are computed from real records only; no records means zero.
   const computedGrossRevenue = bookings.reduce((sum, b) => {
     if (b.status === "Cancelled") return sum;
     const val =
@@ -72,7 +68,7 @@ export default function VendorFinance() {
     return sum + (isNaN(val) ? 0 : val);
   }, 0);
 
-  const totalGrossRevenue = computedGrossRevenue > 0 ? computedGrossRevenue : 384200;
+  const totalGrossRevenue = computedGrossRevenue;
 
   const computedCommission = bookings.reduce((sum, b) => {
     if (b.status === "Cancelled") return sum;
@@ -83,7 +79,7 @@ export default function VendorFinance() {
     return sum + (isNaN(val) ? 0 : val * 0.15);
   }, 0);
 
-  const totalCommission = computedCommission > 0 ? computedCommission : 57630;
+  const totalCommission = computedCommission;
 
   const computedPayouts = payoutRequests
     .filter((p) => p.status === "Paid" || p.status === "Completed")
@@ -95,7 +91,7 @@ export default function VendorFinance() {
       return sum + (isNaN(val) ? 0 : val);
     }, 0);
 
-  const totalPayouts = computedPayouts > 0 ? computedPayouts : 284100;
+  const totalPayouts = computedPayouts;
 
   const computedPendingSettlements = payoutRequests
     .filter((p) => p.status === "Pending")
@@ -107,7 +103,7 @@ export default function VendorFinance() {
       return sum + (isNaN(val) ? 0 : val);
     }, 0);
 
-  const pendingSettlements = computedPendingSettlements > 0 ? computedPendingSettlements : 42500;
+  const pendingSettlements = computedPendingSettlements;
 
   // Group GST records by month from actual bookings
   const gstSummaryMap: Record<string, number> = {};
@@ -146,7 +142,7 @@ export default function VendorFinance() {
     };
   });
 
-  const displayGstRecords = liveGstRecords.length > 0 ? liveGstRecords : mockGstRecords;
+  const displayGstRecords = liveGstRecords;
 
   const handleExportVendorLedger = () => {
     const headers = ["Vendor ID", "Business Name", "Owner", "City", "Fleet Size", "Active Drivers", "Commission", "Status", "Wallet Balance"];
@@ -626,7 +622,7 @@ export default function VendorFinance() {
               <div className="p-3 bg-gray-50 rounded-xl col-span-2">
                 <span className="text-[#888] block text-[11px]">GSTIN Registration</span>
                 <span className="font-mono font-medium text-[#111]">
-                  {selectedVendorModal.gst || selectedVendorModal.business?.gstNumber || "33AABCS1234F1Z5"}
+                  {selectedVendorModal.gstin || selectedVendorModal.gst || selectedVendorModal.business?.gstNumber || "Not provided"}
                 </span>
               </div>
             </div>

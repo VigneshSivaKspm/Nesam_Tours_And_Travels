@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { StaffMember } from "../types";
 import { roles as initialRoles } from "../config/constants";
-const defaultMockStaff: any[] = []; // Production never substitutes or seeds demo records.
 import { subscribeStaff, setFirestoreDocument, updateFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
 
 const statusStyle: Record<string, string> = {
@@ -33,30 +32,12 @@ export default function Staff() {
     return () => unsub();
   }, []);
 
-  const displayStaff: StaffMember[] = staffList.length > 0 ? staffList : (defaultMockStaff as StaffMember[]);
-
-  const [seedingStaff, setSeedingStaff] = useState(false);
-  const handleSeedStaff = async () => {
-    setSeedingStaff(true);
-    try {
-      for (const s of defaultMockStaff) {
-        await setFirestoreDocument(COLLECTIONS.STAFF, s.id, s);
-      }
-      alert("Standard staff members successfully synchronized to Firestore!");
-    } catch (e: any) {
-      console.error(e);
-      alert("Error saving staff: " + (e?.message || e));
-    } finally {
-      setSeedingStaff(false);
-    }
-  };
+  const displayStaff: StaffMember[] = staffList;
 
   const handleToggleStaffStatus = async (s: StaffMember) => {
     const newStatus = s.status === "Active" ? "Inactive" : "Active";
     setStaffList((prev) =>
-      (prev.length > 0 ? prev : (defaultMockStaff as StaffMember[])).map((item) =>
-        item.id === s.id ? { ...item, status: newStatus } : item,
-      ),
+      prev.map((item) => (item.id === s.id ? { ...item, status: newStatus } : item)),
     );
     try {
       await updateFirestoreDocument(COLLECTIONS.STAFF, s.id, { status: newStatus });
@@ -84,7 +65,7 @@ export default function Staff() {
     };
 
     // Optimistically update staff list immediately
-    setStaffList((prev) => [createdStaff, ...(prev.length > 0 ? prev : (defaultMockStaff as StaffMember[]))]);
+    setStaffList((prev) => [createdStaff, ...prev]);
     setShowAddModal(false);
     setNewStaff({ name: '', email: '', phone: '', role: 'Booking Manager', status: 'Active' });
 
@@ -194,18 +175,9 @@ export default function Staff() {
                   {filtered.length === 0 ? (
                     <tr>
                       <td colSpan={7} className="text-center py-12 text-[#999] text-xs">
-                        <div className="text-sm font-medium mb-2">No staff members match the search criteria.</div>
-                        {staffList.length === 0 && (
-                          <button
-                            onClick={handleSeedStaff}
-                            disabled={seedingStaff}
-                            className="px-4 py-2 text-xs font-semibold text-white rounded-lg shadow-sm hover:opacity-90 inline-flex items-center gap-2 cursor-pointer"
-                            style={{ backgroundColor: "#E21B23" }}
-                          >
-                            <span>⚡</span>
-                            <span>Sync Standard Staff Members</span>
-                          </button>
-                        )}
+                        <div className="text-sm font-medium mb-2">
+                          {staffList.length === 0 ? "No staff members found." : "No staff members match the search criteria."}
+                        </div>
                       </td>
                     </tr>
                   ) : (
