@@ -2,19 +2,24 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ShieldCheck, PhoneCall, X, CheckCircle2 } from 'lucide-react';
 import type {
   DriverAccount,
-  DriverEarningsSummary,
   DriverNotification,
+  DriverWallet,
+  LedgerEntry,
   DriverStatus,
   MarketplaceOffer,
+  DriverPenalty,
   PayoutRequest,
-  PreTripPhotos,
   TollReceipt,
   TripDetails,
 } from './types';
 import { Header } from './components/Header';
 import { BottomNav } from './components/BottomNav';
 import { DashboardScreen } from './screens/DashboardScreen';
-import { PreTripVerificationScreen } from './screens/PreTripVerificationScreen';
+import { VehicleVerificationScreen } from './screens/VehicleVerificationScreen';
+import { NotificationPopups } from './components/NotificationPopups';
+import { PenaltyAckModal } from './components/PenaltyAckModal';
+import { advanceTrip, verifyBoarding } from './services/tripService';
+import { getFirebaseLocation } from './services/location';
 import { TripExecutionScreen } from './screens/TripExecutionScreen';
 import { EarningsScreen } from './screens/EarningsScreen';
 import { WalletPayoutScreen } from './screens/WalletPayoutScreen';
@@ -24,32 +29,24 @@ import { RegistrationScreen } from './screens/RegistrationScreen';
 import { SUPPORT_PHONE } from './screens/VerificationStatusScreen';
 import {
   acceptMarketplaceTrip,
-  completeTrip,
   describeFirestoreError,
-  markArrivedDestination,
   markNotificationRead,
-  markReachedPickup,
   requestPayout,
   setDriverPresence,
-  startTripWithOtp,
-  submitPreTripVerification,
   subscribeToDriverBookings,
+  subscribeToDriverLedger,
   subscribeToDriverNotifications,
+  subscribeToDriverPenalties,
+  subscribeToDriverWallet,
   subscribeToOpenMarketplace,
   subscribeToPayoutRequests,
   updateDriverContactDetails,
 } from './services/driverFirestoreService';
+import { EMPTY_WALLET, summarizeEarnings } from './services/driverEarnings';
 
 interface DriverWorkspaceProps {
   account: DriverAccount;
   onSignOut: () => void;
-}
-
-// Payout requests in these states no longer hold money back from the wallet.
-const RELEASED_PAYOUT_STATES = ['Rejected', 'Cancelled'];
-
-function startOfDay(d: Date) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
 export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSignOut }) => {
@@ -64,6 +61,11 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
   const [offers, setOffers] = useState<MarketplaceOffer[]>([]);
   const [payouts, setPayouts] = useState<PayoutRequest[]>([]);
   const [notifications, setNotifications] = useState<DriverNotification[]>([]);
+  const [penalties, setPenalties] = useState<DriverPenalty[]>([]);
+  const [penaltiesError, setPenaltiesError] = useState('');
+  const [ackPenaltyId, setAckPenaltyId] = useState<string | null>(null);
+  const [wallet, setWallet] = useState<DriverWallet>(EMPTY_WALLET);
+  const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [presenceBusy, setPresenceBusy] = useState(false);
 
@@ -77,9 +79,21 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
 
   // ── Live data ────────────────────────────────────────────────────────────
   useEffect(() => subscribeToDriverBookings(driver.id, setBookings), [driver.id]);
-  useEffect(() => subscribeToOpenMarketplace(setOffers), []);
+  // The marketplace is for independent drivers; a fleet driver's trips come from its vendor.
+  const independent = !driver.vendorId;
+  useEffect(() => {
+    if (!independent) {
+      setOffers([]);
+      return undefined;
+    }
+    return subscribeToOpenMarketplace(setOffers);
+  }, [independent]);
   useEffect(() => subscribeToPayoutRequests(driver.id, setPayouts), [driver.id]);
   useEffect(() => subscribeToDriverNotifications(driver.id, setNotifications), [driver.id]);
+  useEffect(() => subscribeToDriverPenalties(driver.id, (p) => { setPenalties(p); setPenaltiesError(''); }, setPenaltiesError), [driver.id]);
+  // Money comes from the server's partner ledger; the app never computes it.
+  useEffect(() => subscribeToDriverWallet(driver.id, setWallet, (m) => notify('error', m)), [driver.id, notify]);
+  useEffect(() => subscribeToDriverLedger(driver.id, setLedger, (m) => notify('error', m)), [driver.id, notify]);
 
   const activeTrip = useMemo(
     () => bookings.find((b) => b.status === 'Assigned' || b.status === 'Ongoing') ?? null,
@@ -103,41 +117,17 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
     }
   }, [activeTrip, presence, driver.id]);
 
-  // Drop out of pre-trip mode if the trip moved on or was cancelled.
+  // Leave the verification screen if the trip moved on, was cancelled or was reassigned.
   useEffect(() => {
-    if (inPreTrip && (!activeTrip || activeTrip.stage !== 'Assigned')) setInPreTrip(false);
+    if (inPreTrip && (!activeTrip || activeTrip.subStatus !== 'Not Started')) setInPreTrip(false);
   }, [inPreTrip, activeTrip]);
 
-  // ── Earnings & wallet (derived from real trips and payout requests) ─────
-  const earnings: DriverEarningsSummary = useMemo(() => {
-    const now = new Date();
-    const today = startOfDay(now).getTime();
-    const weekAgo = today - 6 * 86400000;
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-    const sum = { todayEarnings: 0, thisWeekEarnings: 0, thisMonthEarnings: 0, lifetimeEarnings: 0, tollReimbursements: 0 };
-    for (const t of completedTrips) {
-      const amount = t.driverEarnings + t.tollCharges;
-      const at = t.completedAt?.getTime() ?? 0;
-      sum.lifetimeEarnings += amount;
-      sum.tollReimbursements += t.tollCharges;
-      if (at >= today) sum.todayEarnings += amount;
-      if (at >= weekAgo) sum.thisWeekEarnings += amount;
-      if (at >= monthStart) sum.thisMonthEarnings += amount;
-    }
-    return { ...sum, totalTripsCompleted: completedTrips.length };
-  }, [completedTrips]);
+  // A penalty must be acknowledged (or disputed) before the driver carries on.
+  const mustAcknowledge = useMemo(() => penalties.find((p) => p.status === 'Pending' && !p.acknowledged) ?? null, [penalties]);
+  const penaltyToShow = penalties.find((p) => p.id === ackPenaltyId && (p.status === 'Pending' || p.status === 'Acknowledged')) ?? mustAcknowledge;
 
-  const wallet = useMemo(() => {
-    const paidOut = payouts.filter((p) => p.status === 'Paid').reduce((s, p) => s + p.amount, 0);
-    const pending = payouts
-      .filter((p) => p.status !== 'Paid' && !RELEASED_PAYOUT_STATES.includes(p.status))
-      .reduce((s, p) => s + p.amount, 0);
-    return {
-      availableBalance: Math.max(0, Math.round(completedTrips.reduce((sum, trip) => sum + trip.withdrawableAmount, 0) - paidOut - pending)),
-      pendingPayouts: pending,
-      totalPaidOut: paidOut,
-    };
-  }, [payouts, completedTrips]);
+  // ── Earnings (credited by the server when a trip's fare is verified) ────
+  const earnings = useMemo(() => summarizeEarnings(ledger), [ledger]);
 
   const unreadCount = notifications.filter((n) => !n.read).length;
 
@@ -168,45 +158,51 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
       notify('ok', 'Trip accepted! Complete the pre-trip check before heading to pickup.');
       setActiveTab('dashboard');
     } catch (err) {
-      notify('error', describeFirestoreError(err, 'This trip is no longer available — another partner may have taken it.'));
+      notify('error', err instanceof Error && !(err as { code?: string }).code
+        ? err.message
+        : describeFirestoreError(err, 'This trip is no longer available — another partner may have taken it.'));
     } finally {
       setAcceptingId(null);
     }
   };
 
-  const handlePreTripSubmit = async (photos: PreTripPhotos) => {
-    if (!activeTrip) return;
-    await submitPreTripVerification(activeTrip.id, photos);
+  const handleVerified = () => {
     setInPreTrip(false);
     setActiveTab('trip');
-    notify('ok', 'Pre-trip check submitted. Drive safe to the pickup point.');
+    notify('ok', 'Vehicle verification submitted. You can now start the trip.');
   };
 
-  const handleReachedPickup = async (location: { lat: number; lng: number } | null) => {
+  const handleTripStart = async (requestId: string) => {
     if (!activeTrip) return;
-    await markReachedPickup(activeTrip.id, location);
+    const location = await getFirebaseLocation();
+    await advanceTrip({ bookingId: activeTrip.id, to: 'Trip Started', location, requestId });
   };
 
-  const handleStartTrip = async (otp: string) => {
+  const handleReachedPickup = async (requestId: string) => {
     if (!activeTrip) return;
-    await startTripWithOtp(activeTrip.id, otp);
+    const location = await getFirebaseLocation();
+    await advanceTrip({ bookingId: activeTrip.id, to: 'Reached Pickup', location, requestId });
   };
 
-  const handleArrived = async () => {
+  const handleVerifyBoarding = async (otp: string) => {
     if (!activeTrip) return;
-    await markArrivedDestination(activeTrip.id);
+    await verifyBoarding(activeTrip.id, otp);
   };
 
-  const handleComplete = async (endOdometer: number, tolls: TollReceipt[]) => {
+  const handleTripEnd = async (endOdometer: number, tolls: TollReceipt[], requestId: string) => {
     if (!activeTrip) return;
-    await completeTrip(activeTrip.id, endOdometer, tolls);
-    notify('ok', 'Trip completed. Earnings added to your wallet.');
+    const fleetTrip = activeTrip.fleetTrip;
+    const location = await getFirebaseLocation();
+    await advanceTrip({ bookingId: activeTrip.id, to: 'Trip Ended', location, endOdometer, tolls, requestId });
+    notify('ok', fleetTrip
+      ? 'Trip ended. Your fleet operator settles your pay for this trip.'
+      : 'Trip ended. Your earning is added to your wallet once NESAM verifies the fare, and becomes withdrawable when the customer’s payment is confirmed.');
     setActiveTab('dashboard');
   };
 
-  const handleRequestPayout = async (amount: number, method: 'UPI' | 'Bank Transfer', details: string) => {
-    await requestPayout(driver, amount, method, details);
-    notify('ok', 'Payout request submitted. The NESAM finance team will process it shortly.');
+  const handleRequestPayout = async (amount: number, method: 'UPI' | 'Bank Transfer') => {
+    await requestPayout(amount, method);
+    notify('ok', 'Payout request sent. The amount is held until NESAM Finance transfers it.');
   };
 
   const goTab = (tab: string) => {
@@ -221,7 +217,7 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
         status={presence}
         onStatusChange={handlePresenceChange}
         profile={driver}
-        walletBalance={wallet.availableBalance}
+        walletBalance={wallet.available}
         activeTab={activeTab}
         setActiveTab={goTab}
         unreadNotificationsCount={unreadCount}
@@ -245,7 +241,7 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 pb-24 lg:pb-8">
         {inPreTrip && activeTrip ? (
-          <PreTripVerificationScreen trip={activeTrip} onSubmit={handlePreTripSubmit} onCancel={() => setInPreTrip(false)} />
+          <VehicleVerificationScreen trip={activeTrip} onDone={handleVerified} onCancel={() => setInPreTrip(false)} />
         ) : editingDocs ? (
           <RegistrationScreen
             uid={driver.id}
@@ -269,6 +265,7 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
                 activeTrip={activeTrip}
                 offers={offers}
                 earnings={earnings}
+                completedTripsCount={completedTrips.length}
                 acceptingId={acceptingId}
                 onAcceptTrip={handleAccept}
                 onStartPreTrip={() => setInPreTrip(true)}
@@ -279,45 +276,36 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
 
             {activeTab === 'trip' &&
               (activeTrip ? (
-                activeTrip.stage === 'Assigned' ? (
-                  <div className="max-w-md mx-auto text-center bg-white border border-gray-200 rounded-2xl p-8 space-y-4">
-                    <ShieldCheck className="w-10 h-10 text-[#E21E26] mx-auto" />
-                    <h3 className="text-lg font-bold text-gray-900">Pre-Trip Check Required</h3>
-                    <p className="text-sm text-gray-500">Complete the vehicle safety check before starting to the pickup point.</p>
-                    <button onClick={() => setInPreTrip(true)} className="px-6 py-2.5 bg-[#E21E26] text-white text-sm font-bold rounded-xl">
-                      Start Pre-Trip Check
-                    </button>
-                  </div>
-                ) : (
-                  <TripExecutionScreen
-                    key={activeTrip.id}
-                    trip={activeTrip}
-                    onReachedPickup={handleReachedPickup}
-                    onStartTrip={handleStartTrip}
-                    onArrived={handleArrived}
-                    onComplete={handleComplete}
-                  />
-                )
+                <TripExecutionScreen
+                  key={activeTrip.id}
+                  trip={activeTrip}
+                  onStartVerification={() => setInPreTrip(true)}
+                  onTripStart={handleTripStart}
+                  onReachedPickup={handleReachedPickup}
+                  onVerifyBoarding={handleVerifyBoarding}
+                  onTripEnd={handleTripEnd}
+                />
               ) : (
                 <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4 text-center p-8">
                   <h3 className="text-lg font-bold text-gray-800">No Active Trip</h3>
-                  <p className="text-sm text-gray-500">Go online and accept a trip from the dashboard to get started.</p>
-                  <button onClick={() => goTab('dashboard')} className="px-6 py-2.5 bg-[#E21E26] text-white text-sm font-bold rounded-xl">
+                  <p className="text-sm text-gray-700">Go online and accept a trip from the dashboard to get started.</p>
+                  <button onClick={() => goTab('dashboard')} className="px-6 py-3 bg-[#E21E26] text-white text-sm font-bold rounded-xl">
                     Go to Dashboard
                   </button>
                 </div>
               ))}
 
-            {activeTab === 'earnings' && <EarningsScreen earnings={earnings} completedTrips={completedTrips} />}
+            {activeTab === 'earnings' && (
+              <EarningsScreen earnings={earnings} completedTrips={completedTrips} ledger={ledger} fleetDriver={!independent} fleetName={driver.vendorName} />
+            )}
 
             {activeTab === 'wallet' && (
               <WalletPayoutScreen
-                availableBalance={wallet.availableBalance}
-                pendingPayouts={wallet.pendingPayouts}
-                totalPaidOut={wallet.totalPaidOut}
+                wallet={wallet}
                 bank={account.bank}
                 payoutRequests={payouts}
-                completedTrips={completedTrips}
+                ledger={ledger}
+                fleetDriver={!independent}
                 onRequestPayout={handleRequestPayout}
               />
             )}
@@ -325,7 +313,10 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
             {activeTab === 'notifications' && (
               <NotificationsScreen
                 notifications={notifications}
+                penalties={penalties}
+                penaltiesError={penaltiesError}
                 onMarkRead={(id) => markNotificationRead(id).catch(() => undefined)}
+                onOpenPenalty={(p) => setAckPenaltyId(p.id)}
               />
             )}
 
@@ -365,6 +356,25 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
             </div>
           </div>
         </div>
+      )}
+
+      <NotificationPopups
+        notifications={notifications}
+        onOpen={(n) => {
+          markNotificationRead(n.id).catch(() => undefined);
+          if (n.category === 'penalties') goTab('notifications');
+          else goTab(['dashboard', 'trip', 'earnings', 'wallet', 'notifications', 'profile'].includes(n.ctaPage) ? n.ctaPage : 'notifications');
+        }}
+      />
+      {penaltyToShow && (
+        <PenaltyAckModal
+          key={penaltyToShow.id}
+          penalty={penaltyToShow}
+          onDone={(m) => {
+            setAckPenaltyId(null);
+            notify('ok', m);
+          }}
+        />
       )}
 
       <BottomNav activeTab={activeTab} setActiveTab={goTab} hasActiveTrip={Boolean(activeTrip)} unreadCount={unreadCount} />

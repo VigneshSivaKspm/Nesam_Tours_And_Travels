@@ -11,6 +11,7 @@ export const parseAmount = (v: string | number | undefined | null): number => {
 /** Best-effort date for a booking: Firestore Timestamp -> createdAt seconds -> date string. */
 export const bookingDate = (b: Booking): Date | null => {
   const c = b.createdAt as any;
+  if (c instanceof Date) return Number.isNaN(c.getTime()) ? null : c;
   if (c?.toDate) return c.toDate();
   if (c?.seconds) return new Date(c.seconds * 1000);
   if (b.date) {
@@ -79,7 +80,16 @@ export const monthlyGstSummary = (bookings: Booking[]): GstMonthRow[] => {
   const rows = new Map<string, GstMonthRow & { sort: number }>();
   for (const b of bookings) {
     if (b.status !== "Completed") continue;
-    const d = bookingDate(b);
+    // Tax period follows the date the service was completed.
+    const done = b.completedAt as Date | { toDate?: () => Date; seconds?: number } | undefined;
+    const d =
+      done instanceof Date
+        ? done
+        : done?.toDate
+          ? done.toDate()
+          : done?.seconds
+            ? new Date(done.seconds * 1000)
+            : bookingDate(b);
     if (!d) continue;
     const key = `${d.getFullYear()}-${d.getMonth()}`;
     const row =

@@ -35,10 +35,19 @@ import LiveTrips from "./pages/LiveTrips";
 import Penalties from "./pages/Penalties";
 import DriverEarnings from "./pages/DriverEarnings";
 import VendorFinance from "./pages/VendorFinance";
+import CommissionPolicy from "./pages/CommissionPolicy";
 import ReportsAnalytics from "./pages/ReportsAnalytics";
 import NotificationsPage from "./pages/NotificationsPage";
 import StaffRoles from "./pages/StaffRoles";
+import SecurityEvents from "./pages/SecurityEvents";
+import LegalDocuments from "./pages/LegalDocuments";
+import LegalGate from "./components/LegalGate";
 import B2BIntegrations from "./pages/B2BIntegrations";
+import { AccessProvider } from "./components/AccessContext";
+import { NotificationProvider } from "./components/NotificationHost";
+import CreateBookingLauncher from "./components/CreateBookingLauncher";
+import { Toast, useToast } from "./components/Feedback";
+import { canAccessPage } from "./config/permissions";
 
 const pageMeta: Record<string, { title: string; breadcrumb: string[] }> = {
   dashboard: { title: "Dashboard", breadcrumb: ["Dashboard"] },
@@ -84,6 +93,10 @@ const pageMeta: Record<string, { title: string; breadcrumb: string[] }> = {
     title: "Vendor Finance & GST",
     breadcrumb: ["Finance", "Vendor Finance"],
   },
+  commission: {
+    title: "Commission Policy",
+    breadcrumb: ["Finance", "Commission Policy"],
+  },
   penalties: {
     title: "Penalties & Disputes",
     breadcrumb: ["Compliance", "Penalties"],
@@ -103,6 +116,8 @@ const pageMeta: Record<string, { title: string; breadcrumb: string[] }> = {
   reviews: { title: "Reviews & Ratings", breadcrumb: ["System", "Reviews"] },
   staff: { title: "Staff & Roles", breadcrumb: ["System", "Staff & Roles"] },
   settings: { title: "Settings", breadcrumb: ["System", "Settings"] },
+  security: { title: "Security & Audit", breadcrumb: ["System", "Security & Audit"] },
+  legal: { title: "Terms, Privacy & Consent", breadcrumb: ["System", "Legal documents"] },
   support: {
     title: "Support Tickets",
     breadcrumb: ["Help & Support", "Support Tickets"],
@@ -116,6 +131,9 @@ function AdminShell({ session }: { session: AdminSession }) {
     null,
   );
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const { toast, show: showToast } = useToast(9000);
+  const canCreateBooking = session.access.isSuper || session.access.permissions.includes("operations");
 
   const currentPage = selectedBookingId ? "booking-detail" : activePage;
   const meta = pageMeta[currentPage] || pageMeta["dashboard"];
@@ -126,7 +144,30 @@ function AdminShell({ session }: { session: AdminSession }) {
     setMobileNavOpen(false);
   };
 
+  /** Notification / shortcut targets: a booking opens its details, anything else is a page. */
+  const openTarget = (page: string, bookingId?: string) => {
+    if (page === "booking-detail" && bookingId) {
+      setActivePage("bookings");
+      setSelectedBookingId(bookingId);
+      setMobileNavOpen(false);
+      return;
+    }
+    navigate(pageMeta[page] ? page : "dashboard");
+  };
+
   const renderPage = () => {
+    if (!canAccessPage(session.access, currentPage)) {
+      return (
+        <div className="p-6">
+          <div className="max-w-md mx-auto mt-10 bg-white rounded-2xl border border-[#E5E5E5] p-6 text-center shadow-sm">
+            <h2 className="text-[15px] font-bold text-[#111] mb-1">No access to {meta.title}</h2>
+            <p className="text-[12px] text-[#666]">
+              Your role ({session.access.roleName}) does not include this area. Ask a super admin to change your role in Staff &amp; Roles.
+            </p>
+          </div>
+        </div>
+      );
+    }
     if (selectedBookingId) {
       return (
         <BookingDetails
@@ -139,9 +180,9 @@ function AdminShell({ session }: { session: AdminSession }) {
     switch (activePage) {
       // Overview
       case "dashboard":
-        return <Dashboard onNavigate={navigate} />;
+        return <Dashboard onNavigate={navigate} onSelectBooking={(id) => setSelectedBookingId(id)} />;
       case "trips":
-        return <LiveTrips />;
+        return <LiveTrips onOpenBooking={(id) => openTarget("booking-detail", id)} />;
 
       // Bookings
       case "bookings":
@@ -172,6 +213,8 @@ function AdminShell({ session }: { session: AdminSession }) {
         return <DriverEarnings />;
       case "vendor-finance":
         return <VendorFinance />;
+      case "commission":
+        return <CommissionPolicy />;
 
       // Compliance
       case "penalties":
@@ -200,15 +243,21 @@ function AdminShell({ session }: { session: AdminSession }) {
         return <Reviews />;
       case "settings":
         return <Settings />;
+      case "security":
+        return <SecurityEvents onOpenBooking={(id) => openTarget("booking-detail", id)} />;
+      case "legal":
+        return <LegalDocuments />;
       case "support":
         return <SupportTickets />;
 
       default:
-        return <Dashboard onNavigate={navigate} />;
+        return <Dashboard onNavigate={navigate} onSelectBooking={(id) => setSelectedBookingId(id)} />;
     }
   };
 
   return (
+    <AccessProvider value={session.access}>
+    <NotificationProvider onOpen={openTarget}>
     <div
       className="h-screen flex overflow-hidden"
       style={{ background: "#F5F5F5" }}
@@ -232,6 +281,7 @@ function AdminShell({ session }: { session: AdminSession }) {
           onToggleCollapse={() => setCollapsed(!collapsed)}
           userName={session.user.displayName}
           userEmail={session.user.email}
+          access={session.access}
         />
       </div>
 
@@ -265,15 +315,29 @@ function AdminShell({ session }: { session: AdminSession }) {
           title={meta.title}
           breadcrumb={meta.breadcrumb}
           onNavigate={navigate}
+          onCreateBooking={canCreateBooking ? () => setShowCreate(true) : undefined}
           userName={session.user.displayName}
           userEmail={session.user.email}
-          userRole={session.role}
+          userRole={session.access.roleName}
           onSignOut={signOutAdmin}
         />
 
         <main className="flex-1 overflow-y-auto min-h-0">{renderPage()}</main>
       </div>
+      <Toast toast={toast} />
+      {showCreate && (
+        <CreateBookingLauncher
+          onClose={() => setShowCreate(false)}
+          onCreated={(b) => {
+            setShowCreate(false);
+            showToast(`Booking ${b.bookingId} created and waiting for approval.`);
+            openTarget("booking-detail", b.id);
+          }}
+        />
+      )}
     </div>
+    </NotificationProvider>
+    </AccessProvider>
   );
 }
 
@@ -305,9 +369,17 @@ export default function App() {
     return <Login onSignUp={() => setAuthMode("signup")} />;
   }
 
-  const isSuperAdmin = session.role === "admin" && session.status === "active";
+  const isActiveAdmin = session.role === "admin" && session.status === "active";
 
-  if (!isSuperAdmin) {
+  if (!isActiveAdmin) {
+    const [title, message] =
+      session.role === "pending" && session.status === "rejected"
+        ? ["Request declined", `Your request for staff access was declined${session.rejectionReason ? `: ${session.rejectionReason}` : "."}`]
+        : session.role === "pending"
+          ? ["Awaiting approval", "Your staff access request has been received. A super admin will assign your role from Staff & Roles."]
+          : session.role === "admin"
+            ? ["Account deactivated", "Your staff account is deactivated. Contact a super admin if you need access again."]
+            : ["Access not authorized", "This account is not a staff account. Contact the platform team if you believe this is a mistake."];
     return (
       <div
         className="h-screen w-screen flex items-center justify-center px-4"
@@ -315,12 +387,10 @@ export default function App() {
       >
         <div className="max-w-sm text-center bg-white rounded-2xl border border-[#E5E5E5] p-8 shadow-sm">
           <h1 className="text-[16px] font-bold text-[#111111] mb-2">
-            Access Not Authorized
+            {title}
           </h1>
           <p className="text-[13px] text-[#666] mb-6">
-            This account ({session.user.email}) is signed in but does not have
-            Super Admin access. Contact the platform team if you believe this is
-            a mistake.
+            {message} ({session.user.email})
           </p>
           <button
             onClick={() => signOutAdmin()}
@@ -335,6 +405,8 @@ export default function App() {
   }
 
   return (
-    <AdminShell session={{ ...session, role: "admin", status: "active" }} />
+    <LegalGate>
+      <AdminShell session={session} />
+    </LegalGate>
   );
 }

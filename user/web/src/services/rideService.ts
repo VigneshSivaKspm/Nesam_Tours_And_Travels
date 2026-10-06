@@ -19,7 +19,6 @@ import { db } from './firebase';
 import {
   FREE_CANCEL_AFTER_ASSIGN_MS,
   INSTANT_CANCELLATION_FEE,
-  PARTNER_PAYOUT_SHARE,
   PRESENCE_STALE_MS,
   SCHEDULED_CANCELLATION_FEE,
   SCHEDULED_FREE_CANCEL_BEFORE_MS,
@@ -55,7 +54,7 @@ const SOS = 'sos_alerts';
 
 // ── Mapping ─────────────────────────────────────────────────────────────────
 
-const STATUSES: BookingStatus[] = ['Pending', 'Confirmed', 'Assigned', 'Ongoing', 'Completed', 'Cancelled'];
+const STATUSES: BookingStatus[] = ['Pending', 'Approved', 'Confirmed', 'Assigned', 'Ongoing', 'Completed', 'Cancelled', 'Rejected'];
 const STAGES: TripStage[] = ['Assigned', 'En Route Pickup', 'Reached Pickup', 'In Progress', 'Arrived Destination', 'Completed'];
 
 /** Also maps labels written by older builds of this panel. */
@@ -66,13 +65,17 @@ function normalizeStatus(raw: string): BookingStatus {
   return 'Pending';
 }
 
-export function derivePhase(status: BookingStatus, stage: TripStage | null): RidePhase {
+export function derivePhase(status: BookingStatus, stage: TripStage | null, boardingVerified = false): RidePhase {
   switch (status) {
     case 'Cancelled':
+    case 'Rejected':
       return 'cancelled';
     case 'Completed':
       return 'completed';
     case 'Ongoing':
+      // The driver starts the trip on the way to the pickup; the ride itself begins once the boarding OTP is verified.
+      if (stage === 'En Route Pickup') return 'driver_en_route';
+      if (stage === 'Reached Pickup') return boardingVerified ? 'in_trip' : 'driver_arrived';
       return 'in_trip';
     case 'Assigned':
       if (stage === 'Reached Pickup') return 'driver_arrived';
@@ -97,16 +100,21 @@ function place(prefix: 'pickup' | 'drop', d: Record<string, any>): GeoPlace {
   };
 }
 
-function mapFareBreakdown(v: unknown): FareBreakdown | null {
+function mapFareBreakdown(v: unknown, adjustment?: unknown): FareBreakdown | null {
   if (!v || typeof v !== 'object') return null;
   const f = v as Record<string, unknown>;
-  const keys: (keyof FareBreakdown)[] = [
-    'baseFare', 'distanceFare', 'timeFare', 'nightCharge', 'driverAllowance', 'minimumFareAdjustment',
+  const keys: Exclude<keyof FareBreakdown, 'adjustmentName' | 'adjustmentAmount'>[] = [
+    'baseFare', 'distanceFare', 'timeFare', 'nightCharge', 'driverAllowance', 'minimumFareAdjustment', 'adminAdjustment',
     'subtotal', 'discount', 'taxableAmount', 'gstRate', 'gst', 'total', 'distanceKm', 'durationMin',
     'perKmRate', 'perMinuteRate',
   ];
   const out = {} as FareBreakdown;
   for (const k of keys) out[k] = num(f[k]);
+  const a = adjustment && typeof adjustment === 'object' ? (adjustment as Record<string, unknown>) : null;
+  if (a && typeof a.amount === 'number' && a.amount !== 0) {
+    out.adjustmentName = str(a.name) || 'Fare adjustment';
+    out.adjustmentAmount = a.amount;
+  }
   return out;
 }
 
@@ -135,15 +143,23 @@ export function mapBooking(id: string, d: Record<string, any>): TripRecord {
     customerId: str(d.customerId),
     pickup: place('pickup', d),
     drop: place('drop', d),
-    service: str(d.service) || 'Local',
+    service: str(d.service),
     tripType: d.tripType === 'Round Trip' ? 'Round Trip' : 'One Way',
     categoryId: str(d.vehicleCategoryId),
-    categoryName: str(d.vehicleCategory || d.vehicle) || 'Cab',
+    categoryName: str(d.vehicleCategory || d.vehicle),
     status,
     tripStage: stage,
-    phase: derivePhase(status, stage),
+    phase: derivePhase(status, stage, Boolean(d.boardingVerifiedAt)),
     fare: num(d.fare),
-    fareBreakdown: mapFareBreakdown(d.fareBreakdown),
+    fareBreakdown: mapFareBreakdown(d.fareBreakdown, d.globalAdjustmentApplied),
+    fareExtras: Array.isArray(d.fareBreakup?.lines)
+      ? (d.fareBreakup.lines as { label?: unknown; amount?: unknown; detail?: unknown; treatment?: unknown }[])
+          .filter((l) => l.treatment === 'extra')
+          .map((l) => ({ label: str(l.label), amount: typeof l.amount === 'number' ? l.amount : null, detail: str(l.detail) }))
+      : [],
+    paid: d.paymentSummary && typeof d.paymentSummary === 'object'
+      ? { totalPaid: num(d.paymentSummary.totalPaid), balanceDue: num(d.paymentSummary.balanceDue), status: str(d.paymentSummary.status) }
+      : null,
     tollCharges: num(d.tollCharges),
     couponCode: str(d.couponCode),
     paymentMethod: str(d.paymentMethod) || 'Cash',
@@ -171,7 +187,7 @@ export function mapBooking(id: string, d: Record<string, any>): TripRecord {
 }
 
 export function isActiveStatus(s: BookingStatus): boolean {
-  return s === 'Pending' || s === 'Confirmed' || s === 'Assigned' || s === 'Ongoing';
+  return s === 'Pending' || s === 'Approved' || s === 'Confirmed' || s === 'Assigned' || s === 'Ongoing';
 }
 
 /**
@@ -310,28 +326,6 @@ function addEvent(
 
 // ── Create ──────────────────────────────────────────────────────────────────
 
-function generateOtp(): string {
-  const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
-  return String(1000 + (buf[0]! % 9000));
-}
-
-function generateBookingCode(now: Date): string {
-  const yy = String(now.getFullYear()).slice(-2);
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  const dd = String(now.getDate()).padStart(2, '0');
-  const buf = new Uint32Array(1);
-  crypto.getRandomValues(buf);
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let tail = '';
-  let n = buf[0]!;
-  for (let i = 0; i < 5; i++) {
-    tail += alphabet[n % alphabet.length];
-    n = Math.floor(n / alphabet.length);
-  }
-  return `NT${yy}${mm}${dd}-${tail}`;
-}
-
 export interface RideRequestInput {
   profile: UserProfile;
   pickup: GeoPlace;
@@ -344,6 +338,10 @@ export interface RideRequestInput {
   couponCode: string;
   notes: string;
   scheduledAt: Date | null;
+  /** WhatsApp number for booking updates: same as the mobile number, or a country code and number. */
+  whatsapp?: { sameAsMobile: boolean; countryCode?: string; number?: string };
+  /** Optional email for the confirmation and receipt. */
+  email?: string;
 }
 
 export interface RideRequestResult {
@@ -362,6 +360,7 @@ export async function createRideRequest(input: RideRequestInput): Promise<RideRe
   await call({ requestId, pickup: input.pickup, drop: input.drop,
     categoryId: input.category.id, tripType: input.tripType, expectedFare: input.fare.total,
     paymentMethod: input.paymentMethod, couponCode: input.couponCode, notes: input.notes,
+    whatsapp: input.whatsapp, email: input.email || undefined,
     scheduledAt: input.scheduledAt?.toISOString() ?? null });
   pendingBookingIds.delete(key);
   return { id: requestId, unconfirmed: false };
@@ -378,7 +377,7 @@ export function cancellationQuote(t: TripRecord, now = Date.now()): Cancellation
   if (t.status === 'Ongoing') {
     return { allowed: false, fee: 0, explanation: 'The trip has started and can no longer be cancelled. Use SOS or call support if you need help.' };
   }
-  if (!['Pending', 'Confirmed', 'Assigned'].includes(t.status)) {
+  if (!['Pending', 'Approved', 'Confirmed', 'Assigned'].includes(t.status)) {
     return { allowed: false, fee: 0, explanation: 'This ride can no longer be cancelled.' };
   }
   if (t.isScheduled && t.scheduledAt) {

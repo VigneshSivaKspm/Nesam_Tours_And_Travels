@@ -6,6 +6,7 @@ import { AuthScreen, type AuthIntent } from './screens/AuthScreen';
 import { RegistrationScreen } from './screens/RegistrationScreen';
 import { VerificationStatusScreen, NoAccountScreen } from './screens/VerificationStatusScreen';
 import { DriverWorkspace } from './DriverWorkspace';
+import { LegalGate } from './components/LegalGate';
 import { subscribeToAuthUser, signOutUser, resetRecaptchaVerifier } from './services/authService';
 import {
   subscribeToDriverAccount,
@@ -131,6 +132,7 @@ export function App() {
       );
     }
     return (
+      <LegalGate role="driver">
       <RegistrationScreen
         key={`signup-${authUser.uid}-${invite?.name ?? ''}`}
         uid={authUser.uid}
@@ -139,6 +141,7 @@ export function App() {
         onSubmitted={() => { /* live subscription picks up the new doc */ }}
         onSignOut={handleSignOut}
       />
+      </LegalGate>
     );
   }
 
@@ -164,7 +167,11 @@ export function App() {
     return <VerificationStatusScreen account={account} onSignOut={handleSignOut} onResubmit={() => setResubmitting(true)} />;
   }
 
-  return <DriverWorkspace account={account} onSignOut={handleSignOut} />;
+  return (
+    <LegalGate role="driver">
+      <DriverWorkspace account={account} onSignOut={handleSignOut} />
+    </LegalGate>
+  );
 }
 
 export default App;

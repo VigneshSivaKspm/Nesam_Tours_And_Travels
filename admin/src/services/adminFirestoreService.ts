@@ -20,7 +20,6 @@ import {
   PaymentTransaction,
   PenaltyRecord,
   NotificationRecord,
-  StaffMember,
   VehicleCategory,
   Invoice,
   TravelService,
@@ -41,7 +40,6 @@ export const COLLECTIONS = {
   PAYMENTS: "payments",
   PENALTIES: "penalties",
   NOTIFICATIONS: "notifications",
-  STAFF: "staff",
   VEHICLE_CATEGORIES: "vehicle_categories",
   INVOICES: "invoices",
   SERVICES: "services",
@@ -190,9 +188,6 @@ export const subscribeNotifications = (
   cb: (data: NotificationRecord[]) => void,
 ) => subscribeAdminNotifications(cb);
 
-export const subscribeStaff = (cb: (data: StaffMember[]) => void, onError?: (message: string) => void) =>
-  subscribeToCollection<StaffMember>(COLLECTIONS.STAFF, cb, onError);
-
 /**
  * Mutations
  */
@@ -296,3 +291,21 @@ export async function saveSettings(data: any) {
 
 export const subscribePayoutRequests = (cb: (data: any[]) => void, onError?: (message: string) => void) =>
   subscribeToCollection<any>("payout_requests", cb, onError);
+
+/** Live single document (settings, a verification record…). Errors go to `onError`; a missing document is `null`. */
+export function subscribeToDocument<T>(path: string, cb: (data: T | null) => void, onError?: (message: string) => void) {
+  try {
+    return onSnapshot(
+      doc(db, path),
+      (snap) => cb(snap.exists() ? ({ ...snap.data(), id: snap.id } as T) : null),
+      (err) => {
+        console.warn(`Firestore document listener error on ${path}:`, err);
+        if (onError) onError(describeDataError(err));
+        else cb(null);
+      },
+    );
+  } catch (err) {
+    if (onError) onError(describeDataError(err));
+    return () => {};
+  }
+}

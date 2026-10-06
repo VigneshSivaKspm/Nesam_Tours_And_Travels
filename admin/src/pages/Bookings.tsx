@@ -1,920 +1,375 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { Booking, Customer, Driver, FareRule, MasterLocation, TravelService, Vehicle, VehicleCategory, Vendor } from "../types";
 import {
-  Booking,
-  TravelService,
-  MasterLocation,
-  FareRule,
-  VehicleCategory,
-  Customer,
-} from "../types";
-import {
-  subscribeBookings,
-  subscribeServices,
-  subscribeLocations,
-  subscribeFareRules,
-  subscribeVehicleCategories,
-  subscribeCustomers,
-  setFirestoreDocument,
-  COLLECTIONS,
+  subscribeBookings, subscribeCustomers, subscribeDrivers, subscribeFareRules, subscribeLocations, subscribeServices, subscribeVehicleCategories, subscribeVehicles, subscribeVendors,
 } from "../services/adminFirestoreService";
-import { calculateCentralFare } from "../services/fareEngine";
+import { AdminBookingError, normalizePhone, updateBookingContact, emailError } from "../services/adminBookingService";
+import ManualBookingModal from "../components/ManualBookingModal";
+import { ErrorBanner, Modal, Toast, useToast } from "../components/Feedback";
+import { Field, inputCls } from "../components/FormKit";
+import { AlertBadge, PaymentBadge, StatusBadge } from "../components/booking/BookingBadges";
+import { ApproveDialog, AssignDriverModal, CancelBookingModal, RejectDialog } from "../components/booking/BookingActions";
+import { BOOKING_TABS, paymentOf, tabOf, unassignedSeverity, type BookingTab } from "../domain/bookingFlow";
+import { useCan } from "../components/AccessContext";
+import { useNow } from "../hooks/useNow";
+import { useOperationsSettings } from "../hooks/useOperationsSettings";
+import { bookingPickupDate, formatDate, formatTime12, isoDateIST, relativeFromNow } from "../utils/time";
 
-const StatusBadge = ({ status }: { status: string }) => {
-  const styles: Record<string, string> = {
-    Completed: "bg-green-50 text-green-700 border-green-200",
-    Confirmed: "bg-blue-50 text-blue-700 border-blue-200",
-    Ongoing: "bg-orange-50 text-orange-700 border-orange-200",
-    Pending: "bg-yellow-50 text-yellow-700 border-yellow-200",
-    Cancelled: "bg-red-50 text-[#E21B23] border-red-200",
-    Assigned: "bg-purple-50 text-purple-700 border-purple-200",
-  };
-  return (
-    <span
-      className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${styles[status] || "bg-gray-50 text-gray-600 border-gray-200"}`}
-    >
-      {status}
-    </span>
-  );
-};
+type TabKey = BookingTab | "Cancelled";
+const PAGE_SIZE = 20;
+const rupees = (n: number) => `₹${Math.round(n).toLocaleString("en-IN")}`;
+const fareNumber = (b: Booking) => (typeof b.fare === "number" ? b.fare : Number(String(b.fare ?? "").replace(/[^\d.]/g, "")) || 0);
 
-const PaymentBadge = ({ status }: { status: string }) => {
-  const styles: Record<string, string> = {
-    Paid: "text-green-700 bg-green-50",
-    Pending: "text-yellow-700 bg-yellow-50",
-    Unpaid: "text-red-700 bg-red-50",
-    Refunded: "text-gray-600 bg-gray-100",
-  };
-  return (
-    <span
-      className={`inline-flex px-2 py-0.5 rounded text-[11px] font-semibold ${styles[status] || "bg-gray-50 text-gray-600"}`}
-    >
-      {status}
-    </span>
-  );
-};
+interface Filters {
+  search: string;
+  date: string;
+  category: string;
+  driver: string;
+  vendor: string;
+  payment: string;
+  assignment: "" | "assigned" | "unassigned";
+  service: string;
+  sort: "pickup" | "created";
+}
+const NO_FILTERS: Filters = { search: "", date: "", category: "", driver: "", vendor: "", payment: "", assignment: "", service: "", sort: "pickup" };
 
-export default function Bookings({
-  onSelectBooking,
-}: {
-  onSelectBooking: (id: string) => void;
-}) {
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("All");
-  const [serviceFilter, setServiceFilter] = useState("All");
-  const [dateFilter, setDateFilter] = useState("");
+interface ContactForm { customer: string; phone: string; email: string; notes: string }
+
+export default function Bookings({ onSelectBooking, initialTab }: { onSelectBooking: (id: string) => void; initialTab?: string }) {
+  const [tab, setTab] = useState<TabKey>((BOOKING_TABS as readonly string[]).includes(initialTab ?? "") || initialTab === "Cancelled" ? (initialTab as TabKey) : "Pending");
+  const [f, setF] = useState<Filters>(NO_FILTERS);
   const [page, setPage] = useState(1);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [newBooking, setNewBooking] = useState({
-    name: "",
-    phone: "",
-    service: "Airport Taxi",
-    pickup: "",
-    drop: "",
-    date: "",
-    time: "",
-    vehicle: "Sedan",
-    fare: 0,
-    payment: "Cash",
-  });
-  const [liveBookings, setLiveBookings] = useState<Booking[]>([]);
-  const [liveServices, setLiveServices] = useState<TravelService[]>([]);
-  const [liveLocations, setLiveLocations] = useState<MasterLocation[]>([]);
-  const [liveFareRules, setLiveFareRules] = useState<FareRule[]>([]);
-  const [liveCategories, setLiveCategories] = useState<VehicleCategory[]>([]);
-  const [liveCustomers, setLiveCustomers] = useState<Customer[]>([]);
+  const [showAdd, setShowAdd] = useState(false);
+  const [bookings, setBookings] = useState<Booking[] | null>(null);
+  const [drivers, setDrivers] = useState<Driver[]>([]);
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [services, setServices] = useState<TravelService[]>([]);
+  const [locations, setLocations] = useState<MasterLocation[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [fareRules, setFareRules] = useState<FareRule[]>([]);
+  const [categories, setCategories] = useState<VehicleCategory[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+  const { toast, show: showToast } = useToast(9000);
+  const canFinance = useCan("finance");
+  const now = useNow(30000);
+  const ops = useOperationsSettings();
+
+  const [approving, setApproving] = useState<Booking | null>(null);
+  const [rejecting, setRejecting] = useState<Booking | null>(null);
+  const [assigning, setAssigning] = useState<Booking | null>(null);
+  const [cancelling, setCancelling] = useState<Booking | null>(null);
+  const [editing, setEditing] = useState<Booking | null>(null);
 
   useEffect(() => {
-    const unsubB = subscribeBookings(setLiveBookings);
-    const unsubS = subscribeServices(setLiveServices);
-    const unsubL = subscribeLocations(setLiveLocations);
-    const unsubF = subscribeFareRules(setLiveFareRules);
-    const unsubC = subscribeVehicleCategories(setLiveCategories);
-    const unsubCust = subscribeCustomers(setLiveCustomers);
-    return () => {
-      unsubB();
-      unsubS();
-      unsubL();
-      unsubF();
-      unsubC();
-      unsubCust();
-    };
-  }, []);
-
-  const handleCreateBooking = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!newBooking.name.trim()) {
-      alert("Customer Name is required.");
-      return;
-    }
-    const id = "NTT-" + Date.now();
-    // Generate OTP separately (do NOT put on booking doc)
-    const boardingOTP = Math.floor(1000 + Math.random() * 9000).toString();
-
-    const createdBooking: any = {
-      id,
-      customer: newBooking.name,
-      phone: newBooking.phone,
-      service: newBooking.service,
-      pickup: newBooking.pickup || "Pickup Location",
-      drop: newBooking.drop || "Drop Location",
-      date: newBooking.date || new Date().toISOString().split("T")[0],
-      time: newBooking.time || "10:00",
-      vehicle: newBooking.vehicle,
-      fare: Number(newBooking.fare) || 0,
-      paymentMethod: newBooking.payment,
-      payment: "Pending",
-      status: "Pending",
-      source: "admin",
-    };
-
-    // Optimistically update bookings list immediately
-    setLiveBookings((prev) => [createdBooking, ...prev]);
-    setShowAddModal(false);
-    setNewBooking({
-      name: "",
-      phone: "",
-      service: "Airport Taxi",
-      pickup: "",
-      drop: "",
-      date: "",
-      time: "",
-      vehicle: "Sedan",
-      fare: 0,
-      payment: "Cash",
-    });
-
-    // Save to Firestore
-    try {
-      await setFirestoreDocument(COLLECTIONS.BOOKINGS, id, createdBooking);
-      await setFirestoreDocument("booking_secrets", id, {
-        boardingOTP,
-        bookingId: id,
-      });
-      await setFirestoreDocument(COLLECTIONS.MARKETPLACE, id, {
-        id,
-        pickup: newBooking.pickup || "Pickup Location",
-        drop: newBooking.drop || "Drop Location",
-        date: newBooking.date || new Date().toISOString().split("T")[0],
-        time: newBooking.time || "10:00",
-        service: newBooking.service,
-        vehicle: newBooking.vehicle,
-        fare: Number(newBooking.fare) || 0,
-        status: "Open",
-        source: "admin",
-      });
-    } catch (err) {
-      console.warn("Error saving booking to Firestore:", err);
-    }
-  };
-
-  useEffect(() => {
-    setPage(1);
-  }, [search, statusFilter, serviceFilter, dateFilter]);
-
-  const statuses = [
-    "All",
-    "Pending",
-    "Confirmed",
-    "Assigned",
-    "Ongoing",
-    "Completed",
-    "Cancelled",
-  ];
-  const services = [
-    "All",
-    "Airport Taxi",
-    "Outstation Cab",
-    "One Way Taxi",
-    "Local Rental",
-    "Tour Package",
-  ];
-
-  const filtered = liveBookings.filter((b) => {
-    const matchSearch =
-      search === "" ||
-      (b.id && b.id.toLowerCase().includes(search.toLowerCase())) ||
-      (b.customer && b.customer.toLowerCase().includes(search.toLowerCase()));
-    const matchStatus = statusFilter === "All" || b.status === statusFilter;
-    const matchService = serviceFilter === "All" || b.service === serviceFilter;
-    const matchDate = dateFilter === "" || b.date === dateFilter;
-    return matchSearch && matchStatus && matchService && matchDate;
-  });
-
-  const paginated = filtered.slice((page - 1) * 20, page * 20);
-
-  const [editingBooking, setEditingBooking] = useState<Booking | null>(null);
-
-  const handleExportCSV = () => {
-    const headers = [
-      "Booking ID",
-      "Customer",
-      "Phone",
-      "Service",
-      "Pickup",
-      "Drop",
-      "Date",
-      "Time",
-      "Vehicle",
-      "Driver",
-      "Fare",
-      "Payment",
-      "Status",
+    setLoadError(null);
+    setBookings(null);
+    const unsubs = [
+      subscribeBookings(setBookings, setLoadError),
+      subscribeDrivers(setDrivers, setLoadError),
+      subscribeVendors(setVendors, setLoadError),
+      subscribeVehicles(setVehicles, setLoadError),
+      subscribeServices(setServices, setLoadError),
+      subscribeLocations(setLocations, setLoadError),
+      subscribeCustomers(setCustomers, setLoadError),
+      subscribeFareRules(setFareRules, setLoadError),
+      subscribeVehicleCategories(setCategories, setLoadError),
     ];
-    const rows = filtered.map((b) => [
-      b.id,
-      b.customer,
-      b.phone || "",
-      b.service,
-      b.pickup,
-      b.drop,
-      b.date,
-      b.time,
-      b.vehicle,
-      b.driver,
-      b.fare,
-      b.payment,
-      b.status,
-    ]);
-    const csvContent =
-      "data:text/csv;charset=utf-8," +
-      [
-        headers.join(","),
-        ...rows.map((e) => e.map((val) => `"${val}"`).join(",")),
-      ].join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `bookings_export_${Date.now()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    return () => unsubs.forEach((u) => u());
+  }, [retryKey]);
+
+  useEffect(() => setPage(1), [tab, f]);
+
+  const all = bookings ?? [];
+  const pickupOf = (b: Booking) => bookingPickupDate(b);
+  const severityOf = (b: Booking) => {
+    const p = pickupOf(b);
+    return unassignedSeverity(b, p ? p.getTime() : null, now.getTime(), { warningHours: ops.warningHours, criticalHours: ops.criticalHours });
   };
 
-  const handleSaveEdit = async () => {
-    if (!editingBooking) return;
-    setLiveBookings((prev) =>
-      prev.map((b) => (b.id === editingBooking.id ? editingBooking : b)),
-    );
-    await setFirestoreDocument(
-      COLLECTIONS.BOOKINGS,
-      editingBooking.id,
-      editingBooking,
-    );
-    setEditingBooking(null);
+  const counts = useMemo(() => {
+    const c: Record<TabKey, number> = { Pending: 0, Approved: 0, Confirmed: 0, Ongoing: 0, Completed: 0, Cancelled: 0 };
+    for (const b of all) {
+      const t = tabOf(b.status);
+      if (t) c[t]++;
+      else if (b.status === "Cancelled" || b.status === "Rejected") c.Cancelled++;
+    }
+    return c;
+  }, [all]);
+
+  const categoriesInUse = useMemo(() => Array.from(new Set(all.map((b) => b.vehicleCategory || b.vehicle).filter(Boolean))).sort(), [all]);
+  const serviceNames = useMemo(() => Array.from(new Set(all.map((b) => b.service).filter(Boolean))).sort(), [all]);
+  const driverOptions = useMemo(() => Array.from(new Map(all.filter((b) => b.assignedDriverId).map((b) => [b.assignedDriverId!, b.assignedDriverName || b.driver || b.assignedDriverId!])).entries()), [all]);
+  const vendorOptions = useMemo(() => Array.from(new Map(all.filter((b) => b.assignedVendorId).map((b) => [b.assignedVendorId!, b.assignedVendorName || b.assignedVendorId!])).entries()), [all]);
+
+  const unassignedCritical = useMemo(() => all.filter((b) => severityOf(b) === "critical").length, [all, now, ops.warningHours, ops.criticalHours]); // eslint-disable-line react-hooks/exhaustive-deps
+  const unassignedWarn = useMemo(() => all.filter((b) => severityOf(b) === "warning").length, [all, now, ops.warningHours, ops.criticalHours]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const filtered = useMemo(() => {
+    const q = f.search.trim().toLowerCase();
+    const rows = all.filter((b) => {
+      if (tab === "Cancelled" ? !(b.status === "Cancelled" || b.status === "Rejected") : tabOf(b.status) !== tab) return false;
+      if (q) {
+        const hay = [b.id, b.bookingId, b.customer, b.phone, b.customerPhone, b.driver, b.assignedDriverName, b.assignedVehicleNumber, b.vehicle, b.pickup, b.drop].filter(Boolean).join(" ").toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      if (f.date) {
+        const p = pickupOf(b);
+        if (!p || isoDateIST(p) !== f.date) return false;
+      }
+      if (f.category && (b.vehicleCategory || b.vehicle) !== f.category) return false;
+      if (f.driver && b.assignedDriverId !== f.driver) return false;
+      if (f.vendor && b.assignedVendorId !== f.vendor) return false;
+      if (f.service && b.service !== f.service) return false;
+      if (f.payment && paymentOf(b).status !== f.payment) return false;
+      if (f.assignment === "assigned" && !b.assignedDriverId) return false;
+      if (f.assignment === "unassigned" && b.assignedDriverId) return false;
+      return true;
+    });
+    const t = (b: Booking) => (f.sort === "created" ? bookingTime(b.createdAt) : pickupOf(b)?.getTime() ?? 0);
+    // Open work is sorted by what is coming up first; finished work by what happened last.
+    const upcoming = tab !== "Completed" && tab !== "Cancelled" && f.sort === "pickup";
+    return rows.sort((a, b) => (upcoming ? t(a) - t(b) : t(b) - t(a)));
+  }, [all, tab, f]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const paginated = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const filtersActive = JSON.stringify({ ...f, sort: "" }) !== JSON.stringify({ ...NO_FILTERS, sort: "" });
+
+  const exportCsv = () => {
+    const headers = ["Booking ID", "Status", "Customer", "Mobile", "Service", "Pickup", "Drop", "Pickup date", "Pickup time", "Vehicle", "Driver", "Vehicle no.", "Fare", "Paid", "Balance", "Payment status"];
+    const rows = filtered.map((b) => {
+      const p = pickupOf(b);
+      const pay = paymentOf(b);
+      return [b.bookingId || b.id, b.status, b.customer, b.phone || "", b.service, b.pickup, b.drop, p ? formatDate(p) : b.date, p ? formatTime12(p) : b.time, b.vehicleCategory || b.vehicle, b.assignedDriverName || b.driver || "", b.assignedVehicleNumber || "", fareNumber(b), pay.totalPaid, pay.balanceDue, pay.status];
+    });
+    const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `bookings_${tab.toLowerCase()}_${Date.now()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
+
+  const done = (text: string) => {
+    setApproving(null); setRejecting(null); setAssigning(null); setCancelling(null);
+    showToast(text);
+  };
+
+  const tabs: { key: TabKey; label: string }[] = [...BOOKING_TABS.map((k) => ({ key: k as TabKey, label: k })), { key: "Cancelled", label: "Cancelled / Rejected" }];
 
   return (
-    <div className="p-6 space-y-5">
-      {/* Header Controls */}
-      <div className="flex flex-wrap items-center gap-3 bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4">
-        <div className="relative flex-1 min-w-48">
-          <svg
-            className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#999]"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-            />
-          </svg>
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search booking ID, customer..."
-            className="w-full pl-9 pr-4 py-2 text-[13px] bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23] placeholder-[#999]"
-          />
-        </div>
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="px-3 py-2 text-[13px] border border-[#E5E5E5] rounded-lg bg-white focus:outline-none focus:border-[#E21B23] text-[#444]"
-        >
-          {statuses.map((s) => (
-            <option key={s}>{s}</option>
-          ))}
-        </select>
-        <select
-          value={serviceFilter}
-          onChange={(e) => setServiceFilter(e.target.value)}
-          className="px-3 py-2 text-[13px] border border-[#E5E5E5] rounded-lg bg-white focus:outline-none focus:border-[#E21B23] text-[#444]"
-        >
-          {services.map((s) => (
-            <option key={s}>{s}</option>
-          ))}
-        </select>
-        <input
-          type="date"
-          value={dateFilter}
-          onChange={(e) => setDateFilter(e.target.value)}
-          className="px-3 py-2 text-[13px] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23] text-[#444]"
-        />
-        <div className="flex gap-2 ml-auto">
-          <button
-            onClick={handleExportCSV}
-            className="flex items-center gap-2 px-4 py-2 text-[12px] font-semibold text-[#444] border border-[#E5E5E5] rounded-lg hover:bg-[#F5F5F5] transition-colors cursor-pointer"
-          >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-              />
-            </svg>
-            Export
-          </button>
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="flex items-center gap-2 px-4 py-2 text-[12px] font-semibold text-white rounded-lg hover:opacity-90 transition-opacity cursor-pointer"
-            style={{ background: "#E21B23" }}
-          >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2.5}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M12 4v16m8-8H4"
-              />
-            </svg>
-            Add Booking
-          </button>
+    <div className="p-4 md:p-6 space-y-4">
+      <Toast toast={toast} />
+      {loadError && <ErrorBanner message={loadError} onRetry={() => setRetryKey((k) => k + 1)} />}
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-lg font-bold text-[#111]">Bookings</h2>
+        <div className="flex gap-2">
+          <button onClick={exportCsv} disabled={filtered.length === 0} className="px-4 py-2.5 text-sm font-semibold text-[#333] border border-[#D4D4D4] rounded-lg bg-white hover:bg-gray-50 disabled:opacity-50">Export</button>
+          <button onClick={() => setShowAdd(true)} className="px-4 py-2.5 text-sm font-semibold text-white rounded-lg bg-[#E21B23] hover:bg-[#c4151c]">+ Create New Booking</button>
         </div>
       </div>
 
-      {/* Quick Stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {[
-          { label: "Total", count: liveBookings.length, color: "#111111" },
-          {
-            label: "Pending",
-            count: liveBookings.filter((b: any) => b.status === "Pending")
-              .length,
-            color: "#F59E0B",
-          },
-          {
-            label: "Ongoing",
-            count: liveBookings.filter((b: any) => b.status === "Ongoing")
-              .length,
-            color: "#E21B23",
-          },
-          {
-            label: "Completed",
-            count: liveBookings.filter((b: any) => b.status === "Completed")
-              .length,
-            color: "#10B981",
-          },
-        ].map((s) => (
-          <div
-            key={s.label}
-            className="bg-white rounded-xl border border-[#E5E5E5] p-4 flex items-center gap-3"
+      {(unassignedCritical > 0 || unassignedWarn > 0) && (
+        <button
+          type="button"
+          onClick={() => { setTab("Approved"); setF({ ...NO_FILTERS, assignment: "unassigned" }); }}
+          className={`w-full text-left p-3 rounded-xl border text-sm font-semibold ${unassignedCritical ? "bg-red-50 border-red-300 text-red-800" : "bg-amber-50 border-amber-300 text-amber-900"}`}
+        >
+          ⚠ {unassignedCritical > 0 ? `${unassignedCritical} booking${unassignedCritical > 1 ? "s" : ""} need a driver urgently (pickup within ${ops.criticalHours} h)` : ""}
+          {unassignedCritical > 0 && unassignedWarn > 0 ? " · " : ""}
+          {unassignedWarn > 0 ? `${unassignedWarn} with no driver within ${ops.warningHours} h of pickup` : ""} — tap to view
+        </button>
+      )}
+
+      {/* Status tabs */}
+      <div role="tablist" aria-label="Booking status" className="flex gap-1 overflow-x-auto border-b border-[#D4D4D4]">
+        {tabs.map((t) => (
+          <button
+            key={t.key} role="tab" aria-selected={tab === t.key} onClick={() => setTab(t.key)}
+            className={`px-4 py-2.5 text-sm font-semibold whitespace-nowrap border-b-2 -mb-px ${tab === t.key ? "border-[#E21B23] text-[#E21B23]" : "border-transparent text-[#555] hover:text-[#111]"}`}
           >
-            <div
-              className="w-2 h-8 rounded-full"
-              style={{ background: s.color }}
-            />
-            <div>
-              <div className="text-[20px] font-bold" style={{ color: s.color }}>
-                {s.count}
-              </div>
-              <div className="text-[11px] text-[#999]">{s.label} Bookings</div>
-            </div>
-          </div>
+            {t.label} <span className={`ml-1 px-1.5 py-0.5 rounded-full text-xs ${tab === t.key ? "bg-[#E21B23] text-white" : "bg-gray-200 text-[#333]"}`}>{counts[t.key]}</span>
+          </button>
         ))}
       </div>
 
-      {/* Table */}
-      <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b border-[#E5E5E5] flex items-center justify-between">
-          <span className="text-[13px] font-semibold text-[#111]">
-            {filtered.length} bookings
-          </span>
-          <span className="text-[11px] text-[#999]">
-            Sorted by date (newest first)
-          </span>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[1000px]">
-            <thead>
-              <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
-                {[
-                  "Booking ID",
-                  "Customer",
-                  "Service",
-                  "Pickup",
-                  "Destination",
-                  "Date & Time",
-                  "Vehicle",
-                  "Driver",
-                  "Fare",
-                  "Payment",
-                  "Status",
-                  "Actions",
-                ].map((h) => (
-                  <th
-                    key={h}
-                    className="px-4 py-3 text-left text-[11px] font-semibold text-[#999] uppercase tracking-wide whitespace-nowrap"
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {paginated.map((b, i) => (
-                <tr
-                  key={i}
-                  className="table-row border-b border-[#F5F5F5] last:border-0"
-                >
-                  <td className="px-4 py-3">
-                    <button
-                      onClick={() => onSelectBooking(b.id)}
-                      className="text-[12px] font-mono font-semibold hover:underline"
-                      style={{ color: "#E21B23" }}
-                    >
-                      {b.id}
-                    </button>
-                  </td>
-                  <td className="px-4 py-3 text-[12px] font-medium text-[#111] whitespace-nowrap">
-                    {b.customer}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className="text-[11px] px-2 py-0.5 bg-[#F5F5F5] rounded-md font-medium text-[#444]">
-                      {b.service}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-[11px] text-[#666] max-w-[120px] truncate">
-                    {b.pickup}
-                  </td>
-                  <td className="px-4 py-3 text-[11px] text-[#666] max-w-[120px] truncate">
-                    {b.drop}
-                  </td>
-                  <td className="px-4 py-3 whitespace-nowrap">
-                    <div className="text-[11px] text-[#111]">{b.date}</div>
-                    <div className="text-[10px] text-[#999]">{b.time}</div>
-                  </td>
-                  <td className="px-4 py-3 text-[11px] text-[#666] whitespace-nowrap">
-                    {b.vehicle}
-                  </td>
-                  <td className="px-4 py-3 text-[11px] text-[#666]">
-                    {b.driver}
-                  </td>
-                  <td className="px-4 py-3 text-[12px] font-semibold text-[#111]">
-                    {b.fare}
-                  </td>
-                  <td className="px-4 py-3">
-                    <PaymentBadge status={b.payment} />
-                  </td>
-                  <td className="px-4 py-3">
-                    <StatusBadge status={b.status} />
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => onSelectBooking(b.id)}
-                        className="text-[11px] px-2 py-1 rounded-md border border-[#E5E5E5] hover:bg-[#FEF2F2] text-[#E21B23] font-medium transition-colors"
-                      >
-                        View
-                      </button>
-                      <button
-                        onClick={() => setEditingBooking(b)}
-                        className="text-[11px] px-2 py-1 rounded-md border border-[#E5E5E5] hover:bg-[#F5F5F5] text-[#444] font-medium transition-colors"
-                      >
-                        Edit
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {filtered.length === 0 && (
-            <div className="py-16 flex flex-col items-center text-center">
-              <svg
-                className="w-12 h-12 text-[#E5E5E5] mb-3"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={1.5}
-                  d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"
-                />
-              </svg>
-              <p className="text-[13px] font-medium text-[#999]">
-                No bookings found
-              </p>
-            </div>
-          )}
-        </div>
-        {/* Pagination */}
-        <div className="px-5 py-3 border-t border-[#E5E5E5] flex items-center justify-between">
-          <span className="text-[12px] text-[#999]">
-            Showing {paginated.length} of {filtered.length} results
-          </span>
-          <div className="flex gap-1">
-            {Array.from({ length: Math.ceil(filtered.length / 20) }).map(
-              (_, i) => (
-                <button
-                  key={i}
-                  onClick={() => setPage(i + 1)}
-                  className={`w-8 h-8 text-[12px] rounded-lg font-medium transition-colors ${
-                    page === i + 1
-                      ? "text-white"
-                      : "text-[#666] hover:bg-[#F5F5F5]"
-                  }`}
-                  style={page === i + 1 ? { background: "#E21B23" } : {}}
-                >
-                  {i + 1}
-                </button>
-              ),
-            )}
-          </div>
-        </div>
+      {/* Search & filters */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 bg-white rounded-xl border border-[#E5E5E5] p-3">
+        <input value={f.search} onChange={(e) => setF({ ...f, search: e.target.value })} placeholder="Search ID, customer, mobile, driver, vehicle no." aria-label="Search bookings" className={`${inputCls} sm:col-span-2`} />
+        <div className="flex items-center gap-2"><input type="date" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} aria-label="Pickup date" className={inputCls} /></div>
+        <select value={f.sort} onChange={(e) => setF({ ...f, sort: e.target.value as Filters["sort"] })} aria-label="Sort" className={inputCls}>
+          <option value="pickup">Sort: pickup time</option>
+          <option value="created">Sort: newest booked</option>
+        </select>
+        <select value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })} aria-label="Vehicle category" className={inputCls}><option value="">All vehicle categories</option>{categoriesInUse.map((c) => <option key={c}>{c}</option>)}</select>
+        <select value={f.assignment} onChange={(e) => setF({ ...f, assignment: e.target.value as Filters["assignment"] })} aria-label="Assignment" className={inputCls}><option value="">Assigned & unassigned</option><option value="assigned">Driver assigned</option><option value="unassigned">No driver yet</option></select>
+        <select value={f.driver} onChange={(e) => setF({ ...f, driver: e.target.value })} aria-label="Driver" className={inputCls}><option value="">All drivers</option>{driverOptions.map(([id, n]) => <option key={id} value={id}>{n}</option>)}</select>
+        <select value={f.vendor} onChange={(e) => setF({ ...f, vendor: e.target.value })} aria-label="Vendor" className={inputCls}><option value="">All vendors</option>{vendorOptions.map(([id, n]) => <option key={id} value={id}>{n}</option>)}</select>
+        <select value={f.payment} onChange={(e) => setF({ ...f, payment: e.target.value })} aria-label="Payment status" className={inputCls}><option value="">All payment statuses</option>{["Unpaid", "Partially Paid", "Paid", "Refund Pending", "Refunded"].map((s) => <option key={s}>{s}</option>)}</select>
+        <select value={f.service} onChange={(e) => setF({ ...f, service: e.target.value })} aria-label="Service" className={inputCls}><option value="">All services</option>{serviceNames.map((s) => <option key={s}>{s}</option>)}</select>
+        {filtersActive && <button type="button" onClick={() => setF({ ...NO_FILTERS, sort: f.sort })} className="text-sm font-semibold text-[#E21B23] text-left hover:underline">Clear filters</button>}
       </div>
 
-      {/* Edit Booking Modal */}
-      {editingBooking && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-lg w-full space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-base font-bold text-gray-900">
-                Edit Booking: {editingBooking.id}
-              </h3>
-              <button
-                onClick={() => setEditingBooking(null)}
-                className="text-gray-400 hover:text-gray-700"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="text-[11px] font-semibold text-[#666] block mb-1">
-                  Customer Name
-                </label>
-                <input
-                  value={editingBooking.customer || ""}
-                  onChange={(e) =>
-                    setEditingBooking({
-                      ...editingBooking,
-                      customer: e.target.value,
-                    })
-                  }
-                  className="w-full p-2 border rounded text-xs"
-                />
-              </div>
-              <div>
-                <label className="text-[11px] font-semibold text-[#666] block mb-1">
-                  Phone
-                </label>
-                <input
-                  value={editingBooking.phone || ""}
-                  onChange={(e) =>
-                    setEditingBooking({
-                      ...editingBooking,
-                      phone: e.target.value,
-                    })
-                  }
-                  className="w-full p-2 border rounded text-xs"
-                />
-              </div>
-              <div>
-                <label className="text-[11px] font-semibold text-[#666] block mb-1">
-                  Service Type
-                </label>
-                <select
-                  value={editingBooking.service || "Airport Taxi"}
-                  onChange={(e) =>
-                    setEditingBooking({
-                      ...editingBooking,
-                      service: e.target.value,
-                    })
-                  }
-                  className="w-full p-2 border rounded text-xs"
-                >
-                  {liveServices.length > 0
-                    ? liveServices
-                        .filter((s) => s.status === "Active")
-                        .map((s) => (
-                          <option key={s.id} value={s.name}>
-                            {s.name}
-                          </option>
-                        ))
-                    : [
-                        "Airport Taxi",
-                        "Outstation Cab",
-                        "One Way Taxi",
-                        "Local Rental",
-                        "Tour Package",
-                      ].map((srvName) => (
-                        <option key={srvName} value={srvName}>
-                          {srvName}
-                        </option>
-                      ))}
-                </select>
-              </div>
-              <div>
-                <label className="text-[11px] font-semibold text-[#666] block mb-1">
-                  Vehicle
-                </label>
-                <input
-                  value={editingBooking.vehicle || ""}
-                  onChange={(e) =>
-                    setEditingBooking({
-                      ...editingBooking,
-                      vehicle: e.target.value,
-                    })
-                  }
-                  className="w-full p-2 border rounded text-xs"
-                />
-              </div>
-              <div>
-                <label className="text-[11px] font-semibold text-[#666] block mb-1">
-                  Assigned Driver
-                </label>
-                <input
-                  value={editingBooking.driver || ""}
-                  onChange={(e) =>
-                    setEditingBooking({
-                      ...editingBooking,
-                      driver: e.target.value,
-                    })
-                  }
-                  className="w-full p-2 border rounded text-xs"
-                />
-              </div>
-              <div>
-                <label className="text-[11px] font-semibold text-[#666] block mb-1">
-                  Fare
-                </label>
-                <input
-                  value={editingBooking.fare || ""}
-                  onChange={(e) =>
-                    setEditingBooking({
-                      ...editingBooking,
-                      fare: e.target.value,
-                    })
-                  }
-                  className="w-full p-2 border rounded text-xs"
-                />
-              </div>
-              <div>
-                <label className="text-[11px] font-semibold text-[#666] block mb-1">
-                  Payment Status
-                </label>
-                <select
-                  value={editingBooking.payment}
-                  onChange={(e) =>
-                    setEditingBooking({
-                      ...editingBooking,
-                      payment: e.target.value,
-                    })
-                  }
-                  className="w-full p-2 border rounded text-xs"
-                >
-                  <option>Paid</option>
-                  <option>Pending</option>
-                  <option>Unpaid</option>
-                  <option>Refunded</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-[11px] font-semibold text-[#666] block mb-1">
-                  Booking Status
-                </label>
-                <select
-                  value={editingBooking.status}
-                  onChange={(e) =>
-                    setEditingBooking({
-                      ...editingBooking,
-                      status: e.target.value,
-                    })
-                  }
-                  className="w-full p-2 border rounded text-xs"
-                >
-                  <option>Pending</option>
-                  <option>Confirmed</option>
-                  <option>Assigned</option>
-                  <option>Ongoing</option>
-                  <option>Completed</option>
-                  <option>Cancelled</option>
-                </select>
-              </div>
-              <div className="col-span-2 flex gap-2 pt-2">
-                <button
-                  onClick={() => setEditingBooking(null)}
-                  className="w-1/2 p-2 border border-gray-300 text-gray-700 text-xs font-bold rounded"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSaveEdit}
-                  className="w-1/2 p-2 bg-[#E21B23] text-white text-xs font-bold rounded"
-                >
-                  Save Changes
-                </button>
-              </div>
+      {/* Results */}
+      <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-[#E5E5E5] text-sm font-semibold text-[#111]">{bookings === null && !loadError ? "Loading bookings…" : `${filtered.length} ${tab === "Cancelled" ? "cancelled / rejected" : tab.toLowerCase()} booking${filtered.length === 1 ? "" : "s"}`}</div>
+
+        {bookings === null && !loadError && <div className="py-16 text-center text-sm text-[#555]" role="status">Loading bookings…</div>}
+        {bookings !== null && filtered.length === 0 && (
+          <div className="py-14 text-center">
+            <p className="text-sm font-semibold text-[#333]">{filtersActive ? "No bookings match these filters." : `No ${tab === "Cancelled" ? "cancelled or rejected" : tab.toLowerCase()} bookings.`}</p>
+            {filtersActive && <button type="button" onClick={() => setF({ ...NO_FILTERS, sort: f.sort })} className="mt-2 text-sm font-semibold text-[#E21B23] hover:underline">Clear filters</button>}
+          </div>
+        )}
+
+        {/* Desktop table */}
+        {paginated.length > 0 && (
+          <div className="hidden lg:block overflow-x-auto">
+            <table className="w-full min-w-[1100px]">
+              <thead><tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">{["Booking", "Customer", "Route", "Pickup", "Vehicle / Driver", "Fare", "Payment", "Status", "Actions"].map((h) => <th key={h} className="px-3 py-2.5 text-left text-xs font-semibold text-[#555] uppercase tracking-wide whitespace-nowrap">{h}</th>)}</tr></thead>
+              <tbody>
+                {paginated.map((b) => {
+                  const p = pickupOf(b);
+                  const sev = severityOf(b);
+                  const pay = paymentOf(b);
+                  return (
+                    <tr key={b.id} className={`table-row border-b border-[#F0F0F0] align-top ${sev === "critical" ? "bg-red-50" : sev === "warning" ? "bg-amber-50" : ""}`}>
+                      <td className="px-3 py-3"><button onClick={() => onSelectBooking(b.id)} className="text-sm font-mono font-semibold text-[#E21B23] hover:underline">{b.bookingId || b.id}</button><div className="text-xs text-[#555]">{b.service}</div></td>
+                      <td className="px-3 py-3 text-sm"><div className="font-semibold text-[#111]">{b.customer}</div><div className="text-xs text-[#555]">{b.phone}</div></td>
+                      <td className="px-3 py-3 text-sm max-w-[200px]"><div className="truncate" title={b.pickup}>{b.pickup}</div><div className="truncate text-[#555]" title={b.drop}>→ {b.drop}</div></td>
+                      <td className="px-3 py-3 text-sm whitespace-nowrap"><div className="font-semibold text-[#111]">{p ? formatTime12(p) : b.time}</div><div className="text-xs text-[#555]">{p ? formatDate(p) : b.date}{p && tab !== "Completed" && tab !== "Cancelled" ? ` · ${relativeFromNow(p, now)}` : ""}</div></td>
+                      <td className="px-3 py-3 text-sm"><div>{b.vehicleCategory || b.vehicle}</div><div className="text-xs text-[#555]">{b.assignedDriverName || b.driver || (b.assignedVendorName ? `Vendor: ${b.assignedVendorName}` : "No driver")}{b.assignedVehicleNumber ? ` · ${b.assignedVehicleNumber}` : ""}</div><div className="mt-1"><AlertBadge severity={sev} label={p ? relativeFromNow(p, now).replace(/^in /, "") : undefined} /></div></td>
+                      <td className="px-3 py-3 text-sm font-semibold whitespace-nowrap">{rupees(fareNumber(b))}</td>
+                      <td className="px-3 py-3"><PaymentBadge status={pay.status} />{pay.balanceDue > 0 && pay.totalPaid > 0 && <div className="text-xs text-[#555] mt-1">Due {rupees(pay.balanceDue)}</div>}</td>
+                      <td className="px-3 py-3"><StatusBadge status={b.status} /></td>
+                      <td className="px-3 py-3"><RowActions b={b} onView={() => onSelectBooking(b.id)} onApprove={() => setApproving(b)} onReject={() => setRejecting(b)} onAssign={() => setAssigning(b)} onCancel={() => setCancelling(b)} onEdit={() => setEditing(b)} /></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Mobile / tablet cards */}
+        {paginated.length > 0 && (
+          <ul className="lg:hidden divide-y divide-[#EEE]">
+            {paginated.map((b) => {
+              const p = pickupOf(b);
+              const sev = severityOf(b);
+              const pay = paymentOf(b);
+              return (
+                <li key={b.id} className={`p-4 space-y-2 ${sev === "critical" ? "bg-red-50" : sev === "warning" ? "bg-amber-50" : ""}`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <button onClick={() => onSelectBooking(b.id)} className="text-sm font-mono font-semibold text-[#E21B23]">{b.bookingId || b.id}</button>
+                    <StatusBadge status={b.status} />
+                  </div>
+                  <div className="text-sm"><span className="font-semibold">{b.customer}</span> · {b.phone}</div>
+                  <div className="text-sm text-[#333]">{b.pickup} → {b.drop}</div>
+                  <div className="text-sm"><strong>{p ? formatTime12(p) : b.time}</strong> · {p ? formatDate(p) : b.date} · {b.vehicleCategory || b.vehicle}</div>
+                  <div className="text-sm text-[#555]">{b.assignedDriverName || b.driver || "No driver assigned"}{b.assignedVehicleNumber ? ` · ${b.assignedVehicleNumber}` : ""}</div>
+                  <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{rupees(fareNumber(b))}</span><PaymentBadge status={pay.status} /><AlertBadge severity={sev} label={p ? relativeFromNow(p, now).replace(/^in /, "") : undefined} /></div>
+                  <RowActions b={b} onView={() => onSelectBooking(b.id)} onApprove={() => setApproving(b)} onReject={() => setRejecting(b)} onAssign={() => setAssigning(b)} onCancel={() => setCancelling(b)} onEdit={() => setEditing(b)} />
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        {filtered.length > PAGE_SIZE && (
+          <div className="px-4 py-3 border-t border-[#E5E5E5] flex items-center justify-between gap-2">
+            <span className="text-sm text-[#555]">Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, filtered.length)} of {filtered.length}</span>
+            <div className="flex gap-1 items-center">
+              <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1} className="px-3 py-1.5 text-sm border border-[#D4D4D4] rounded-lg disabled:opacity-40">Previous</button>
+              <span className="text-sm px-2">Page {page} of {pages}</span>
+              <button onClick={() => setPage((p) => Math.min(pages, p + 1))} disabled={page === pages} className="px-3 py-1.5 text-sm border border-[#D4D4D4] rounded-lg disabled:opacity-40">Next</button>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* Add Booking Modal */}
-      {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-lg w-full space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-base font-bold text-gray-900">
-                Add New Booking
-              </h3>
-              <button
-                onClick={() => setShowAddModal(false)}
-                className="text-gray-400 hover:text-gray-700"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <input
-                placeholder="Customer Name *"
-                list="registered-customers"
-                className="col-span-2 w-full p-2 border rounded text-xs"
-                required
-                onChange={(e) => {
-                  const val = e.target.value;
-                  const found = liveCustomers.find((c) => c.name === val);
-                  if (found) {
-                    setNewBooking((prev) => ({
-                      ...prev,
-                      name: found.name,
-                      phone: found.phone || prev.phone,
-                    }));
-                  } else {
-                    setNewBooking((prev) => ({ ...prev, name: val }));
-                  }
-                }}
-              />
-              <datalist id="registered-customers">
-                {liveCustomers.map((c) => (
-                  <option key={c.id} value={c.name}>
-                    {c.phone} ({c.id})
-                  </option>
-                ))}
-              </datalist>
-              <input
-                placeholder="Phone"
-                type="tel"
-                className="col-span-2 w-full p-2 border rounded text-xs"
-                onChange={(e) =>
-                  setNewBooking({ ...newBooking, phone: e.target.value })
-                }
-              />
-
-              <select
-                className="col-span-2 w-full p-2 border rounded text-xs"
-                onChange={(e) =>
-                  setNewBooking({ ...newBooking, service: e.target.value })
-                }
-              >
-                {liveServices.length > 0
-                  ? liveServices
-                      .filter((s) => s.status === "Active")
-                      .map((s) => (
-                        <option key={s.id} value={s.name}>
-                          {s.name}
-                        </option>
-                      ))
-                  : [
-                      "Airport Taxi",
-                      "Outstation Cab",
-                      "One Way Taxi",
-                      "Local Rental",
-                      "Tour Package",
-                    ].map((srvName) => (
-                      <option key={srvName} value={srvName}>
-                        {srvName}
-                      </option>
-                    ))}
-              </select>
-
-              <input
-                placeholder="Pickup Address"
-                list="master-pickup-locations"
-                className="w-full p-2 border rounded text-xs"
-                onChange={(e) =>
-                  setNewBooking({ ...newBooking, pickup: e.target.value })
-                }
-              />
-              <datalist id="master-pickup-locations">
-                {liveLocations
-                  .filter(
-                    (l) => l.status === "Active" && l.pickupEnabled !== false,
-                  )
-                  .map((l) => (
-                    <option key={l.id} value={l.name}>
-                      {l.city} ({l.type})
-                    </option>
-                  ))}
-              </datalist>
-
-              <input
-                placeholder="Drop Address"
-                list="master-drop-locations"
-                className="w-full p-2 border rounded text-xs"
-                onChange={(e) =>
-                  setNewBooking({ ...newBooking, drop: e.target.value })
-                }
-              />
-              <datalist id="master-drop-locations">
-                {liveLocations
-                  .filter(
-                    (l) => l.status === "Active" && l.dropEnabled !== false,
-                  )
-                  .map((l) => (
-                    <option key={l.id} value={l.name}>
-                      {l.city} ({l.type})
-                    </option>
-                  ))}
-              </datalist>
-
-              <input
-                type="date"
-                className="w-full p-2 border rounded text-xs"
-                onChange={(e) =>
-                  setNewBooking({ ...newBooking, date: e.target.value })
-                }
-              />
-              <input
-                type="time"
-                className="w-full p-2 border rounded text-xs"
-                onChange={(e) =>
-                  setNewBooking({ ...newBooking, time: e.target.value })
-                }
-              />
-
-              <select
-                className="col-span-2 w-full p-2 border rounded text-xs"
-                onChange={(e) =>
-                  setNewBooking({ ...newBooking, vehicle: e.target.value })
-                }
-              >
-                <option>Sedan</option>
-                <option>SUV</option>
-                <option>Innova</option>
-                <option>Tempo Traveller</option>
-              </select>
-
-              <input
-                placeholder="Fare (₹)"
-                type="number"
-                className="w-full p-2 border rounded text-xs"
-                onChange={(e) =>
-                  setNewBooking({ ...newBooking, fare: Number(e.target.value) })
-                }
-              />
-              <select
-                className="w-full p-2 border rounded text-xs"
-                onChange={(e) =>
-                  setNewBooking({ ...newBooking, payment: e.target.value })
-                }
-                value={newBooking.payment}
-              >
-                <option value="" disabled hidden>
-                  Payment Method (Cash/UPI/Card)
-                </option>
-                <option value="Cash">Cash</option>
-                <option value="UPI">UPI</option>
-                <option value="Card">Card</option>
-              </select>
-
-              <button
-                type="button"
-                onClick={handleCreateBooking}
-                className="col-span-2 w-full p-2.5 bg-[#E21B23] hover:bg-[#c4151c] text-white text-xs font-bold rounded-lg mt-2 cursor-pointer transition-colors shadow"
-              >
-                Create Booking
-              </button>
-            </div>
-          </div>
-        </div>
+      {approving && <ApproveDialog booking={approving} onClose={() => setApproving(null)} onDone={done} />}
+      {rejecting && <RejectDialog booking={rejecting} onClose={() => setRejecting(null)} onDone={done} />}
+      {assigning && <AssignDriverModal booking={assigning} drivers={drivers} vehicles={vehicles} vendors={vendors} onClose={() => setAssigning(null)} onDone={done} />}
+      {cancelling && <CancelBookingModal booking={cancelling} canCharge={canFinance} onClose={() => setCancelling(null)} onDone={done} />}
+      {editing && <ContactModal booking={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); showToast("Contact details updated."); }} />}
+      {showAdd && (
+        <ManualBookingModal
+          customers={customers} services={services} locations={locations} categories={categories} fareRules={fareRules}
+          onClose={() => setShowAdd(false)}
+          onCreated={(b) => {
+            setShowAdd(false);
+            setTab("Pending");
+            showToast(`Booking ${b.bookingId} created for ${rupees(b.fare)} and is waiting for approval.`);
+          }}
+        />
       )}
     </div>
+  );
+}
+
+function bookingTime(v: unknown): number {
+  const t = v as { toMillis?: () => number; seconds?: number } | undefined;
+  return typeof t?.toMillis === "function" ? t.toMillis() : typeof t?.seconds === "number" ? t.seconds * 1000 : 0;
+}
+
+function RowActions({ b, onView, onApprove, onReject, onAssign, onCancel, onEdit }: {
+  b: Booking; onView: () => void; onApprove: () => void; onReject: () => void; onAssign: () => void; onCancel: () => void; onEdit: () => void;
+}) {
+  const btn = "text-xs px-2.5 py-1.5 rounded-md border font-semibold";
+  const open = ["Pending", "Approved", "Confirmed", "Assigned"].includes(b.status);
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <button onClick={onView} className={`${btn} border-[#D4D4D4] text-[#111] hover:bg-gray-50`}>View</button>
+      {b.status === "Pending" && <button onClick={onApprove} className={`${btn} border-green-600 bg-green-600 text-white hover:bg-green-700`}>Approve</button>}
+      {b.status === "Pending" && <button onClick={onReject} className={`${btn} border-red-300 text-red-700 hover:bg-red-50`}>Reject</button>}
+      {["Approved", "Confirmed", "Assigned"].includes(b.status) && <button onClick={onAssign} className={`${btn} border-[#E21B23] text-[#E21B23] hover:bg-[#FEF2F2]`}>{b.assignedDriverId ? "Change driver" : "Assign driver"}</button>}
+      {open && b.status !== "Pending" && <button onClick={onCancel} className={`${btn} border-red-300 text-red-700 hover:bg-red-50`}>Cancel</button>}
+      {b.status !== "Completed" && <button onClick={onEdit} className={`${btn} border-[#D4D4D4] text-[#333] hover:bg-gray-50`}>Edit contact</button>}
+    </div>
+  );
+}
+
+function ContactModal({ booking, onClose, onSaved }: { booking: Booking; onClose: () => void; onSaved: () => void }) {
+  const [c, setC] = useState<ContactForm>({ customer: booking.customer || "", phone: booking.phone || "", email: booking.customerEmail || "", notes: booking.notes || "" });
+  const [errors, setErrors] = useState<Partial<Record<keyof ContactForm, string>>>({});
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const save = async () => {
+    const e: Partial<Record<keyof ContactForm, string>> = {};
+    if (c.customer.trim().length < 2) e.customer = "Enter the customer name.";
+    const phone = normalizePhone(c.phone);
+    if (!phone) e.phone = "Enter a valid 10-digit Indian mobile number.";
+    const em = emailError(c.email);
+    if (em) e.email = em;
+    setErrors(e);
+    if (Object.keys(e).length) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await updateBookingContact(booking.id, { customer: c.customer.trim(), phone, notes: c.notes.trim(), email: c.email.trim().toLowerCase() });
+      onSaved();
+    } catch (err) {
+      setError(err instanceof AdminBookingError ? err.message : "The changes were not saved. Please try again.");
+      setSaving(false);
+    }
+  };
+  return (
+    <Modal title="Edit contact details" subtitle={`Booking ${booking.bookingId || booking.id} · fare, payment and status are changed from Booking Details`} onClose={onClose} busy={saving}
+      footer={<><button onClick={onClose} disabled={saving} className="px-4 py-2.5 border border-[#D4D4D4] rounded-lg text-sm font-semibold disabled:opacity-50">Cancel</button><button onClick={save} disabled={saving} className="px-4 py-2.5 bg-[#E21B23] text-white rounded-lg text-sm font-semibold disabled:opacity-60">{saving ? "Saving…" : "Save changes"}</button></>}>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {error && <div role="alert" className="sm:col-span-2 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm">{error}</div>}
+        <Field label="Customer name" required error={errors.customer}><input value={c.customer} onChange={(e) => setC({ ...c, customer: e.target.value })} maxLength={80} className={inputCls} /></Field>
+        <Field label="Mobile number" required error={errors.phone}><input value={c.phone} onChange={(e) => setC({ ...c, phone: e.target.value })} inputMode="tel" className={inputCls} /></Field>
+        <Field label="Email address" hint="Optional" error={errors.email} className="sm:col-span-2"><input type="email" value={c.email} onChange={(e) => setC({ ...c, email: e.target.value })} maxLength={120} className={inputCls} /></Field>
+        <Field label="Notes" className="sm:col-span-2"><input value={c.notes} onChange={(e) => setC({ ...c, notes: e.target.value })} maxLength={300} className={inputCls} /></Field>
+      </div>
+    </Modal>
   );
 }

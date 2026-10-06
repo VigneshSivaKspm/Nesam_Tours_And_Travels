@@ -4,14 +4,32 @@ rules_version = '2';
 // DOCUMENT-BASED ROLES + SERVER-AUTHORITATIVE BOOKING/PAYOUT CREATION
 //
 // Identity/role is derived entirely from Firestore documents:
-//   • admins/{uid}   with role == 'admin'       → platform admin
-//   • customers/{uid}                           → customer (auto-approved)
+//   • admins/{uid}   with role == 'admin' and status == 'active' → staff
+//     member. Its staffRole is 'super_admin' or a staff_roles/{id}; its
+//     permissions list (written only by the staff callables) grants the
+//     modules below. An active admin without staffRole predates roles and
+//     is a super admin.
+//   • customers/{uid} with status 'Approved' (legacy 'Active') → customer
 //   • vendors/{uid}   with status == 'APPROVED' → active vendor
 //     (legacy 'Approved'/'Active' still honoured). Vendor lifecycle:
 //     INCOMPLETE → PENDING_APPROVAL → APPROVED | CHANGES_REQUESTED | REJECTED,
 //     APPROVED ⇄ SUSPENDED. Only an admin moves a vendor out of PENDING_APPROVAL.
-//   • drivers/{uid}   with status == 'Approved' → active driver
+//   • drivers/{uid}   with status == 'Approved' → active driver; an
+//     independent driver has no vendorId, a fleet driver works for its vendor
 // A user's profile doc id always equals their auth uid.
+//
+// Staff permissions (functions/src/permissions.ts):
+//   operations  bookings, live trips, marketplace, dispatch
+//   people      customers, vendors, drivers, KYC review
+//   fleet       vehicles
+//   pricing     vehicle category fares, fare rules, offers & coupons
+//   content     services, tour packages, locations
+//   finance     payments, invoices, earnings, payouts, fare overrides
+//   compliance  penalties
+//   reports     reports & analytics (read access to financial records)
+//   engagement  notifications, reviews, support tickets
+//   system      settings, B2B integrations
+//   Staff accounts and roles are managed only by super admins, server-side.
 //
 // Anything a signed-in user is allowed to write here
 // they can write directly. Every non-admin update is therefore pinned to an
@@ -19,10 +37,12 @@ rules_version = '2';
 // matters, to a legal state transition.
 //
 // Booking lifecycle (shared by all four panels):
-//   status:    Pending → Confirmed (vendor accepted) → Assigned (driver set)
-//              → Ongoing (boarding OTP verified) → Completed | Cancelled
-//   tripStage: Assigned → En Route Pickup → Reached Pickup → In Progress
-//              → Arrived Destination → Completed   (driver-reported detail)
+//   status:    Pending → Approved (admin) → Confirmed (vendor accepted) →
+//              Assigned (driver set) → Ongoing (driver started) → Completed
+//              | Cancelled | Rejected.  Partners see and claim only Approved trips.
+//   trip:      tripSubStatus Not Started → Trip Started → Reached Pickup → Trip Ended,
+//              advanced ONLY by the advanceTrip function (clients cannot write
+//              status or stage fields). Legacy tripStage values still read.
 // ─────────────────────────────────────────────────────────────────────────────
 
 service cloud.firestore {
@@ -38,18 +58,34 @@ service cloud.firestore {
     function docPath(coll, id) {
       return /databases/$(database)/documents/$(coll)/$(id);
     }
+    function adminData() {
+      return get(docPath('admins', uid())).data;
+    }
     function isAdmin() {
       return isSignedIn()
              && exists(docPath('admins', uid()))
-             && get(docPath('admins', uid())).data.role == 'admin'
-             && get(docPath('admins', uid())).data.status == 'active';
+             && adminData().role == 'admin'
+             && adminData().status == 'active';
+    }
+    function isSuperAdmin() {
+      return isAdmin() && adminData().get('staffRole', 'super_admin') == 'super_admin';
+    }
+    // An active staff member whose role grants permission p.
+    function can(p) {
+      return isAdmin()
+             && (adminData().get('staffRole', 'super_admin') == 'super_admin'
+                 || p in adminData().get('permissions', []));
+    }
+    // Financial records: payments, payouts, ledger, invoices, penalties.
+    function canReadFinance() {
+      return can('finance') || can('reports') || can('compliance');
     }
     function isOwner(id) {
       return isSignedIn() && uid() == id;
     }
     function isCustomer() {
       return isSignedIn() && exists(docPath('customers', uid()))
-             && get(docPath('customers', uid())).data.status == 'Approved';
+             && get(docPath('customers', uid())).data.status in ['Approved', 'Active'];
     }
     function isVendor() {
       return isSignedIn() && exists(docPath('vendors', uid()));
@@ -66,6 +102,11 @@ service cloud.firestore {
     function isApprovedDriver() {
       return isDriver() && get(docPath('drivers', uid())).data.status == 'Approved'
              && get(docPath('drivers', uid())).data.get('fleetStatus', 'Active') != 'Suspended';
+    }
+    // Marketplace trips are for independent drivers; a fleet driver's trips
+    // come from its vendor.
+    function isApprovedIndependentDriver() {
+      return isApprovedDriver() && get(docPath('drivers', uid())).data.get('vendorId', '') == '';
     }
     // E.164 phone number from a phone-auth token ('' when absent).
     function authPhone() {
@@ -85,22 +126,40 @@ service cloud.firestore {
     function isBlank(key) {
       return resource.data.get(key, '') == '' || resource.data.get(key, null) == null;
     }
+    // A field that, once written, can never change.
+    function writeOnce(key) {
+      return !(key in resource.data) || unchanged(key);
+    }
 
-    // ── Admins ──────────────────────────────────────────────────────────────
-    // Self-signup lands as role 'pending'; an existing admin promotes it.
+    // ── Staff ───────────────────────────────────────────────────────────────
+    // Self-signup lands as a pending request; a super admin approves it with
+    // approveAdminRequest. Admin documents are never written by clients.
     match /admins/{id} {
-      allow create: if isAdmin() || (
-                       isOwner(id)
-                       && request.resource.data.role == 'pending'
-                       && request.resource.data.status == 'pending'
-                     );
+      allow create: if isOwner(id)
+                     && request.resource.data.keys().hasOnly(['uid', 'name', 'email', 'role', 'status', 'createdAt'])
+                     && request.resource.data.uid == id
+                     && request.resource.data.role == 'pending'
+                     && request.resource.data.status == 'pending';
       allow read: if isOwner(id) || isAdmin();
-      allow update, delete: if isAdmin();
+      allow update, delete: if false;
+    }
+    match /staff_roles/{roleId} {
+      allow read: if isAdmin();
+      allow write: if false; // saveStaffRole / deleteStaffRole
+    }
+    match /admin_audit/{entryId} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
+    }
+    // Records from the old Staff screen: not linked to any sign-in account.
+    match /staff/{staffId} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
     }
 
     // ── Customers ───────────────────────────────────────────────────────────
     match /customers/{id} {
-      allow create: if isAdmin() || (
+      allow create: if can('people') || (
                        isOwner(id)
                        && request.resource.data.role == 'customer'
                        && request.resource.data.status == 'Approved'
@@ -109,12 +168,12 @@ service cloud.firestore {
       allow read: if isOwner(id) || isAdmin();
       // Customers edit their own contact details only — never status, role
       // or wallet balance.
-      allow update: if isAdmin() || (
+      allow update: if can('people') || (
                        isOwner(id)
                        && onlyChanges(['name', 'email', 'photoUrl', 'emergencyContact',
                                        'language', 'notificationPrefs', 'updatedAt'])
                      );
-      allow delete: if isAdmin();
+      allow delete: if can('people');
     }
 
     // ── Invites (admin/vendor pre-register a partner by phone) ──────────────
@@ -125,12 +184,12 @@ service cloud.firestore {
       allow read: if isAdmin()
                   || (isSignedIn() && authPhone() == phone)
                   || (isVendor() && resource.data.vendorId == uid());
-      allow create: if isAdmin() || (
+      allow create: if can('people') || (
                        isApprovedVendor()
                        && request.resource.data.vendorId == uid()
                        && request.resource.data.get('preApproved', false) == false
                      );
-      allow update, delete: if isAdmin()
+      allow update, delete: if can('people')
                              || (isVendor() && resource.data.vendorId == uid()
                                  && request.resource.data.get('vendorId', uid()) == uid()
                                  && request.resource.data.get('preApproved', false) == false);
@@ -138,7 +197,7 @@ service cloud.firestore {
 
     match /vendor_invites/{phone} {
       allow read: if isAdmin() || (isSignedIn() && authPhone() == phone);
-      allow write: if isAdmin();
+      allow write: if can('people');
     }
 
     // ── Vendors ─────────────────────────────────────────────────────────────
@@ -184,7 +243,7 @@ service cloud.firestore {
     match /vendors/{id} {
       // Self-signup always starts as an INCOMPLETE draft bound to the
       // verified phone number of the signed-in user.
-      allow create: if isAdmin() || (
+      allow create: if can('people') || (
                        isOwner(id)
                        && request.resource.data.keys().hasOnly(vendorOwnerKeys())
                        && request.resource.data.role == 'vendor'
@@ -196,7 +255,7 @@ service cloud.firestore {
       // (Bank/ID numbers are not here — see vendor_kyc.)
       allow read: if isOwner(id) || isAdmin()
                   || (isDriver() && get(docPath('drivers', uid())).data.get('vendorId', '') == id);
-      allow update: if isAdmin() || (
+      allow update: if can('people') || (
                        isOwner(id)
                        && changedKeys().hasOnly(vendorOwnerKeys())
                        && unchanged('role') && unchanged('uid')
@@ -213,20 +272,20 @@ service cloud.firestore {
                              && request.resource.data.business.businessName == resource.data.business.businessName)
                           )
                      );
-      allow delete: if isAdmin();
+      allow delete: if can('people');
     }
 
     // Private vendor KYC: full ID number + bank account. Doc id == vendor uid.
     // Writable by the vendor only while its application is editable.
     match /vendor_kyc/{id} {
-      allow read: if isOwner(id) || isAdmin();
-      allow create, update: if isAdmin() || (
+      allow read: if isOwner(id) || can('people') || can('finance');
+      allow create, update: if can('people') || (
                        isOwner(id)
                        && exists(docPath('vendors', id))
                        && vendorEditableStatus(get(docPath('vendors', id)).data.status)
                        && request.resource.data.keys().hasOnly(['identityProof', 'payout', 'updatedAt'])
                      );
-      allow delete: if isAdmin();
+      allow delete: if can('people');
     }
 
     // ── Drivers ─────────────────────────────────────────────────────────────
@@ -253,10 +312,12 @@ service cloud.firestore {
              && d.get('rating', 5) == 5 && d.get('totalTrips', 0) == 0;
     }
     match /drivers/{id} {
-      allow create: if isAdmin() || (isOwner(id) && driverSelfCreateOk());
+      allow create: if can('people') || (isOwner(id) && driverSelfCreateOk());
       allow read: if isOwner(id) || isAdmin()
                   || (isVendor() && resource.data.vendorId == uid());
-      allow update: if isAdmin()
+      allow update: if can('people')
+                    // Vehicle pairing from the admin fleet screen.
+                    || (can('fleet') && onlyChanges(['assignedVehicleId', 'assignedVehicleNumber', 'updatedAt']))
                     // The driver edits profile/KYC/presence, never approval —
                     // except resubmitting a rejected application for review.
                     || (isOwner(id)
@@ -278,40 +339,62 @@ service cloud.firestore {
                     || (isApprovedVendor() && resource.data.get('vendorId', '') == uid()
                         && onlyChanges(['assignedVehicleId', 'assignedVehicleNumber',
                                         'fleetStatus', 'updatedAt']));
-      allow delete: if isAdmin();
+      allow delete: if can('people');
     }
 
-    // Full bank/identity information is visible only to this driver and active admins.
+    // Full bank/identity information is visible only to this driver and to
+    // staff who review KYC or pay out.
     match /driver_private/{id} {
-      allow read: if isOwner(id) || isAdmin();
-      allow create, update: if isAdmin() || (isOwner(id)
+      allow read: if isOwner(id) || can('people') || can('finance');
+      allow create, update: if can('people') || (isOwner(id)
         && existsAfter(docPath('drivers', id))
         && request.resource.data.keys().hasOnly(['bank', 'identity', 'updatedAt'])
         && (!request.resource.data.keys().hasAny(['identity']) || (resource != null && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['identity']))
             || getAfter(docPath('drivers', id)).data.docStatus == 'Pending'));
-      allow delete: if isAdmin();
+      allow delete: if can('people');
     }
+
     // ── Fleet ───────────────────────────────────────────────────────────────
+    // Fields only a reviewer sets.
+    function vehicleReviewKeys() {
+      return ['reviewedAt', 'reviewedBy', 'approvedAt'];
+    }
     match /vehicles/{vehicleId} {
-      allow read: if isSignedIn();
-      allow create: if isAdmin() || (
+      // Staff, the owning vendor, and the driver the vehicle is paired with.
+      allow read: if isAdmin()
+                  || (isVendor() && resource.data.get('vendorId', '') == uid())
+                  || (isDriver() && resource.data.get('assignedDriverId', '') == uid());
+      allow create: if can('fleet') || (
                        isApprovedVendor()
                        && request.resource.data.vendorId == uid()
                        && request.resource.data.docStatus == 'Pending'
+                       && !request.resource.data.keys().hasAny(vehicleReviewKeys())
                      );
-      allow update: if isAdmin() || (
-                       isApprovedVendor()
-                       && resource.data.vendorId == uid()
-                       && unchanged('vendorId')
-                       && (unchanged('docStatus') || request.resource.data.docStatus == 'Pending')
-                     );
-      allow delete: if isAdmin()
-                     || (isApprovedVendor() && resource.data.vendorId == uid());
+      // A vendor may change operational fields freely; any other change
+      // (number, category, documents, expiries…) sends the vehicle back to
+      // document review.
+      allow update: if can('fleet')
+                    // Category rename keeps the copied name in step.
+                    || (can('pricing') && onlyChanges(['category', 'categoryId', 'updatedAt']))
+                    || (isApprovedVendor()
+                        && resource.data.vendorId == uid()
+                        && unchanged('vendorId')
+                        && !changedKeys().hasAny(vehicleReviewKeys())
+                        && ((unchanged('docStatus')
+                             && onlyChanges(['status', 'assignedDriverId', 'assignedDriverName', 'updatedAt']))
+                            || request.resource.data.docStatus == 'Pending'));
+      // Approved or driver-paired vehicles may be referenced by trips: the
+      // vendor deactivates them instead of deleting.
+      allow delete: if can('fleet')
+                     || (isApprovedVendor()
+                         && resource.data.vendorId == uid()
+                         && resource.data.get('docStatus', 'Pending') != 'Approved'
+                         && resource.data.get('assignedDriverId', '') == '');
     }
 
     match /vehicle_categories/{catId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if can('pricing');
     }
 
     // ── Bookings ────────────────────────────────────────────────────────────
@@ -332,18 +415,6 @@ service cloud.firestore {
       return get(docPath('booking_secrets', id)).data;
     }
 
-    // Customer self-booking: always starts unassigned, unpaid and pending.
-    function validNewCustomerBooking() {
-      let d = request.resource.data;
-      return isCustomer()
-             && d.customerId == uid()
-             && d.status == 'Pending'
-             && d.payment == 'Pending'
-             && d.get('assignedDriverId', '') == ''
-             && d.get('assignedVendorId', '') == ''
-             && d.fare is number && d.fare >= 0;
-    }
-
     // Customer may cancel (before the trip starts) or rate a completed trip.
     // The cancellation fee the rider was quoted is recorded for the admin;
     // it is informational (never a charge) and bounded.
@@ -353,7 +424,7 @@ service cloud.firestore {
                onlyChanges(['status', 'cancelReason', 'cancelledBy', 'cancelledAt',
                             'cancellationFee', 'updatedAt'])
                && d.status == 'Cancelled'
-               && resource.data.status in ['Pending', 'Confirmed', 'Assigned']
+               && resource.data.status in ['Pending', 'Approved', 'Confirmed', 'Assigned']
                && d.get('cancellationFee', 0) is number
                && d.get('cancellationFee', 0) >= 0
                && d.get('cancellationFee', 0) <= 500
@@ -369,7 +440,7 @@ service cloud.firestore {
       let d = request.resource.data;
       return isApprovedVendor()
              && isBlank('assignedVendorId') && isBlank('assignedDriverId')
-             && resource.data.status == 'Pending'
+             && resource.data.status == 'Approved'
              && marketplaceStatus(id) in ['Open', 'Bidding']
              && d.assignedVendorId == uid()
              && d.status == 'Confirmed'
@@ -380,7 +451,19 @@ service cloud.firestore {
                              'vendorPayout', 'confirmedAt', 'updatedAt']);
     }
 
-    // Vendor dispatches one of its own drivers to a booking it holds.
+    // A vehicle a trip may be assigned to, referenced by its stable id: owned
+    // by `owner` ('' = NESAM-owned / independent), documents approved, in
+    // service, and the booking's copied number matches the record.
+    function assignableVehicle(vehicleId, owner, number) {
+      let v = get(docPath('vehicles', vehicleId)).data;
+      return v.get('vendorId', '') == owner
+             && v.get('docStatus', '') == 'Approved'
+             && !(v.get('status', 'Active') in ['Inactive', 'Maintenance'])
+             && number == v.get('vehicleNumber', '');
+    }
+
+    // Vendor dispatches one of its own drivers in one of its own approved
+    // vehicles (by vehicle id) to a booking it holds.
     function vendorDispatchOk() {
       let d = request.resource.data;
       return isApprovedVendor()
@@ -390,68 +473,103 @@ service cloud.firestore {
              && get(docPath('drivers', d.assignedDriverId)).data.get('vendorId', '') == uid()
              && get(docPath('drivers', d.assignedDriverId)).data.status == 'Approved'
              && get(docPath('drivers', d.assignedDriverId)).data.get('fleetStatus', 'Active') != 'Suspended'
+             && d.get('assignedVehicleId', '') is string && d.get('assignedVehicleId', '') != ''
+             && assignableVehicle(d.assignedVehicleId, uid(), d.get('assignedVehicleNumber', ''))
              && onlyChanges(['status', 'tripStage', 'assignedDriverId', 'assignedDriverName',
-                             'driver', 'driverPhone', 'assignedVehicleNumber',
+                             'driver', 'driverPhone', 'assignedVehicleId', 'assignedVehicleNumber',
                              'assignedAt', 'updatedAt']);
     }
 
-    // Independent driver claims an open marketplace booking.
+    // A trip published with eligibleVehicleTypes can be claimed only by a driver
+    // whose vehicle type is in the list (trips published before it have no list).
+    function vehicleTypeEligible(id) {
+      let types = get(docPath('marketplace_trips', id)).data.get('eligibleVehicleTypes', []);
+      return types.size() == 0
+             || get(docPath('drivers', uid())).data.get('vehicleType', '').lower() in types;
+    }
+
+    // Independent driver claims an open marketplace booking. The vehicle is
+    // the one on the driver's own record: its id when it has a vehicle record
+    // (then approved, paired with this driver, number matching), otherwise
+    // none (legacy self-registered vehicle; Phase D requires a record).
     function driverClaimOk(id) {
       let d = request.resource.data;
-      return isApprovedDriver()
+      let paired = get(docPath('drivers', uid())).data.get('assignedVehicleId', '');
+      return isApprovedIndependentDriver()
              && isBlank('assignedVendorId') && isBlank('assignedDriverId')
-             && resource.data.status == 'Pending'
+             && resource.data.status == 'Approved'
              && marketplaceStatus(id) == 'Open'
+             && vehicleTypeEligible(id)
              && d.assignedDriverId == uid()
              && d.status == 'Assigned'
              && resource.data.get('fareVerified', false) == true
              && d.driverPayout == get(docPath('marketplace_trips', id)).data.offeredPayout
              && getAfter(docPath('marketplace_trips', id)).data.assignedDriverId == uid()
+             && d.get('assignedVehicleId', '') == paired
+             && (paired == ''
+                 || (assignableVehicle(paired, '', d.get('assignedVehicleNumber', ''))
+                     && get(docPath('vehicles', paired)).data.get('assignedDriverId', '') == uid()))
              && onlyChanges(['status', 'tripStage', 'assignedDriverId', 'assignedDriverName',
-                             'driver', 'driverPhone', 'assignedVehicleNumber',
+                             'driver', 'driverPhone', 'assignedVehicleId', 'assignedVehicleNumber',
                              'driverPayout', 'assignedAt', 'updatedAt']);
     }
 
-    // The assigned driver reports trip progress. Starting the trip requires
-    // the customer's boarding OTP, checked here against booking_secrets —
-    // which the driver can never read.
+    // The assigned driver may keep toll receipts and the live position on a trip.
+    // Status, trip stage, OTP, odometer and verification are written only by the
+    // advanceTrip / verifyBoarding / vehicle-verification functions.
     function driverProgressOk(id) {
       let d = request.resource.data;
-      let before = resource.data.status;
-      let progressKeys = ['tripStage', 'preTrip', 'startOdometer', 'endOdometer',
-                          'tolls', 'tollCharges', 'reachedPickupAt', 'arrivedAt',
-                          'completedAt', 'driverLocation', 'updatedAt'];
       return isApprovedDriver()
              && resource.data.get('assignedDriverId', '') == uid()
+             && unchanged('status')
+             && resource.data.status in ['Assigned', 'Ongoing']
              && d.get('tollCharges', 0) is number
              && d.get('tollCharges', 0) >= 0 && d.get('tollCharges', 0) <= 50000
-             && (
-                  // progress without a status change
-                  (unchanged('status') && before in ['Assigned', 'Ongoing']
-                   && onlyChanges(progressKeys))
-                  // Assigned → Ongoing with a correct OTP
-               || (before == 'Assigned' && d.status == 'Ongoing'
-                   && d.otpAttempt == bookingSecret(id).otp
-                   && onlyChanges(progressKeys.concat(['status', 'otpAttempt', 'startedAt'])))
-                  // Ongoing → Completed
-               || (before == 'Ongoing' && d.status == 'Completed'
-                   && onlyChanges(progressKeys.concat(['status'])))
-                );
+             && onlyChanges(['tolls', 'tollCharges', 'driverLocation', 'updatedAt']);
+    }
+
+    // Booking fields owned by finance; operations staff never set them. Payment
+    // fields (payment, paymentStatus, paymentSummary, paidAt, refund) are written
+    // only by the recordPayment / updateRefund functions.
+    function financeBookingKeys() {
+      return ['tollsApproved', 'invoiceId', 'invoiceNumber'];
+    }
+    // Price and partner money: written only by the booking / marketplace /
+    // ledger functions (partners' own claims are checked above).
+    function serverMoneyKeys() {
+      return ['fare', 'fareBreakdown', 'fareOverride', 'fareVerified', 'commission', 'finance',
+              'vendorPayout', 'driverPayout', 'payoutSource'];
+    }
+    // Who earns from a trip is decided with its payout: by the marketplace
+    // functions (award / assign) or the partner's own claim and dispatch.
+    function partnerAssignmentKeys() {
+      return ['assignedVendorId', 'assignedVendorName', 'assignedDriverId', 'assignedDriverName',
+              'driver', 'driverPhone', 'assignedVehicleId', 'assignedVehicleNumber'];
     }
 
     match /bookings/{bookingId} {
-      allow create: if isAdmin(); // Customer creation goes through createBooking.
+      // Bookings are created only by the createBooking / createAdminBooking
+      // functions, which price them; the price is changed only through
+      // overrideBookingFare (reason + audit). No client may write it.
+      allow create: if false;
       allow read: if isAdmin()
                   || (isSignedIn() && resource.data.customerId == uid())
                   || (isVendor() && resource.data.assignedVendorId == uid())
                   || (isDriver() && resource.data.assignedDriverId == uid());
-      allow update: if isAdmin()
+      // A completed trip is financially finalized: operations may only
+      // correct its contact details.
+      // Operations staff correct contact details here. Approval, rejection,
+      // cancellation, assignment, payments, refunds and trip stages each have
+      // their own validated function.
+      allow update: if (can('operations')
+                        && onlyChanges(['customer', 'phone', 'customerEmail', 'customerWhatsapp', 'notes', 'updatedAt']))
+                    || (can('finance') && onlyChanges(financeBookingKeys().concat(['updatedAt'])))
                     || (isSignedIn() && resource.data.customerId == uid() && customerUpdateOk())
                     || vendorClaimOk(bookingId)
                     || vendorDispatchOk()
                     || driverClaimOk(bookingId)
                     || driverProgressOk(bookingId);
-      allow delete: if isAdmin();
+      allow delete: if isSuperAdmin();
     }
 
     // Append-only audit trail written alongside booking changes (created,
@@ -476,7 +594,7 @@ service cloud.firestore {
                          || booking(bookingId).get('assignedDriverId', '') == uid()
                          || booking(bookingId).get('assignedVendorId', '') == uid())
                    );
-      allow update, delete: if isAdmin();
+      allow update, delete: if isSuperAdmin();
     }
 
     // Rider SOS alerts for their own booking; handled by admins.
@@ -486,24 +604,31 @@ service cloud.firestore {
                      && request.resource.data.status == 'Open'
                      && booking(request.resource.data.bookingId).customerId == uid();
       allow read: if isAdmin() || (isSignedIn() && resource.data.customerId == uid());
-      allow update, delete: if isAdmin();
+      allow update, delete: if can('operations');
     }
 
     // Boarding OTP lives apart from the booking so drivers/vendors (who can
-    // read the booking) never see it. Doc id == booking id.
+    // read the booking) never see it. Doc id == booking id. Written only by
+    // the booking functions.
     match /booking_secrets/{bookingId} {
-      allow create: if isAdmin();
-      allow read: if isAdmin() || (isSignedIn() && resource.data.customerId == uid());
-      allow update, delete: if isAdmin();
+      allow create, update, delete: if false;
+      allow read: if can('operations') || (isSignedIn() && resource.data.customerId == uid());
     }
 
     // ── Marketplace ─────────────────────────────────────────────────────────
-    // Doc id == booking id.
+    // Doc id == booking id. Partners see offers still open to them and the
+    // trips they won — never other partners' assigned trips.
     match /marketplace_trips/{tripId} {
-      // Vendors see open trips only once approved.
-      allow read: if isAdmin() || isApprovedVendor() || isApprovedDriver();
-      allow create: if isAdmin(); // Created atomically by createBooking.
-      allow update: if isAdmin()
+      allow read: if isAdmin()
+                  || (isApprovedVendor()
+                      && (resource.data.status in ['Open', 'Bidding']
+                          || resource.data.get('assignedVendorId', '') == uid()))
+                  || (isApprovedIndependentDriver()
+                      && (resource.data.status == 'Open'
+                          || resource.data.get('assignedDriverId', '') == uid()));
+      // Created and priced only by the booking / marketplace functions.
+      allow create: if false;
+      allow update: if (can('operations') && !changedKeys().hasAny(['offeredPayout']))
                     // vendor counter-bid bookkeeping
                     || (isApprovedVendor()
                         && resource.data.status in ['Open', 'Bidding']
@@ -518,7 +643,7 @@ service cloud.firestore {
                         && bookingAfter(tripId).assignedVendorId == uid()
                         && onlyChanges(['status', 'assignedVendorId', 'assignedVendorName', 'updatedAt']))
                     // independent driver accepts
-                    || (isApprovedDriver()
+                    || (isApprovedIndependentDriver()
                         && resource.data.status == 'Open'
                         && request.resource.data.status == 'Assigned'
                         && request.resource.data.assignedDriverId == uid()
@@ -529,7 +654,7 @@ service cloud.firestore {
                         && booking(tripId).customerId == uid()
                         && request.resource.data.status == 'Closed'
                         && onlyChanges(['status', 'updatedAt']));
-      allow delete: if isAdmin();
+      allow delete: if can('operations');
 
       match /bids/{bidId} {
         allow create: if isApprovedVendor()
@@ -541,8 +666,8 @@ service cloud.firestore {
                        && request.resource.data.vendorCounterRate > 0
                        && request.resource.data.vendorCounterRate <= 1000000;
         allow read: if isAdmin() || (isVendor() && resource.data.vendorId == uid());
-        allow update: if isAdmin();
-        allow delete: if isAdmin()
+        allow update: if can('operations');
+        allow delete: if can('operations')
                        || (isApprovedVendor() && resource.data.vendorId == uid()
                            && resource.data.status == 'Pending Review');
       }
@@ -556,26 +681,44 @@ service cloud.firestore {
     // ── Payouts ─────────────────────────────────────────────────────────────
     match /payout_requests/{requestId} {
       allow create: if false; // requestPartnerPayout checks and reserves settled funds.
-      allow read: if isAdmin()
+      allow read: if canReadFinance()
                   || (isVendor() && resource.data.vendorId == uid())
                   || (isDriver() && resource.data.driverId == uid());
-      allow update, delete: if isAdmin();
+      // Finance records the outcome; the requested amount and partner never change.
+      allow update: if can('finance')
+                    && unchanged('amount') && unchanged('driverId') && unchanged('vendorId');
+      allow delete: if isSuperAdmin();
     }
 
-    // ── Wallet ledger (admin-managed) ───────────────────────────────────────
+    // ── Partner ledger and wallets (server-written only) ────────────────────
+    // wallet_ledger entries and the wallets/{type}_{id} balances derived from
+    // them are written by the ledger functions alone (functions/src/ledger.ts).
     match /wallet_ledger/{entryId} {
-      allow read: if isAdmin()
+      allow read: if canReadFinance()
                   || (isVendor() && resource.data.vendorId == uid())
                   || (isDriver() && resource.data.driverId == uid());
-      allow write: if isAdmin();
+      allow write: if false;
+    }
+    // Keyed {type}_{uid}; matching on the id lets a partner read their
+    // wallet before the server has created it (an empty wallet, not an error).
+    match /wallets/{walletId} {
+      allow read: if canReadFinance()
+                  || (isVendor() && walletId == 'vendor_' + uid())
+                  || (isDriver() && walletId == 'driver_' + uid());
+      allow write: if false;
+    }
+    // Commission policy: saved only through saveCommissionPolicy (finance).
+    match /business_config/{docId} {
+      allow read: if isAdmin();
+      allow write: if false;
     }
 
     // ── Customer extras ─────────────────────────────────────────────────────
     match /saved_places/{placeId} {
       allow create: if isSignedIn() && request.resource.data.ownerId == uid();
-      allow read, delete: if isAdmin()
-                           || (isSignedIn() && resource.data.ownerId == uid());
-      allow update: if isAdmin() || (
+      allow read: if isAdmin() || (isSignedIn() && resource.data.ownerId == uid());
+      allow delete: if can('people') || (isSignedIn() && resource.data.ownerId == uid());
+      allow update: if can('people') || (
                        isSignedIn() && resource.data.ownerId == uid()
                        && request.resource.data.ownerId == uid()
                      );
@@ -586,50 +729,53 @@ service cloud.firestore {
                      && request.resource.data.customerId == uid()
                      && request.resource.data.status == 'Open';
       allow read: if isAdmin() || (isSignedIn() && resource.data.customerId == uid());
-      allow update: if isAdmin();
-      allow delete: if isAdmin();
+      allow update, delete: if can('engagement');
     }
 
     match /notifications/{notifId} {
+      // Any staff action may notify the user it concerns (approvals, payouts…).
       allow create: if isAdmin();
       allow read: if isAdmin()
                   || (isSignedIn() && resource.data.recipientId == uid());
-      // Recipients may only mark as read.
-      allow update: if isAdmin() || (
+      // Recipients — and any staff member for the shared admin inbox — may
+      // only mark as read.
+      allow update: if can('engagement') || (
                        isSignedIn() && resource.data.get('recipientId', '') == uid()
                        && onlyChanges(['read', 'readAt'])
+                     ) || (
+                       isAdmin() && resource.data.get('recipientId', 'admin') == 'admin'
+                       && onlyChanges(['read', 'readAt'])
                      );
-      allow delete: if isAdmin();
+      allow delete: if can('engagement');
     }
 
     // ── Content, Masters & Catalogs ─────────────────────────────────────────
+    // Renames in one module keep copied names in other modules in step; those
+    // writes are limited to exactly the copied fields.
     match /services/{serviceId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if can('content');
+      allow update: if can('pricing') && onlyChanges(['allowedVehicleCategoryNames', 'updatedAt']);
     }
     match /tour_packages/{packageId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if can('content');
+      allow update: if can('pricing') && onlyChanges(['allowedVehicleCategoryNames', 'updatedAt']);
     }
     match /locations/{locId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if can('content');
     }
     match /fare_rules/{ruleId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if can('pricing');
+      allow update: if can('content')
+                     && onlyChanges(['serviceName', 'originLocationName', 'destinationLocationName', 'updatedAt']);
     }
     match /coupons/{couponId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
-    }
-    match /vehicles/{vehicleId} {
-      allow read: if isSignedIn();
-      allow write: if isAdmin();
-    }
-    match /vehicle_categories/{catId} {
-      allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if can('pricing');
+      allow update: if can('content') && onlyChanges(['serviceNames', 'updatedAt']);
     }
 
     // Customers may submit one review for their own completed trip; it
@@ -639,7 +785,7 @@ service cloud.firestore {
       allow read: if isAdmin()
                   || (isSignedIn() && resource.data.customerId == uid())
                   || (isSignedIn() && resource.data.status == 'Published');
-      allow create: if isAdmin() || (
+      allow create: if can('engagement') || (
                        isCustomer()
                        && reviewId == request.resource.data.bookingId
                        && request.resource.data.customerId == uid()
@@ -650,36 +796,112 @@ service cloud.firestore {
                        && request.resource.data.overallRating >= 1
                        && request.resource.data.overallRating <= 5
                      );
-      allow update, delete: if isAdmin();
+      allow update, delete: if can('engagement');
     }
 
     match /invoices/{invoiceId} {
-      allow read: if isAdmin() || (isSignedIn() && resource.data.customerId == uid());
-      allow write: if isAdmin();
+      allow read: if canReadFinance() || (isSignedIn() && resource.data.customerId == uid());
+      allow write: if can('finance');
     }
 
     // ── Admin-managed collections ───────────────────────────────────────────
-    match /staff/{staffId} {
-      allow read, write: if isAdmin();
-    }
+    // Penalties are issued, changed, acknowledged and disputed only through
+    // issuePenalty / transitionPenalty / acknowledgePenalty / disputePenalty.
     match /penalties/{penaltyId} {
-      allow read: if isAdmin()
+      allow read: if canReadFinance()
                   || (isVendor() && resource.data.vendorId == uid())
                   || (isDriver() && resource.data.driverId == uid());
-      allow write: if isAdmin();
+      allow write: if false;
     }
     match /payments/{paymentId} {
-      allow read: if isAdmin()
+      allow read: if canReadFinance()
                   || (isSignedIn() && resource.data.customerId == uid());
-      allow write: if isAdmin();
+      allow write: if can('finance');
     }
     match /b2b_partners/{partnerId} {
-      allow read, write: if isAdmin();
+      allow read, write: if can('system');
     }
 
     match /settings/{docId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      // The invoice number counter advances with every invoice finance issues.
+      allow write: if can('system') || (docId == 'invoice_sequence' && can('finance'));
+    }
+
+    // ── Booking sub-records (server-written) ────────────────────────────────
+    // Every receipt, with who collected it. Staff with finance/report access and
+    // the booking's own driver / vendor may read; nobody writes from a client.
+    match /bookings/{bookingId}/payment_transactions/{txId} {
+      allow read: if canReadFinance() || can('operations')
+                  || (isSignedIn() && (booking(bookingId).get('assignedDriverId', '') == uid()
+                                       || booking(bookingId).get('assignedVendorId', '') == uid()));
+      allow write: if false;
+    }
+    // Assign / reassign / remove history. Append-only, never overwritten.
+    match /bookings/{bookingId}/assignments/{entryId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+    // One document per booking; written by the vehicle-verification functions.
+    match /vehicle_verifications/{bookingId} {
+      allow read: if isAdmin()
+                  || (isSignedIn() && resource.data.get('driverId', '') == uid())
+                  || (isVendor() && booking(bookingId).get('assignedVendorId', '') == uid());
+      allow write: if false;
+    }
+    match /capture_sessions/{sessionId} { allow read, write: if false; }
+    match /vehicle_photo_hashes/{hash} { allow read, write: if false; }
+    match /integrity_nonces/{nonce} { allow read, write: if false; }
+    match /device_integrity/{userId} {
+      allow read: if isOwner(userId) || can('system');
+      allow write: if false;
+    }
+    match /otp_verifications/{otpId} { allow read, write: if false; }
+
+    // ── Audit, security and delivery logs ───────────────────────────────────
+    match /audit_logs/{entryId} {
+      allow read: if isSuperAdmin() || can('reports') || can('compliance');
+      allow write: if false;
+    }
+    match /security_events/{eventId} {
+      allow read: if isSuperAdmin() || can('system');
+      allow update: if (isSuperAdmin() || can('system'))
+                       && onlyChanges(['resolved', 'resolvedBy', 'resolvedAt', 'resolutionNote']);
+      allow create, delete: if false;
+    }
+    match /notification_deliveries/{rowId} {
+      allow read: if can('engagement') || can('reports') || can('operations');
+      allow write: if false;
+    }
+
+    // ── Legal documents and acceptance ──────────────────────────────────────
+    // Published text is readable by any signed-in user; drafts only by staff.
+    match /legal_documents/{key} {
+      allow read: if isAdmin() || (isSignedIn() && resource.data.get('status', '') == 'Published');
+      allow write: if false;
+      match /versions/{version} {
+        allow read: if isAdmin();
+        allow write: if false;
+      }
+    }
+    match /legal_acceptances/{id} {
+      allow read: if isAdmin() || (isSignedIn() && resource.data.userId == uid());
+      allow write: if false;
+    }
+
+    // Customer-visible mirror of the global fare adjustment (written by saveFareAdjustment).
+    match /public_config/{docId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // Push tokens: a device registers and removes only its own token.
+    match /device_tokens/{tokenId} {
+      allow create: if isSignedIn() && request.resource.data.ownerId == uid()
+                     && request.resource.data.keys().hasOnly(['ownerId', 'token', 'platform', 'role', 'createdAt'])
+                     && request.resource.data.token is string && request.resource.data.token.size() < 400;
+      allow read, delete: if isSignedIn() && resource.data.ownerId == uid();
+      allow update: if false;
     }
 
     // Default deny.

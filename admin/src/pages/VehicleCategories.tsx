@@ -1,156 +1,61 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { VehicleCategory, Vehicle } from "../types";
+import { subscribeVehicleCategories, subscribeVehicles } from "../services/adminFirestoreService";
 import {
-  subscribeVehicleCategories,
-  subscribeVehicles,
-  setFirestoreDocument,
-  deleteFirestoreDocument,
-  COLLECTIONS,
-} from "../services/adminFirestoreService";
+  CategoryActionError,
+  deleteCategory,
+  saveCategory,
+  setCategoryStatus,
+  validateCategory,
+  vehiclesInCategory,
+  type CategoryField,
+  type CategoryForm,
+} from "../services/categoryService";
+import { mapVehicle } from "../services/vehicleService";
+import { ConfirmDialog, ErrorBanner, Toast, useToast } from "../components/Feedback";
 
-const PRESET_TEMPLATES = [
-  {
-    name: "Sedan",
-    code: "SEDAN",
-    description: "Comfortable 4-seater AC sedan ideal for airport transfers, city rides, and short outstation trips.",
-    icon: "🚘",
-    seatingCapacity: 4,
-    luggageCapacity: "2 Large Bags",
-    acSupported: "Both",
-    recommendedPassengers: 4,
-    displayOrder: 1,
-    fare: {
-      baseFare: 350,
-      baseKm: 10,
-      perKmRate: 12,
-      minimumFare: 350,
-      driverAllowance: 250,
-      nightAllowance: 150,
-      waitingChargePerHour: 80,
-      extraHourCharge: 100,
-      extraKmCharge: 12,
-      tollIncluded: false,
-      parkingIncluded: false,
-      permitCharge: 0,
-      outstationPerKmRate: 14,
-      outstationDriverBattaPerDay: 300,
-      outstationMinKmPerDay: 250,
-    },
-  },
-  {
-    name: "SUV",
-    code: "SUV",
-    description: "Spacious 6-7 seater SUV suitable for family trips, outstation travel, and hilly terrains.",
-    icon: "🚙",
-    seatingCapacity: 6,
-    luggageCapacity: "3 Large Bags",
-    acSupported: "AC",
-    recommendedPassengers: 6,
-    displayOrder: 2,
-    fare: {
-      baseFare: 450,
-      baseKm: 10,
-      perKmRate: 16,
-      minimumFare: 450,
-      driverAllowance: 350,
-      nightAllowance: 200,
-      waitingChargePerHour: 100,
-      extraHourCharge: 120,
-      extraKmCharge: 16,
-      tollIncluded: false,
-      parkingIncluded: false,
-      permitCharge: 0,
-      outstationPerKmRate: 18,
-      outstationDriverBattaPerDay: 400,
-      outstationMinKmPerDay: 250,
-    },
-  },
-  {
-    name: "Innova",
-    code: "INNOVA",
-    description: "Premium 7-seater MPV with superior ride comfort, dual AC, and high reliability.",
-    icon: "🚐",
-    seatingCapacity: 7,
-    luggageCapacity: "4 Bags",
-    acSupported: "AC",
-    recommendedPassengers: 7,
-    displayOrder: 3,
-    fare: {
-      baseFare: 550,
-      baseKm: 10,
-      perKmRate: 18,
-      minimumFare: 550,
-      driverAllowance: 400,
-      nightAllowance: 250,
-      waitingChargePerHour: 120,
-      extraHourCharge: 150,
-      extraKmCharge: 18,
-      tollIncluded: false,
-      parkingIncluded: false,
-      permitCharge: 0,
-      outstationPerKmRate: 20,
-      outstationDriverBattaPerDay: 450,
-      outstationMinKmPerDay: 300,
-    },
-  },
-  {
-    name: "Innova Crysta",
-    code: "CRYSTA",
-    description: "Luxury 7-seater Innova Crysta offering executive comfort, captain seats, and plush interiors.",
-    icon: "🚐",
-    seatingCapacity: 7,
-    luggageCapacity: "4 Large Bags",
-    acSupported: "AC",
-    recommendedPassengers: 6,
-    displayOrder: 4,
-    fare: {
-      baseFare: 700,
-      baseKm: 10,
-      perKmRate: 21,
-      minimumFare: 700,
-      driverAllowance: 500,
-      nightAllowance: 300,
-      waitingChargePerHour: 150,
-      extraHourCharge: 200,
-      extraKmCharge: 21,
-      tollIncluded: false,
-      parkingIncluded: false,
-      permitCharge: 0,
-      outstationPerKmRate: 23,
-      outstationDriverBattaPerDay: 500,
-      outstationMinKmPerDay: 300,
-    },
-  },
-  {
-    name: "Tempo Traveller",
-    code: "TEMPO",
-    description: "12 to 18-seater pushback seating vehicle tailored for group tours and corporate events.",
-    icon: "🚌",
-    seatingCapacity: 12,
-    luggageCapacity: "8 Bags",
-    acSupported: "Both",
-    recommendedPassengers: 12,
-    displayOrder: 5,
-    fare: {
-      baseFare: 1200,
-      baseKm: 10,
-      perKmRate: 26,
-      minimumFare: 1200,
-      driverAllowance: 600,
-      nightAllowance: 350,
-      waitingChargePerHour: 200,
-      extraHourCharge: 250,
-      extraKmCharge: 26,
-      tollIncluded: false,
-      parkingIncluded: false,
-      permitCharge: 0,
-      outstationPerKmRate: 28,
-      outstationDriverBattaPerDay: 600,
-      outstationMinKmPerDay: 300,
-    },
-  },
-];
+type FormTab = "basic" | "specs" | "fare" | "outstation";
 
+const TAB_FIELDS: Record<FormTab, CategoryField[]> = {
+  basic: ["name", "code", "imageUrl"],
+  specs: ["seatingCapacity", "recommendedPassengers", "displayOrder"],
+  fare: ["fare.baseFare", "fare.baseKm", "fare.perKmRate", "fare.minimumFare", "fare.driverAllowance", "fare.nightAllowance"],
+  outstation: [
+    "fare.outstationPerKmRate",
+    "fare.outstationDriverBattaPerDay",
+    "fare.outstationMinKmPerDay",
+    "fare.waitingChargePerHour",
+    "fare.extraHourCharge",
+    "fare.extraKmCharge",
+    "fare.permitCharge",
+    "fare.carrierCharge",
+  ],
+};
+
+const FIELD_LABELS: Partial<Record<CategoryField, string>> = {
+  name: "Category name",
+  code: "Category code",
+  imageUrl: "Image URL",
+  seatingCapacity: "Seating capacity",
+  recommendedPassengers: "Recommended passengers",
+  displayOrder: "Display order",
+  "fare.baseFare": "Base fare",
+  "fare.baseKm": "Base km",
+  "fare.perKmRate": "Per-km rate",
+  "fare.minimumFare": "Minimum fare",
+  "fare.driverAllowance": "Driver allowance",
+  "fare.nightAllowance": "Night allowance",
+  "fare.outstationPerKmRate": "Outstation per-km rate",
+  "fare.outstationDriverBattaPerDay": "Outstation driver batta",
+  "fare.outstationMinKmPerDay": "Outstation minimum km/day",
+  "fare.waitingChargePerHour": "Time charge per hour",
+  "fare.extraHourCharge": "Extra hour charge",
+  "fare.extraKmCharge": "Extra km charge",
+  "fare.permitCharge": "Permit charge",
+  "fare.carrierCharge": "Carrier / luggage charge",
+};
+
+// A new category starts without prices: every rate must be entered by the admin.
 const defaultFormState = {
   id: "",
   name: "",
@@ -158,87 +63,100 @@ const defaultFormState = {
   description: "",
   imageUrl: "",
   icon: "🚘",
-  seatingCapacity: 4,
-  luggageCapacity: "2 Bags" as string | number,
-  acSupported: "Both" as const,
-  recommendedPassengers: 4,
+  seatingCapacity: 0,
+  luggageCapacity: "" as string | number,
+  acSupported: "Both" as "AC" | "Non-AC" | "Both",
+  recommendedPassengers: 0,
   displayOrder: 1,
   status: "Active" as "Active" | "Inactive",
   fare: {
-    baseFare: 350,
-    baseKm: 10,
-    perKmRate: 12,
-    minimumFare: 350,
-    driverAllowance: 250,
-    nightAllowance: 150,
-    waitingChargePerHour: 80,
-    extraHourCharge: 100,
-    extraKmCharge: 12,
+    baseFare: 0,
+    baseKm: 0,
+    perKmRate: 0,
+    minimumFare: 0,
+    driverAllowance: 0,
+    nightAllowance: 0,
+    waitingChargePerHour: 0,
+    extraHourCharge: 0,
+    extraKmCharge: 0,
     tollIncluded: false,
     parkingIncluded: false,
     permitCharge: 0,
-    outstationPerKmRate: 14,
-    outstationDriverBattaPerDay: 300,
-    outstationMinKmPerDay: 250,
+    carrierCharge: 0,
+    outstationPerKmRate: 0,
+    outstationDriverBattaPerDay: 0,
+    outstationMinKmPerDay: 0,
   },
 };
+
+const toForm = (f: typeof defaultFormState): CategoryForm => ({
+  name: f.name,
+  code: f.code,
+  description: f.description,
+  imageUrl: f.imageUrl,
+  icon: f.icon,
+  seatingCapacity: f.seatingCapacity,
+  luggageCapacity: f.luggageCapacity,
+  acSupported: f.acSupported,
+  recommendedPassengers: f.recommendedPassengers,
+  displayOrder: f.displayOrder,
+  status: f.status,
+  fare: { ...f.fare },
+});
+
+const actionError = (e: unknown) =>
+  e instanceof CategoryActionError ? e.message : "Something went wrong. Please try again.";
 
 export default function VehicleCategories() {
   const [categories, setCategories] = useState<VehicleCategory[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
 
   // Filters & Sorting
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<"All" | "Active" | "Inactive">("All");
-  const [sortBy, setSortBy] = useState<"name" | "order" | "seats" | "created">("order");
+  const [sortBy, setSortBy] = useState<"name" | "order" | "seats">("order");
 
   // Modal State
   const [showModal, setShowModal] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [editingOriginal, setEditingOriginal] = useState<VehicleCategory | null>(null);
   const [formData, setFormData] = useState(defaultFormState);
-  const [activeTab, setActiveTab] = useState<"basic" | "specs" | "fare" | "outstation">("basic");
+  const [activeTab, setActiveTab] = useState<FormTab>("basic");
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<CategoryField, string>>>({});
 
-  // Delete modal state
+  // Delete / status state
   const [deleteTarget, setDeleteTarget] = useState<VehicleCategory | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [statusBusyId, setStatusBusyId] = useState<string | null>(null);
 
-  // Toast state
-  const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+  const { toast, show: showToast } = useToast();
 
   useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
+    const fail = (message: string) => {
+      setLoadError(message);
+      setLoading(false);
+    };
     const unsubCats = subscribeVehicleCategories((data) => {
       setCategories(data);
       setLoading(false);
-    });
-    const unsubVehicles = subscribeVehicles((data) => {
-      setVehicles(data);
-    });
+    }, fail);
+    const unsubVehicles = subscribeVehicles(setVehicles, fail);
     return () => {
       unsubCats();
       unsubVehicles();
     };
-  }, []);
+  }, [retryKey]);
 
-  const showToast = (message: string, type: "success" | "error" = "success") => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 3500);
-  };
-
-  // Compute Vehicle Count per Category
-  const getVehicleCountForCategory = (cat: VehicleCategory) => {
-    return vehicles.filter((v) => {
-      const cName = (v.category || "").trim().toLowerCase();
-      return (
-        cName === cat.name.trim().toLowerCase() ||
-        cName === (cat.code || "").trim().toLowerCase() ||
-        cName === cat.id.toLowerCase()
-      );
-    }).length;
-  };
+  const fleet = useMemo(() => vehicles.map(mapVehicle), [vehicles]);
+  const getVehicleCountForCategory = (cat: VehicleCategory) => vehiclesInCategory(cat, fleet).length;
 
   // Filtered & Sorted Categories
   const filteredCategories = categories
@@ -254,162 +172,95 @@ export default function VehicleCategories() {
     })
     .sort((a, b) => {
       if (sortBy === "name") return a.name.localeCompare(b.name);
-      if (sortBy === "seats") return b.seatingCapacity - a.seatingCapacity;
-      if (sortBy === "order") return (a.displayOrder || 99) - (b.displayOrder || 99);
-      return 0;
+      if (sortBy === "seats") return (b.seatingCapacity || 0) - (a.seatingCapacity || 0);
+      return (a.displayOrder || 99) - (b.displayOrder || 99);
     });
+
+  const tabHasError = (tab: FormTab) => TAB_FIELDS[tab].some((f) => fieldErrors[f]);
+  const errNode = (f: CategoryField) =>
+    fieldErrors[f] ? <p className="text-[10px] text-red-600 mt-1">{fieldErrors[f]}</p> : null;
 
   // Modal actions
-  const handleOpenAdd = () => {
-    setIsEditing(false);
-    setFormData(defaultFormState);
+  const openForm = (data: typeof defaultFormState, original: VehicleCategory | null) => {
+    setIsEditing(!!original);
+    setEditingOriginal(original);
+    setFormData(data);
     setActiveTab("basic");
     setFormError(null);
+    setFieldErrors({});
     setShowModal(true);
   };
 
-  const handleOpenEdit = (cat: VehicleCategory) => {
-    setIsEditing(true);
-    setFormData({
-      id: cat.id,
-      name: cat.name,
-      code: cat.code || "",
-      description: cat.description || "",
-      imageUrl: cat.imageUrl || "",
-      icon: cat.icon || "🚘",
-      seatingCapacity: cat.seatingCapacity || 4,
-      luggageCapacity: cat.luggageCapacity || "2 Bags",
-      acSupported: (cat.acSupported as any) || "Both",
-      recommendedPassengers: cat.recommendedPassengers || cat.seatingCapacity || 4,
-      displayOrder: cat.displayOrder || 1,
-      status: cat.status || "Active",
-      fare: {
-        baseFare: cat.fare?.baseFare ?? 350,
-        baseKm: cat.fare?.baseKm ?? 10,
-        perKmRate: cat.fare?.perKmRate ?? 12,
-        minimumFare: cat.fare?.minimumFare ?? 350,
-        driverAllowance: cat.fare?.driverAllowance ?? 250,
-        nightAllowance: cat.fare?.nightAllowance ?? 150,
-        waitingChargePerHour: cat.fare?.waitingChargePerHour ?? 80,
-        extraHourCharge: cat.fare?.extraHourCharge ?? 100,
-        extraKmCharge: cat.fare?.extraKmCharge ?? 12,
-        tollIncluded: Boolean(cat.fare?.tollIncluded),
-        parkingIncluded: Boolean(cat.fare?.parkingIncluded),
-        permitCharge: cat.fare?.permitCharge ?? 0,
-        outstationPerKmRate: cat.fare?.outstationPerKmRate ?? 14,
-        outstationDriverBattaPerDay: cat.fare?.outstationDriverBattaPerDay ?? 300,
-        outstationMinKmPerDay: cat.fare?.outstationMinKmPerDay ?? 250,
+  const handleOpenAdd = () =>
+    openForm(
+      { ...defaultFormState, displayOrder: categories.reduce((m, c) => Math.max(m, c.displayOrder || 0), 0) + 1 },
+      null,
+    );
+
+  const handleOpenEdit = (cat: VehicleCategory) =>
+    openForm(
+      {
+        id: cat.id,
+        name: cat.name,
+        code: cat.code || "",
+        description: cat.description || "",
+        imageUrl: cat.imageUrl || "",
+        icon: cat.icon || "🚘",
+        seatingCapacity: cat.seatingCapacity || 0,
+        luggageCapacity: cat.luggageCapacity ?? "",
+        acSupported: cat.acSupported === "AC" || cat.acSupported === "Non-AC" ? cat.acSupported : "Both",
+        recommendedPassengers: cat.recommendedPassengers || 0,
+        displayOrder: cat.displayOrder || 1,
+        status: cat.status || "Active",
+        fare: {
+          baseFare: cat.fare?.baseFare ?? 0,
+          baseKm: cat.fare?.baseKm ?? 0,
+          perKmRate: cat.fare?.perKmRate ?? 0,
+          minimumFare: cat.fare?.minimumFare ?? 0,
+          driverAllowance: cat.fare?.driverAllowance ?? 0,
+          nightAllowance: cat.fare?.nightAllowance ?? 0,
+          waitingChargePerHour: cat.fare?.waitingChargePerHour ?? 0,
+          extraHourCharge: cat.fare?.extraHourCharge ?? 0,
+          extraKmCharge: cat.fare?.extraKmCharge ?? 0,
+          tollIncluded: Boolean(cat.fare?.tollIncluded),
+          parkingIncluded: Boolean(cat.fare?.parkingIncluded),
+          permitCharge: cat.fare?.permitCharge ?? 0,
+          carrierCharge: cat.fare?.carrierCharge ?? 0,
+          outstationPerKmRate: cat.fare?.outstationPerKmRate ?? 0,
+          outstationDriverBattaPerDay: cat.fare?.outstationDriverBattaPerDay ?? 0,
+          outstationMinKmPerDay: cat.fare?.outstationMinKmPerDay ?? 0,
+        },
       },
-    });
-    setActiveTab("basic");
-    setFormError(null);
-    setShowModal(true);
-  };
-
-  const handleApplyPreset = (templateName: string) => {
-    const tmpl = PRESET_TEMPLATES.find((t) => t.name === templateName);
-    if (!tmpl) return;
-    setFormData((prev) => ({
-      ...prev,
-      name: tmpl.name,
-      code: tmpl.code,
-      description: tmpl.description,
-      icon: tmpl.icon,
-      seatingCapacity: tmpl.seatingCapacity,
-      luggageCapacity: tmpl.luggageCapacity,
-      acSupported: tmpl.acSupported as any,
-      recommendedPassengers: tmpl.recommendedPassengers,
-      displayOrder: tmpl.displayOrder,
-      fare: { ...tmpl.fare },
-    }));
-  };
+      cat,
+    );
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (saving) return;
     setFormError(null);
-
-    const name = formData.name.trim();
-    if (!name) {
-      setFormError("Category Name is required.");
-      setActiveTab("basic");
+    const form = toForm(formData);
+    const errors = validateCategory(form, categories, editingOriginal?.id ?? null);
+    setFieldErrors(errors);
+    const keys = Object.keys(errors) as CategoryField[];
+    if (keys.length) {
+      setFormError(
+        `Please fix: ${keys.map((k) => `${FIELD_LABELS[k] || k} — ${errors[k]}`).join(" ")}`,
+      );
+      const firstTab = (Object.keys(TAB_FIELDS) as FormTab[]).find((t) => TAB_FIELDS[t].includes(keys[0]));
+      if (firstTab) setActiveTab(firstTab);
       return;
     }
-    if (formData.seatingCapacity <= 0 || isNaN(formData.seatingCapacity)) {
-      setFormError("Seating capacity must be a valid positive number.");
-      setActiveTab("specs");
-      return;
-    }
-
-    // Check duplicate name or code
-    const normalizedName = name.toLowerCase();
-    const code = (formData.code || name).toUpperCase().replace(/\s+/g, "_");
-    const duplicate = categories.find(
-      (c) =>
-        c.id !== formData.id &&
-        (c.name.trim().toLowerCase() === normalizedName || (c.code && c.code.toUpperCase() === code))
-    );
-
-    if (duplicate) {
-      setFormError(`A category with name "${name}" or code "${code}" already exists.`);
-      setActiveTab("basic");
-      return;
-    }
-
     setSaving(true);
     try {
-      const docId = formData.id ? formData.id : `CAT-${code.substring(0, 10)}`;
-      const payload: VehicleCategory = {
-        id: docId,
-        name,
-        code,
-        description: formData.description.trim(),
-        imageUrl: formData.imageUrl.trim(),
-        icon: formData.icon,
-        seatingCapacity: Number(formData.seatingCapacity),
-        luggageCapacity: formData.luggageCapacity,
-        acSupported: formData.acSupported,
-        recommendedPassengers: Number(formData.recommendedPassengers),
-        displayOrder: Number(formData.displayOrder || 1),
-        status: formData.status,
-        fare: {
-          baseFare: Number(formData.fare.baseFare || 0),
-          baseKm: Number(formData.fare.baseKm || 0),
-          perKmRate: Number(formData.fare.perKmRate || 0),
-          minimumFare: Number(formData.fare.minimumFare || 0),
-          driverAllowance: Number(formData.fare.driverAllowance || 0),
-          nightAllowance: Number(formData.fare.nightAllowance || 0),
-          waitingChargePerHour: Number(formData.fare.waitingChargePerHour || 0),
-          extraHourCharge: Number(formData.fare.extraHourCharge || 0),
-          extraKmCharge: Number(formData.fare.extraKmCharge || 0),
-          tollIncluded: Boolean(formData.fare.tollIncluded),
-          parkingIncluded: Boolean(formData.fare.parkingIncluded),
-          permitCharge: Number(formData.fare.permitCharge || 0),
-          outstationPerKmRate: Number(formData.fare.outstationPerKmRate || 0),
-          outstationDriverBattaPerDay: Number(formData.fare.outstationDriverBattaPerDay || 0),
-          outstationMinKmPerDay: Number(formData.fare.outstationMinKmPerDay || 0),
-        },
-      };
-
-      const ok = await setFirestoreDocument(COLLECTIONS.VEHICLE_CATEGORIES, docId, payload);
-      if (ok) {
-        if (isEditing) {
-          setCategories((prev) => prev.map((c) => (c.id === docId ? payload : c)));
-        } else {
-          setCategories((prev) => [payload, ...prev]);
-        }
-        setShowModal(false);
-        showToast(
-          isEditing
-            ? `Vehicle category "${name}" updated successfully.`
-            : `Vehicle category "${name}" created successfully.`,
-          "success"
-        );
-      } else {
-        setFormError("Failed to save vehicle category to database. Please try again.");
-      }
-    } catch (err: any) {
-      console.error("Error saving vehicle category:", err);
-      setFormError(err.message || "An unexpected error occurred while saving.");
+      const { renamed } = await saveCategory(form, editingOriginal);
+      setShowModal(false);
+      showToast(
+        editingOriginal
+          ? `Vehicle category "${form.name.trim()}" updated${renamed ? ` (${renamed} linked record${renamed === 1 ? "" : "s"} renamed)` : ""}.`
+          : `Vehicle category "${form.name.trim()}" created.`,
+      );
+    } catch (err) {
+      setFormError(actionError(err));
     } finally {
       setSaving(false);
     }
@@ -417,44 +268,34 @@ export default function VehicleCategories() {
 
   // Toggle status
   const handleToggleStatus = async (cat: VehicleCategory) => {
+    if (statusBusyId) return;
     const newStatus = cat.status === "Active" ? "Inactive" : "Active";
-    const ok = await setFirestoreDocument(COLLECTIONS.VEHICLE_CATEGORIES, cat.id, {
-      ...cat,
-      status: newStatus,
-    });
-    if (ok) {
-      showToast(`Category "${cat.name}" marked as ${newStatus}.`, "success");
-    } else {
-      showToast(`Failed to update status for "${cat.name}".`, "error");
+    setStatusBusyId(cat.id);
+    try {
+      await setCategoryStatus(cat, newStatus);
+      showToast(
+        newStatus === "Inactive"
+          ? `"${cat.name}" is hidden from new bookings.`
+          : `"${cat.name}" is available for booking again.`,
+      );
+    } catch (err) {
+      showToast(actionError(err), "error");
+    } finally {
+      setStatusBusyId(null);
     }
   };
 
   // Delete handling
   const handleDeleteConfirm = async () => {
-    if (!deleteTarget) return;
+    if (!deleteTarget || deleting) return;
     setDeleting(true);
     setDeleteError(null);
-
-    const vehicleCount = getVehicleCountForCategory(deleteTarget);
-    if (vehicleCount > 0) {
-      setDeleteError(
-        `Cannot delete category "${deleteTarget.name}" because ${vehicleCount} registered vehicle(s) are currently assigned to it. Please deactivate the category or reassign the vehicles first.`
-      );
-      setDeleting(false);
-      return;
-    }
-
     try {
-      const ok = await deleteFirestoreDocument(COLLECTIONS.VEHICLE_CATEGORIES, deleteTarget.id);
-      if (ok) {
-        setDeleteTarget(null);
-        showToast(`Vehicle category "${deleteTarget.name}" removed successfully.`, "success");
-      } else {
-        setDeleteError("Failed to delete category from database.");
-      }
-    } catch (err: any) {
-      console.error("Delete category error:", err);
-      setDeleteError(err.message || "An error occurred during deletion.");
+      await deleteCategory(deleteTarget, fleet);
+      showToast(`Vehicle category "${deleteTarget.name}" removed.`);
+      setDeleteTarget(null);
+    } catch (err) {
+      setDeleteError(actionError(err));
     } finally {
       setDeleting(false);
     }
@@ -462,17 +303,8 @@ export default function VehicleCategories() {
 
   return (
     <div className="p-6 space-y-6">
-      {/* Toast Notification */}
-      {toast && (
-        <div
-          className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-xl text-xs font-semibold text-white transition-all ${
-            toast.type === "success" ? "bg-emerald-600" : "bg-red-600"
-          }`}
-        >
-          <span>{toast.type === "success" ? "✓" : "⚠️"}</span>
-          <span>{toast.message}</span>
-        </div>
-      )}
+      <Toast toast={toast} />
+      {loadError && <ErrorBanner message={loadError} onRetry={() => setRetryKey((k) => k + 1)} />}
 
       {/* Top Action Header Bar */}
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -775,7 +607,8 @@ export default function VehicleCategories() {
                             </button>
                             <button
                               onClick={() => handleToggleStatus(cat)}
-                              className={`px-2 py-1 text-[11px] font-medium rounded-lg border transition-colors cursor-pointer ${
+                              disabled={statusBusyId === cat.id}
+                              className={`px-2 py-1 text-[11px] font-medium rounded-lg border transition-colors cursor-pointer disabled:opacity-50 ${
                                 cat.status === "Active"
                                   ? "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
                                   : "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
@@ -784,7 +617,10 @@ export default function VehicleCategories() {
                               {cat.status === "Active" ? "Deactivate" : "Activate"}
                             </button>
                             <button
-                              onClick={() => setDeleteTarget(cat)}
+                              onClick={() => {
+                                setDeleteError(null);
+                                setDeleteTarget(cat);
+                              }}
                               className="px-2 py-1 text-[11px] font-medium rounded-lg border border-red-200 bg-red-50 text-[#E21B23] hover:bg-red-100 transition-colors cursor-pointer"
                             >
                               Delete
@@ -812,61 +648,47 @@ export default function VehicleCategories() {
                   {isEditing ? "Edit Vehicle Category" : "+ Add Vehicle Category"}
                 </h3>
                 <p className="text-[11px] text-[#666666]">
-                  Configure category details, passenger capacity, and fare rules.
+                  These rates are used by the booking engine to price customer rides in this category.
                 </p>
               </div>
 
-              <div className="flex items-center gap-3">
-                {!isEditing && (
-                  <select
-                    onChange={(e) => handleApplyPreset(e.target.value)}
-                    defaultValue=""
-                    className="px-2.5 py-1 text-[11px] border border-[#E5E5E5] rounded-lg bg-white text-gray-700 focus:outline-none focus:border-[#E21B23]"
-                  >
-                    <option value="" disabled>
-                      Auto-fill Template...
-                    </option>
-                    {PRESET_TEMPLATES.map((t) => (
-                      <option key={t.name} value={t.name}>
-                        {t.name} ({t.seatingCapacity} Seats)
-                      </option>
-                    ))}
-                  </select>
-                )}
-
-                <button
-                  onClick={() => setShowModal(false)}
-                  className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-500 font-bold text-sm"
-                >
-                  ✕
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setShowModal(false)}
+                disabled={saving}
+                aria-label="Close"
+                className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-500 font-bold text-sm disabled:opacity-40"
+              >
+                ✕
+              </button>
             </div>
 
             {/* Navigation Tabs */}
-            <div className="flex border-b border-[#E5E5E5] bg-[#F5F5F5] px-6 pt-2">
-              {[
+            <div className="flex flex-wrap border-b border-[#E5E5E5] bg-[#F5F5F5] px-6 pt-2">
+              {([
                 { id: "basic", label: "Category Info" },
                 { id: "specs", label: "Vehicle Specs" },
                 { id: "fare", label: "Local Fare Rules" },
                 { id: "outstation", label: "Outstation & Extra Charges" },
-              ].map((tab) => (
+              ] as { id: FormTab; label: string }[]).map((tab) => (
                 <button
+                  type="button"
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id as any)}
-                  className={`px-4 py-2 text-[12px] font-semibold border-b-2 transition-colors cursor-pointer ${
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`px-4 py-2 text-[12px] font-semibold border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
                     activeTab === tab.id
                       ? "border-[#E21B23] text-[#E21B23] bg-white rounded-t-lg"
                       : "border-transparent text-[#666666] hover:text-[#111111]"
                   }`}
                 >
                   {tab.label}
+                  {tabHasError(tab.id) && <span className="w-1.5 h-1.5 rounded-full bg-red-600" aria-label="has errors" />}
                 </button>
               ))}
             </div>
 
             {/* Form Form Container */}
-            <form onSubmit={handleSave}>
+            <form onSubmit={handleSave} noValidate>
               <div className="p-6 space-y-4 max-h-[60vh] overflow-y-auto">
                 {formError && (
                   <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-semibold">
@@ -890,6 +712,7 @@ export default function VehicleCategories() {
                           onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("name")}
                       </div>
 
                       <div>
@@ -903,6 +726,8 @@ export default function VehicleCategories() {
                           onChange={(e) => setFormData({ ...formData, code: e.target.value.toUpperCase() })}
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] font-mono focus:outline-none focus:border-[#E21B23]"
                         />
+                        <p className="text-[10px] text-gray-500 mt-1">Leave blank to derive it from the name.</p>
+                        {errNode("code")}
                       </div>
                     </div>
 
@@ -947,6 +772,7 @@ export default function VehicleCategories() {
                           onChange={(e) => setFormData({ ...formData, imageUrl: e.target.value })}
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("imageUrl")}
                       </div>
 
                       <div>
@@ -983,6 +809,7 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("seatingCapacity")}
                       </div>
 
                       <div>
@@ -1002,6 +829,7 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("recommendedPassengers")}
                       </div>
                     </div>
 
@@ -1047,6 +875,7 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("displayOrder")}
                       </div>
                     </div>
                   </div>
@@ -1072,6 +901,7 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("fare.baseFare")}
                       </div>
 
                       <div>
@@ -1090,6 +920,7 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("fare.baseKm")}
                       </div>
 
                       <div>
@@ -1108,6 +939,8 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        <p className="text-[10px] text-gray-500 mt-1">Required. Charged for every km beyond the base km.</p>
+                        {errNode("fare.perKmRate")}
                       </div>
                     </div>
 
@@ -1128,6 +961,7 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("fare.driverAllowance")}
                       </div>
 
                       <div>
@@ -1146,6 +980,7 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("fare.nightAllowance")}
                       </div>
 
                       <div>
@@ -1164,6 +999,7 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("fare.minimumFare")}
                       </div>
                     </div>
                   </div>
@@ -1192,6 +1028,7 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("fare.outstationPerKmRate")}
                       </div>
 
                       <div>
@@ -1213,11 +1050,12 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("fare.outstationDriverBattaPerDay")}
                       </div>
 
                       <div>
                         <label className="block text-[11px] font-bold text-[#111111] mb-1">
-                          Waiting Charge / Hour (₹)
+                          Time Charge / Hour (₹)
                         </label>
                         <input
                           type="number"
@@ -1234,6 +1072,8 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        <p className="text-[10px] text-gray-500 mt-1">Billed per minute of local trip time (hourly rate ÷ 60).</p>
+                        {errNode("fare.waitingChargePerHour")}
                       </div>
                     </div>
 
@@ -1257,6 +1097,7 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("fare.extraHourCharge")}
                       </div>
 
                       <div>
@@ -1278,6 +1119,7 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("fare.extraKmCharge")}
                       </div>
 
                       <div>
@@ -1296,6 +1138,27 @@ export default function VehicleCategories() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("fare.permitCharge")}
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-bold text-[#111111] mb-1">
+                          Carrier / Luggage Charge (₹)
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={formData.fare.carrierCharge}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              fare: { ...formData.fare, carrierCharge: parseFloat(e.target.value) || 0 },
+                            })
+                          }
+                          className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
+                        />
+                        <p className="text-[11px] text-[#555] mt-1">Shown on bookings as an extra, payable separately. Leave 0 if there is no carrier charge.</p>
+                        {errNode("fare.carrierCharge")}
                       </div>
                     </div>
 
@@ -1345,7 +1208,8 @@ export default function VehicleCategories() {
                 <button
                   type="button"
                   onClick={() => setShowModal(false)}
-                  className="px-4 py-2 border border-[#E5E5E5] rounded-lg text-[12px] font-semibold text-gray-700 hover:bg-gray-100 transition-colors"
+                  disabled={saving}
+                  className="px-4 py-2 border border-[#E5E5E5] rounded-lg text-[12px] font-semibold text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50"
                 >
                   Cancel
                 </button>
@@ -1378,47 +1242,17 @@ export default function VehicleCategories() {
         </div>
       )}
 
-      {/* Delete Confirmation Modal */}
       {deleteTarget && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
-            <div className="flex items-center gap-3 text-red-600">
-              <div className="w-10 h-10 rounded-xl bg-red-100 flex items-center justify-center font-bold text-lg">
-                ⚠️
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-gray-900">Delete Vehicle Category?</h3>
-                <p className="text-xs text-gray-500 font-mono">{deleteTarget.name} ({deleteTarget.code})</p>
-              </div>
-            </div>
-
-            <p className="text-xs text-gray-600">
-              Are you sure you want to permanently remove this vehicle category? This action cannot be undone.
-            </p>
-
-            {deleteError && (
-              <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-semibold">
-                {deleteError}
-              </div>
-            )}
-
-            <div className="flex items-center justify-end gap-2 border-t pt-3">
-              <button
-                onClick={() => setDeleteTarget(null)}
-                className="px-4 py-2 border rounded-xl text-xs font-bold text-gray-700 hover:bg-gray-100"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleDeleteConfirm}
-                disabled={deleting}
-                className="px-5 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl shadow cursor-pointer disabled:opacity-50"
-              >
-                {deleting ? "Deleting..." : "Confirm Delete"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmDialog
+          title={`Delete "${deleteTarget.name}"?`}
+          message="The category is removed permanently. It can only be deleted when no vehicle, fare rule, service, tour package or coupon uses it — otherwise deactivate it to hide it from new bookings."
+          confirmLabel="Delete Category"
+          danger
+          busy={deleting}
+          error={deleteError}
+          onConfirm={handleDeleteConfirm}
+          onCancel={() => setDeleteTarget(null)}
+        />
       )}
     </div>
   );

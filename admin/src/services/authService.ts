@@ -8,6 +8,7 @@ import {
 } from "firebase/auth";
 import { doc, onSnapshot, serverTimestamp, setDoc } from "firebase/firestore";
 import { auth, db } from "./firebase";
+import { accessFromAdminDoc, type AdminAccess } from "../config/permissions";
 
 export const ADMINS_COLLECTION = "admins";
 
@@ -15,6 +16,10 @@ export interface AdminSession {
   user: User;
   role: string | null;
   status: string | null;
+  /** Staff role and permissions (meaningful only for an active admin). */
+  access: AdminAccess;
+  /** Why a sign-up request was declined, when it was. */
+  rejectionReason: string;
 }
 
 export function subscribeToAdminSession(
@@ -43,11 +48,13 @@ export function subscribeToAdminSession(
           user,
           role: (data?.role as string | undefined) ?? null,
           status: (data?.status as string | undefined) ?? null,
+          access: accessFromAdminDoc(data),
+          rejectionReason: typeof data?.rejectionReason === "string" ? data.rejectionReason : "",
         });
       },
       () => {
         // Permission denied means not an admin
-        callback({ user, role: null, status: null });
+        callback({ user, role: null, status: null, access: { ...accessFromAdminDoc(undefined), isSuper: false, permissions: [] }, rejectionReason: "" });
       },
     );
   });
@@ -75,9 +82,8 @@ export async function signUpAdmin(
   if (displayName) {
     await updateProfile(user, { displayName });
   }
-  // Store the account in the `admins` collection. New sign-ups start with
-  // role "pending"; an existing admin approves them by changing `role` to
-  // "admin" directly in Firestore.
+  // Store the account in the `admins` collection as a pending request; a
+  // super admin approves it (with a role) from Staff & Roles.
   await setDoc(doc(db, ADMINS_COLLECTION, user.uid), {
     uid: user.uid,
     name: displayName,

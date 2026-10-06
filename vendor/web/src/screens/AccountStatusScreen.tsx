@@ -1,4 +1,5 @@
 import React from 'react';
+import { formatDateTime12 } from '../utils/time';
 import { Ban, Car, Check, Clock, IndianRupee, Lock, LogOut, Radio, Users, XCircle, ClipboardList } from 'lucide-react';
 import type { VendorRecord } from '../types';
 import { SECTION_LABELS } from '../config/onboarding';
@@ -25,7 +26,7 @@ const LOCKED_FEATURES = [
 ];
 
 const formatDate = (ms: number | null) =>
-  ms ? new Date(ms).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+  ms ? formatDateTime12(new Date(ms)) : '';
 
 export const AccountStatusScreen: React.FC<AccountStatusScreenProps> = ({ record, onSignOut, onReapply }) => {
   const online = useOnlineStatus();

@@ -27,8 +27,11 @@ import {
   isOutstation,
   serviceName,
   subscribeToCoupons,
+  subscribeToFareAdjustment,
   subscribeToRideCategories,
+  type FareAdjustment,
   validateCoupon,
+  type RideCategoryStatus,
 } from '../services/pricingService';
 import { createRideRequest, nearbyDrivers, subscribeToOnlineDrivers } from '../services/rideService';
 import { savePlace, subscribeToSavedPlaces } from '../services/userFirestoreService';
@@ -37,6 +40,7 @@ import {
   NEARBY_RADIUS_KM,
   SCHEDULE_MAX_DAYS,
   SCHEDULE_MIN_LEAD_MIN,
+  SUPPORT_PHONE_DISPLAY,
 } from '../config/constants';
 import { formatDistance, formatDuration, formatINR } from '../utils/format';
 import { haversineKm, isValidLatLng, ROAD_FACTOR } from '../utils/geo';
@@ -82,6 +86,7 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
   const [routeLoading, setRouteLoading] = useState(false);
 
   const [categories, setCategories] = useState<RideCategory[]>([]);
+  const [categoryStatus, setCategoryStatus] = useState<RideCategoryStatus>('loading');
   const [categoryId, setCategoryId] = useState('');
   const [onlineDrivers, setOnlineDrivers] = useState<DriverPresence[]>([]);
   const [coupons, setCoupons] = useState<Coupon[]>([]);
@@ -95,6 +100,11 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
   const [promoMsg, setPromoMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [coupon, setCoupon] = useState<AppliedCoupon | null>(null);
   const [notes, setNotes] = useState('');
+  const [adjustment, setAdjustment] = useState<FareAdjustment | null>(null);
+  const [waSame, setWaSame] = useState(true);
+  const [waCode, setWaCode] = useState('+91');
+  const [waNumber, setWaNumber] = useState('');
+  const [email, setEmail] = useState('');
   const [showExtras, setShowExtras] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
@@ -105,14 +115,16 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
   // Live data.
   useEffect(
     () =>
-      subscribeToRideCategories((cats) => {
+      subscribeToRideCategories((cats, status) => {
         setCategories(cats);
+        setCategoryStatus(status);
         setCategoryId((cur) => (cats.some((c) => c.id === cur) ? cur : cats[Math.min(1, cats.length - 1)]?.id ?? ''));
       }),
     [],
   );
   useEffect(() => subscribeToOnlineDrivers(setOnlineDrivers), []);
   useEffect(() => subscribeToCoupons(setCoupons), []);
+  useEffect(() => subscribeToFareAdjustment(setAdjustment), []);
   useEffect(() => subscribeToSavedPlaces(profile.uid, setSavedPlaces), [profile.uid]);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 30000);
@@ -211,10 +223,10 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
     const m = new Map<string, FareBreakdown>();
     if (!route) return m;
     for (const c of categories) {
-      m.set(c.id, calculateFare({ category: c, route, tripType, pickupTime, discount: c.id === categoryId ? coupon?.discount ?? 0 : 0 }));
+      m.set(c.id, calculateFare({ category: c, route, tripType, pickupTime, adjustment, discount: c.id === categoryId ? coupon?.discount ?? 0 : 0 }));
     }
     return m;
-  }, [route, categories, tripType, pickupTime.getTime(), categoryId, coupon?.discount]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [route, categories, tripType, pickupTime.getTime(), categoryId, coupon?.discount, adjustment]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const nearby = useMemo(
     () => (pickup ? nearbyDrivers(onlineDrivers, pickup, NEARBY_RADIUS_KM, now) : []),
@@ -243,7 +255,7 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
   // Re-validate the coupon whenever the fare it was applied to changes.
   useEffect(() => {
     if (!coupon || !route || !category) return;
-    const base = calculateFare({ category, route, tripType, pickupTime });
+    const base = calculateFare({ category, route, tripType, pickupTime, adjustment });
     const res = validateCoupon(coupons, coupon.code, {
       subtotal: base.subtotal,
       categoryId: category.id,
@@ -265,7 +277,7 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
       setPromoMsg({ ok: false, text: 'Set your pickup and destination first.' });
       return;
     }
-    const base = calculateFare({ category, route, tripType, pickupTime });
+    const base = calculateFare({ category, route, tripType, pickupTime, adjustment });
     const res = validateCoupon(coupons, promoInput, {
       subtotal: base.subtotal,
       categoryId: category.id,
@@ -287,10 +299,24 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
   const tooClose = pickup && drop ? haversineKm(pickup, drop) < 0.2 : false;
   const tooFar = route ? route.distanceKm > 1500 : false;
 
+  const categoryNotice =
+    categoryStatus === 'unavailable'
+      ? `Online booking isn’t available right now. Please call ${SUPPORT_PHONE_DISPLAY} to book.`
+      : categoryStatus === 'error'
+        ? 'We couldn’t load ride types. Check your connection and try again.'
+        : '';
+  const emailOk = !email.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email.trim());
+  const waDigits = waNumber.replace(/[\s()-]/g, '');
+  const waOk = waSame || (/^\+[1-9]\d{0,2}$/.test(waCode.trim()) && /^\d+$/.test(waDigits) && (waCode.trim() === '+91' ? /^[6-9]\d{9}$/.test(waDigits) : waDigits.length >= 6 && waDigits.length <= 14));
+  const contactError = !emailOk ? 'Enter a valid email address or leave it blank.' : !waOk ? 'Enter a valid WhatsApp number or tick “same as mobile”.' : '';
   const blocker =
     !online
       ? 'You’re offline. Reconnect to request a ride.'
-      : hasLiveRide
+      : categoryNotice
+        ? categoryNotice
+        : categoryStatus === 'loading'
+          ? 'Loading ride types…'
+          : hasLiveRide
         ? 'You already have a ride in progress.'
         : !pickup
           ? 'Set your pickup point.'
@@ -304,7 +330,7 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
                   ? 'Calculating route…'
                   : !category || !quote
                     ? 'Choose a ride type.'
-                    : scheduleError || (walletShort ? 'Wallet balance is too low for this fare.' : '');
+                    : scheduleError || (walletShort ? 'Wallet balance is too low for this fare.' : '') || contactError;
 
   const submit = async () => {
     if (blocker || submitting || !pickup || !drop || !route || !category || !quote) return;
@@ -322,6 +348,8 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
         paymentMethod: payment,
         couponCode: coupon?.code ?? '',
         notes,
+        whatsapp: waSame ? { sameAsMobile: true } : { sameAsMobile: false, countryCode: waCode.trim(), number: waDigits },
+        email: email.trim(),
         scheduledAt: timing === 'schedule' ? scheduledAt : null,
       });
       onRideRequested(res.id, res.unconfirmed);
@@ -552,6 +580,12 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
 
               {/* Categories */}
               <div className="space-y-2" role="radiogroup" aria-label="Ride type">
+                {categoryStatus === 'loading' && (
+                  <div className="flex items-center gap-2 p-3 text-xs text-gray-500">
+                    <Spinner className="w-3.5 h-3.5 text-gray-400" /> Loading ride types…
+                  </div>
+                )}
+                {categoryNotice && <ErrorNotice message={categoryNotice} />}
                 {categories.map((c) => {
                   const q = quotes.get(c.id);
                   const eta = etaFor(c);
@@ -678,7 +712,22 @@ export const RideBookingScreen: React.FC<RideBookingScreenProps> = ({
                       aria-label="Note for driver"
                       className="w-full bg-gray-50 border border-gray-300 rounded-xl px-3 py-2 text-sm"
                     />
-                    <p className="text-[10px] text-gray-400 text-right">{notes.length}/300</p>
+                    <p className="text-xs text-gray-500 text-right">{notes.length}/300</p>
+                  </div>
+                  <div className="space-y-2 rounded-xl border border-gray-200 p-3">
+                    <p className="text-sm font-bold text-gray-900">Where should we send updates?</p>
+                    <label className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                      <input type="checkbox" checked={waSame} onChange={(e) => setWaSame(e.target.checked)} className="w-4 h-4 accent-[#E31E24]" />
+                      WhatsApp number is same as mobile number
+                    </label>
+                    {!waSame && (
+                      <div className="grid grid-cols-[6rem_1fr] gap-2">
+                        <input value={waCode} onChange={(e) => setWaCode(e.target.value)} aria-label="WhatsApp country code" placeholder="+91" className="bg-gray-50 border border-gray-300 rounded-xl px-3 py-2 text-sm" />
+                        <input value={waNumber} onChange={(e) => setWaNumber(e.target.value)} inputMode="tel" aria-label="WhatsApp number" placeholder="WhatsApp number" className="bg-gray-50 border border-gray-300 rounded-xl px-3 py-2 text-sm" />
+                      </div>
+                    )}
+                    <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} aria-label="Email (optional)" placeholder="Email (optional) for your confirmation and receipt" className="w-full bg-gray-50 border border-gray-300 rounded-xl px-3 py-2 text-sm" />
+                    {contactError && <p className="text-sm font-semibold text-red-700" role="alert">{contactError}</p>}
                   </div>
                 </div>
               )}

@@ -14,12 +14,20 @@ import {
   Cell,
   Legend,
 } from "recharts";
-import { Booking, Driver, Vehicle, Customer } from "../types";
+import { Booking, Driver, Vehicle, Customer, PenaltyRecord } from "../types";
+import { StatusBadge, PaymentBadge } from "../components/booking/BookingBadges";
+import OperationsSection from "../components/dashboard/OperationsSection";
+import CreateBookingLauncher from "../components/CreateBookingLauncher";
+import { useNow } from "../hooks/useNow";
+import { useOperationsSettings } from "../hooks/useOperationsSettings";
+import { paymentOf } from "../domain/bookingFlow";
+import { ErrorBanner, Toast, useToast } from "../components/Feedback";
 import {
   subscribeBookings,
   subscribeDrivers,
   subscribeVehicles,
   subscribeCustomers,
+  subscribePenalties,
 } from "../services/adminFirestoreService";
 import {
   parseAmount,
@@ -27,6 +35,7 @@ import {
   isPaid,
   formatINR,
 } from "../utils/analytics";
+import { formatDateTime12, formatShortDateTime12, formatHourLabel } from "../utils/time";
 
 const categoryColors: Record<string, string> = {
   "Airport Taxi": "#E21B23",
@@ -36,45 +45,21 @@ const categoryColors: Record<string, string> = {
   "Tour Package": "#8B5CF6",
 };
 
-const StatusBadge = ({ status }: { status: string }) => {
-  const styles: Record<string, string> = {
-    Completed: "bg-green-50 text-green-700 border-green-200",
-    Confirmed: "bg-blue-50 text-blue-700 border-blue-200",
-    Ongoing: "bg-orange-50 text-orange-700 border-orange-200",
-    Pending: "bg-yellow-50 text-yellow-700 border-yellow-200",
-    Cancelled: "bg-red-50 text-[#E21B23] border-red-200",
-    Assigned: "bg-purple-50 text-purple-700 border-purple-200",
-  };
-  return (
-    <span
-      className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${styles[status] || "bg-gray-50 text-gray-600 border-gray-200"}`}
-    >
-      {status}
-    </span>
-  );
-};
-
-const PaymentBadge = ({ status }: { status: string }) => {
-  const styles: Record<string, string> = {
-    Paid: "text-green-700 bg-green-50",
-    Pending: "text-yellow-700 bg-yellow-50",
-    Unpaid: "text-red-700 bg-red-50",
-    Refunded: "text-gray-600 bg-gray-100",
-  };
-  return (
-    <span
-      className={`inline-flex px-2 py-0.5 rounded text-[11px] font-semibold ${styles[status] || "bg-gray-50 text-gray-600"}`}
-    >
-      {status}
-    </span>
-  );
-};
-
 export default function Dashboard({
   onNavigate,
+  onSelectBooking,
 }: {
   onNavigate: (page: string) => void;
+  onSelectBooking: (id: string) => void;
 }) {
+  const [showCreate, setShowCreate] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+  const [livePenalties, setLivePenalties] = useState<PenaltyRecord[]>([]);
+  const now = useNow(30000);
+  const ops = useOperationsSettings();
+  const { toast, show: showToast } = useToast(9000);
   const [revenueTab, setRevenueTab] = useState("month");
   const [liveBookings, setLiveBookings] = useState<Booking[]>([]);
   const [liveDrivers, setLiveDrivers] = useState<Driver[]>([]);
@@ -82,17 +67,21 @@ export default function Dashboard({
   const [liveCustomers, setLiveCustomers] = useState<Customer[]>([]);
 
   useEffect(() => {
-    const unsub1 = subscribeBookings(setLiveBookings);
-    const unsub2 = subscribeDrivers(setLiveDrivers);
-    const unsub3 = subscribeVehicles(setLiveVehicles);
-    const unsub4 = subscribeCustomers(setLiveCustomers);
+    setLoadError(null);
+    setLoaded(false);
+    const unsub1 = subscribeBookings((d) => { setLiveBookings(d); setLoaded(true); }, setLoadError);
+    const unsub2 = subscribeDrivers(setLiveDrivers, setLoadError);
+    const unsub3 = subscribeVehicles(setLiveVehicles, setLoadError);
+    const unsub4 = subscribeCustomers(setLiveCustomers, setLoadError);
+    const unsub5 = subscribePenalties(setLivePenalties, setLoadError);
     return () => {
       unsub1();
       unsub2();
       unsub3();
       unsub4();
+      unsub5();
     };
-  }, []);
+  }, [retryKey]);
 
   const activeTripsCount = liveBookings.filter(
     (b) =>
@@ -143,7 +132,7 @@ export default function Dashboard({
           now.getDate(),
           h + 3,
         );
-        buckets.push({ label: `${String(h).padStart(2, "0")}:00`, start, end });
+        buckets.push({ label: formatHourLabel(h), start, end });
       }
     } else {
       // month — last 30 days
@@ -270,7 +259,35 @@ export default function Dashboard({
   };
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-4 md:p-6 space-y-6">
+      <Toast toast={toast} />
+      {loadError && <ErrorBanner message={loadError} onRetry={() => setRetryKey((k) => k + 1)} />}
+
+      {/* Primary action + what needs attention now */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-bold text-[#111]">Operations</h2>
+          <p className="text-sm text-[#555]">What needs action now, and today’s and tomorrow’s trips.</p>
+        </div>
+        <button
+          onClick={() => setShowCreate(true)}
+          className="px-5 py-3 rounded-xl text-sm font-bold text-white bg-[#E21B23] hover:bg-[#c4151c] shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#E21B23]"
+        >
+          + Create New Booking
+        </button>
+      </div>
+      <OperationsSection bookings={liveBookings} penalties={livePenalties} now={now} thresholds={ops} loading={!loaded && !loadError} onNavigate={onNavigate} onSelectBooking={onSelectBooking} />
+      {showCreate && (
+        <CreateBookingLauncher
+          onClose={() => setShowCreate(false)}
+          onCreated={(created) => {
+            setShowCreate(false);
+            showToast(`Booking ${created.bookingId} created and waiting for approval.`);
+          }}
+        />
+      )}
+
+      <h2 className="text-lg font-bold text-[#111] pt-2">Business overview</h2>
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
         {kpiCards.map((card, i) => (
@@ -660,7 +677,7 @@ export default function Dashboard({
                     {b.fare}
                   </td>
                   <td className="px-4 py-3">
-                    <PaymentBadge status={b.payment} />
+                    <PaymentBadge status={paymentOf(b).status} />
                   </td>
                   <td className="px-4 py-3">
                     <StatusBadge status={b.status} />

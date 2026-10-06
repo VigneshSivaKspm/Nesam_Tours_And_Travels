@@ -23,8 +23,13 @@ export interface DriverProfile {
   pincode: string;
   emergencyContactName: string;
   emergencyContact: string;
-  rating: number;
+  /** null until the driver has been rated. */
+  rating: number | null;
+  /** "" when the account creation date is not recorded. */
   joiningDate: string;
+  /** vehicles/{id} this driver is paired with (by admin or fleet); "" when none. */
+  assignedVehicleId: string;
+  assignedVehicleNumber: string;
   vendorId?: string;
   vendorName?: string;
   approvalStatus: ApprovalStatus;
@@ -97,16 +102,20 @@ export interface DriverAccount extends RegistrationData {
   driver: DriverProfile;
 }
 
+/**
+ * Vehicle verification photos (front, rear, dashboard/interior), captured with the
+ * camera inside a server-issued session. Older trips may carry the earlier
+ * four-photo record instead, including a driver selfie that is no longer asked for.
+ */
 export interface PreTripPhotos {
-  selfie: string;
-  vehicleFront: string;
-  odometer: string;
-  rearSeat: string;
   odometerReading: number;
   capturedAt: string;
 }
 
-// Driver-reported progress, stored on the booking as `tripStage`.
+// The three driver steps, advanced only by the server (advanceTrip).
+export type TripSubStatus = 'Not Started' | 'Trip Started' | 'Reached Pickup' | 'Trip Ended';
+
+// Legacy driver-reported progress, still stored on the booking as `tripStage`.
 export type TripStage =
   | 'Assigned'
   | 'En Route Pickup'
@@ -116,7 +125,23 @@ export type TripStage =
   | 'Completed';
 
 // Booking lifecycle status (see firestore.rules).
-export type BookingStatus = 'Pending' | 'Confirmed' | 'Assigned' | 'Ongoing' | 'Completed' | 'Cancelled';
+export type BookingStatus = 'Pending' | 'Approved' | 'Confirmed' | 'Assigned' | 'Ongoing' | 'Completed' | 'Cancelled' | 'Rejected';
+
+export interface FareLine {
+  key: string;
+  label: string;
+  amount: number | null;
+  treatment: 'included' | 'extra' | 'not_applicable';
+  detail: string;
+}
+
+export interface PaymentSummary {
+  amountDue: number;
+  totalPaid: number;
+  balanceDue: number;
+  partnerCashHeld: number;
+  status: string;
+}
 
 export interface TripLocation {
   address: string;
@@ -143,19 +168,37 @@ export interface TripDetails {
   vehicleType: string;
   serviceType: string;
   fareAmount: number;
-  driverEarnings: number;
+  /** Agreed payout for this driver (independent trips); null when not recorded or a fleet trip. */
+  driverEarnings: number | null;
+  /** Assigned through a fleet vendor, who settles the driver's pay. */
+  fleetTrip: boolean;
   tollCharges: number;
+  tollsApproved: boolean;
   status: BookingStatus;
   stage: TripStage;
   scheduledDate: string;
   scheduledTime: string;
   paymentMode: string;
-  withdrawableAmount: number;
   startOdometer?: number;
   endOdometer?: number;
   preTrip?: PreTripPhotos;
   tolls: TollReceipt[];
   completedAt?: Date | null;
+  /** Server-validated trip step. */
+  subStatus: TripSubStatus;
+  /** Pickup instant; the date/time strings above are display copies for older bookings. */
+  pickupAt: Date | null;
+  /** The three vehicle photos were captured and submitted for this trip. */
+  verificationSubmitted: boolean;
+  /** The customer's boarding OTP has been verified. */
+  boardingVerified: boolean;
+  /** Older trips verified the OTP when starting; they have no separate boarding step. */
+  legacyFlow: boolean;
+  fareBreakup: FareLine[] | null;
+  paymentSummary: PaymentSummary | null;
+  tripStartedAt: Date | null;
+  reachedPickupAt: Date | null;
+  tripEndedAt: Date | null;
 }
 
 /** An open marketplace offer a driver may accept. */
@@ -166,11 +209,14 @@ export interface MarketplaceOffer {
   drop: TripLocation;
   pickupTime: string;
   travelDate: string;
+  pickupAt: Date | null;
   vehicleCategory: string;
   distanceKm: number;
-  offeredPayout: number;
+  /** null when the offer has no valid payout (it cannot be accepted). */
+  offeredPayout: number | null;
 }
 
+/** Credited earnings (trip payouts + approved tolls) from the partner ledger. */
 export interface DriverEarningsSummary {
   todayEarnings: number;
   thisWeekEarnings: number;
@@ -178,6 +224,31 @@ export interface DriverEarningsSummary {
   lifetimeEarnings: number;
   totalTripsCompleted: number;
   tollReimbursements: number;
+}
+
+/** wallets/driver_{uid} — computed by the server from the partner ledger. */
+export interface DriverWallet {
+  /** Withdrawable now; negative when cash fares collected exceed earnings. */
+  available: number;
+  /** Earnings on trips whose customer payment is not verified yet. */
+  pending: number;
+  reserved: number;
+  paidOut: number;
+  cashCollected: number;
+  tripEarnings: number;
+  tollReimbursements: number;
+}
+
+/** wallet_ledger entry (schema 2) for this driver. */
+export interface LedgerEntry {
+  id: string;
+  type: string;
+  direction: 'credit' | 'debit';
+  amount: number;
+  status: string;
+  bookingId: string;
+  bookingCode: string;
+  createdAt: Date | null;
 }
 
 export interface PayoutRequest {
@@ -189,6 +260,9 @@ export interface PayoutRequest {
   status: string; // Pending | Paid | Deferred | Rejected
 }
 
+export type NotificationCategory = 'bookings' | 'approvals' | 'trips' | 'payments' | 'penalties' | 'general';
+export type NotificationSeverity = 'info' | 'success' | 'warning' | 'critical';
+
 export interface DriverNotification {
   id: string;
   title: string;
@@ -196,4 +270,32 @@ export interface DriverNotification {
   time: string;
   read: boolean;
   createdAtMs: number;
+  category: NotificationCategory;
+  severity: NotificationSeverity;
+  sound: 'new_booking' | 'approval' | 'general';
+  bookingId: string;
+  bookingCode: string;
+  ctaLabel: string;
+  ctaPage: string;
+  /** false = quiet inbox entry (no popup or tone). */
+  popup: boolean;
+}
+
+export type PenaltyStatus = 'Pending' | 'Acknowledged' | 'Paid' | 'Deducted' | 'Waived' | 'Disputed';
+
+export interface DriverPenalty {
+  id: string;
+  amount: number;
+  category: string;
+  reason: string;
+  description: string;
+  bookingCode: string;
+  bookingId: string;
+  incidentDate: string;
+  status: PenaltyStatus;
+  acknowledged: boolean;
+  acknowledgedAt: Date | null;
+  disputeNote: string;
+  issuedAt: Date | null;
+  issuedByName: string;
 }

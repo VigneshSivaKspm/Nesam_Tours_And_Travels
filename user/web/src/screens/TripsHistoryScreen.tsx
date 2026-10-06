@@ -35,7 +35,7 @@ export const TripsHistoryScreen: React.FC<TripsHistoryScreenProps> = ({ profile,
     filter === 'All'
       ? true
       : filter === 'Upcoming'
-        ? ['Pending', 'Confirmed', 'Assigned', 'Ongoing', 'In Progress'].includes(t.status)
+        ? ['Pending', 'Approved', 'Confirmed', 'Assigned', 'Ongoing', 'In Progress'].includes(t.status)
         : filter === 'Completed'
           ? t.status === 'Completed'
           : t.status === 'Cancelled',
@@ -118,7 +118,7 @@ export const TripsHistoryScreen: React.FC<TripsHistoryScreenProps> = ({ profile,
                   >
                     {isActiveStatus(t.status) ? 'Track ride' : needsRating ? 'Receipt & rate' : 'View details'}
                   </button>
-                  {['Pending', 'Confirmed'].includes(t.status) && (
+                  {['Pending', 'Approved', 'Confirmed'].includes(t.status) && (
                     <button
                       onClick={() => setCancelTrip(t)}
                       className="px-4 py-2 rounded-xl text-xs font-bold bg-red-50 text-[#D92D20] border border-red-200"

@@ -6,6 +6,7 @@ import { BottomNavigation, NavTab } from './components/BottomNavigation';
 import { NetworkBanner } from './components/NetworkBanner';
 import { ErrorNotice, FullScreenLoader, secondaryBtn } from './components/ui';
 import { AuthFlow } from './screens/AuthFlow';
+import { LegalGate } from './components/LegalGate';
 import { RideBookingScreen } from './screens/RideBookingScreen';
 import { ActiveRideScreen } from './screens/ActiveRideScreen';
 import { TripsHistoryScreen } from './screens/TripsHistoryScreen';
@@ -20,7 +21,8 @@ import { isLiveRide, subscribeToUserBookings } from './services/rideService';
 import { SUPPORT_PHONE, SUPPORT_PHONE_DISPLAY } from './config/constants';
 import { describeError } from './utils/retry';
 
-const BLOCKED_STATUSES = ['Blocked', 'Suspended', 'Rejected', 'Inactive'];
+/** Customer statuses that may use the app ('Active' is a legacy spelling) — same list as firestore.rules. */
+const ACTIVE_STATUSES = ['Approved', 'Active'];
 /** Completed trips younger than this re-open for a rating prompt. */
 const RATING_PROMPT_WINDOW_MS = 3 * 60 * 60 * 1000;
 
@@ -68,14 +70,18 @@ export default function App() {
       </div>
     );
   else if (profile === undefined) body = <FullScreenLoader label="Loading your account…" />;
-  else if (profile === null) body = <AuthFlow mode="needs-profile" uid={authUser.uid} phone={authUser.phoneNumber ?? ''} />;
-  else if (BLOCKED_STATUSES.includes(profile.status))
+  else if (profile === null) body = (
+      <LegalGate role="customer">
+        <AuthFlow mode="needs-profile" uid={authUser.uid} phone={authUser.phoneNumber ?? ''} />
+      </LegalGate>
+    );
+  else if (!ACTIVE_STATUSES.includes(profile.status))
     body = (
       <div className="min-h-screen flex items-center justify-center p-6 bg-[#F7F7F7] text-center">
         <div className="max-w-sm space-y-3">
           <h1 className="text-lg font-black text-gray-900">Account on hold</h1>
           <p className="text-sm text-gray-600">
-            Your account is currently {profile.status.toLowerCase()}. Please call{' '}
+            Your account is not active right now. Please call{' '}
             <a className="font-bold" href={`tel:${SUPPORT_PHONE}`}>
               {SUPPORT_PHONE_DISPLAY}
             </a>{' '}
@@ -87,7 +93,12 @@ export default function App() {
         </div>
       </div>
     );
-  else body = <RiderApp profile={profile} />;
+  else
+    body = (
+      <LegalGate role="customer">
+        <RiderApp profile={profile} />
+      </LegalGate>
+    );
 
   return (
     <>

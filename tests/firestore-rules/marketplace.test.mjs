@@ -32,29 +32,15 @@ async function seed(id) {
   await put('vendors/vendor2', { status: 'APPROVED' });
   for (const n of [1, 2]) await put(`marketplace_trips/${id}/bids/bid${n}`, { status: 'Pending Review', vendorId: `vendor${n}`, vendorName: `V${n}`, vendorCounterRate: 900 });
 }
-test('admin: real Pending Review bid awards the document ID and resolves competing bids', async () => {
-  await seed('award1');
-  await ops.awardBid('award1', 'bid1');
-  assert.equal((await get('bookings/award1')).status, 'Confirmed');
-  assert.equal((await get('bookings/award1')).vendorPayout, 900);
-  assert.equal((await get('marketplace_trips/award1')).status, 'Assigned');
-  assert.equal((await get('marketplace_trips/award1/bids/bid2')).status, 'Rejected');
-  assert.equal(await get('bookings/DISPLAY-award1'), undefined);
-});
-test('admin: racing awards have exactly one winner', async () => {
-  await seed('award2');
-  const results = await Promise.allSettled([ops.awardBid('award2', 'bid1'), ops.awardBid('award2', 'bid2')]);
-  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
-});
-test('admin: rejecting one bid leaves the trip available; posting resolves display code', async () => {
+// Awarding a bid and posting a booking decide a partner payout, so they run on
+// the server (finance.test.mjs). Rejecting a bid is the only client operation.
+test('admin: rejecting one bid leaves the trip and the other bids open', async () => {
   await seed('award3');
   await ops.rejectBid('award3', 'bid1');
+  assert.equal((await get('marketplace_trips/award3/bids/bid1')).status, 'Rejected');
+  assert.equal((await get('marketplace_trips/award3/bids/bid2')).status, 'Pending Review');
   assert.equal((await get('marketplace_trips/award3')).status, 'Bidding');
-  await put('bookings/post1', { bookingId: 'DISPLAY-POST', status: 'Pending', fare: 1000, pickup: 'A', drop: 'B' });
-  await ops.postBooking('DISPLAY-POST', 850);
-  assert.equal((await get('marketplace_trips/post1')).offeredPayout, 850);
-  assert.equal((await get('bookings/post1')).fareVerified, true);
-  await assert.rejects(ops.postBooking('DISPLAY-POST', 1001), /within/);
+  assert.equal((await get('bookings/award3')).status, 'Pending');
 });
 
 const paymentSource = readFileSync(new URL('../../admin/src/services/paymentReconciliation.ts', import.meta.url), 'utf8');

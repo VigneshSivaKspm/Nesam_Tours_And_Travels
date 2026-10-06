@@ -1,26 +1,23 @@
 import { useState, useEffect, useMemo } from "react";
+import FareAdjustmentCard from "../components/FareAdjustmentCard";
+import { FareRule, PricingModel, TravelService, VehicleCategory, MasterLocation, FareCalculationInput } from "../types";
+import { subscribeFareRules, subscribeServices, subscribeVehicleCategories, subscribeLocations } from "../services/adminFirestoreService";
+import { calculateCentralFare } from "../services/fareEngine";
 import {
-  FareRule,
-  PricingModel,
-  TravelService,
-  VehicleCategory,
-  MasterLocation,
-  Booking,
-  FareCalculationInput,
-  FareCalculationResult,
-} from "../types";
-import {
-  subscribeFareRules,
-  subscribeServices,
-  subscribeVehicleCategories,
-  subscribeLocations,
-  subscribeBookings,
-  addFirestoreDocument,
-  setFirestoreDocument,
-  deleteFirestoreDocument,
-  COLLECTIONS,
-} from "../services/adminFirestoreService";
-import { calculateCentralFare, isNightTime } from "../services/fareEngine";
+  FareRuleActionError,
+  deleteFareRule,
+  duplicateFareRule,
+  emptyFareRuleForm,
+  formFromRule,
+  saveFareRule,
+  setFareRuleStatus,
+  validateFareRule,
+  type FareRuleField,
+  type FareRuleForm,
+} from "../services/fareRuleService";
+import AppFarePreview from "../components/AppFarePreview";
+import { auth } from "../services/firebase";
+import { ConfirmDialog, ErrorBanner, Toast, useToast } from "../components/Feedback";
 
 const PRICING_MODELS: { value: PricingModel; label: string; desc: string }[] = [
   { value: "BASE_PLUS_PER_KM", label: "Base Fare + Per KM", desc: "Initial base fare covering base KM, then per-KM rate for extra distance." },
@@ -38,13 +35,23 @@ const MODEL_BADGES: Record<PricingModel, { bg: string; text: string; border: str
   PER_DAY: { bg: "bg-indigo-50", text: "text-indigo-700", border: "border-indigo-200" },
 };
 
+type FormTab = "identity" | "pricing" | "allowances" | "overrides";
+const TAB_FIELDS: Record<FormTab, FareRuleField[]> = {
+  identity: ["name", "code", "vehicleCategoryId", "pricingType", "originLocationId", "destinationLocationId"],
+  pricing: ["baseFare", "baseKm", "perKmRate", "minimumKmPerDay", "minimumFare", "includedHours", "extraKmRate", "extraHourRate"],
+  allowances: ["driverBatta", "nightStartTime", "nightChargeValue", "freeWaitingMinutes", "waitingChargePerHour"],
+  overrides: ["fixedTollAmount", "fixedParkingAmount", "permitCharge", "priority", "effectiveFrom", "effectiveUntil"],
+};
+const errText = (e: unknown) => (e instanceof FareRuleActionError ? e.message : "Something went wrong. Please try again.");
+
 export default function Pricing() {
   const [fareRules, setFareRules] = useState<FareRule[]>([]);
   const [services, setServices] = useState<TravelService[]>([]);
   const [categories, setCategories] = useState<VehicleCategory[]>([]);
   const [locations, setLocations] = useState<MasterLocation[]>([]);
-  const [bookings, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
 
   // Filters & Controls
   const [search, setSearch] = useState("");
@@ -58,142 +65,58 @@ export default function Pricing() {
   const [editingRule, setEditingRule] = useState<FareRule | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"identity" | "pricing" | "allowances" | "overrides">("identity");
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<FareRuleField, string>>>({});
+  const [activeTab, setActiveTab] = useState<FormTab>("identity");
+  const [formData, setFormData] = useState<FareRuleForm>(emptyFareRuleForm);
 
-  // Form Data
-  const [formData, setFormData] = useState<{
-    name: string;
-    code: string;
-    serviceId: string;
-    serviceName: string;
-    vehicleCategoryId: string;
-    vehicleCategoryName: string;
-    pricingType: PricingModel;
-    originLocationId: string;
-    destinationLocationId: string;
-    baseFare: number;
-    baseKm: number;
-    perKmRate: number;
-    minimumKmPerDay: number;
-    minimumFare: number;
-    includedHours: number;
-    extraKmRate: number;
-    extraHourRate: number;
-    driverBatta: number;
-    nightChargeEnabled: boolean;
-    nightStartTime: string;
-    nightEndTime: string;
-    nightChargeType: "Fixed" | "Percentage";
-    nightChargeValue: number;
-    freeWaitingMinutes: number;
-    waitingChargePerHour: number;
-    tollMode: "Included" | "Excluded" | "Fixed";
-    fixedTollAmount: number;
-    parkingMode: "Included" | "Excluded" | "Fixed";
-    fixedParkingAmount: number;
-    permitCharge: number;
-    priority: number;
-    status: "Active" | "Inactive";
-    effectiveFrom: string;
-    effectiveUntil: string;
-  }>({
-    name: "",
-    code: "",
-    serviceId: "",
-    serviceName: "",
-    vehicleCategoryId: "",
-    vehicleCategoryName: "",
-    pricingType: "BASE_PLUS_PER_KM",
-    originLocationId: "",
-    destinationLocationId: "",
-    baseFare: 350,
-    baseKm: 10,
-    perKmRate: 13,
-    minimumKmPerDay: 250,
-    minimumFare: 350,
-    includedHours: 4,
-    extraKmRate: 14,
-    extraHourRate: 120,
-    driverBatta: 250,
-    nightChargeEnabled: true,
-    nightStartTime: "22:00",
-    nightEndTime: "05:00",
-    nightChargeType: "Percentage",
-    nightChargeValue: 15,
-    freeWaitingMinutes: 15,
-    waitingChargePerHour: 80,
-    tollMode: "Excluded",
-    fixedTollAmount: 0,
-    parkingMode: "Excluded",
-    fixedParkingAmount: 0,
-    permitCharge: 0,
-    priority: 1,
-    status: "Active",
-    effectiveFrom: "",
-    effectiveUntil: "",
-  });
-
-  // Central Test Calculator Widget State
+  // Rate-card calculator (admin / phone quotations)
   const [calcInput, setCalcInput] = useState<FareCalculationInput>({
-    serviceName: "Airport Taxi",
+    serviceId: "",
     vehicleCategoryId: "",
-    distanceKm: 25,
+    distanceKm: 0,
     tripDays: 1,
-    tripHours: 4,
-    pickupTime: "23:00",
-    waitingMinutes: 30,
-    tollAmount: 100,
-    parkingAmount: 50,
+    tripHours: 0,
+    pickupTime: "",
+    waitingMinutes: 0,
+    tollAmount: 0,
+    parkingAmount: 0,
     permitAmount: 0,
     discountAmount: 0,
   });
-  const [calcResult, setCalcResult] = useState<FareCalculationResult | null>(null);
 
-  // Delete & Safety Dialog
+  // Delete / row actions
   const [deletingRule, setDeletingRule] = useState<FareRule | null>(null);
-  const [deleteRefNotice, setDeleteRefNotice] = useState<string | null>(null);
-
-  // Toast Notification
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [rowBusyId, setRowBusyId] = useState<string | null>(null);
+  const { toast, show: showToast } = useToast();
 
   useEffect(() => {
-    const unsubF = subscribeFareRules((data) => {
-      setFareRules(data);
+    setLoading(true);
+    setLoadError(null);
+    const fail = (m: string) => {
+      setLoadError(m);
       setLoading(false);
-    });
-    const unsubS = subscribeServices(setServices);
-    const unsubC = subscribeVehicleCategories((data) => {
-      setCategories(data);
-      if (data.length > 0 && !calcInput.vehicleCategoryId) {
-        setCalcInput((prev) => ({ ...prev, vehicleCategoryId: data[0].id }));
-      }
-    });
-    const unsubL = subscribeLocations(setLocations);
-    const unsubB = subscribeBookings(setBookings);
-
-    return () => {
-      unsubF();
-      unsubS();
-      unsubC();
-      unsubL();
-      unsubB();
     };
-  }, []);
+    const unsubs = [
+      subscribeFareRules((data) => {
+        setFareRules(data);
+        setLoading(false);
+      }, fail),
+      subscribeServices(setServices, fail),
+      subscribeVehicleCategories(setCategories, fail),
+      subscribeLocations(setLocations, fail),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, [retryKey]);
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 4000);
-  };
+  const calcCategoryId = calcInput.vehicleCategoryId || categories.find((c) => c.status === "Active")?.id || "";
+  const calcResult = useMemo(() => {
+    if (!calcCategoryId || !(Number(calcInput.distanceKm) > 0)) return null;
+    const svc = services.find((s) => s.id === calcInput.serviceId);
+    return calculateCentralFare({ ...calcInput, vehicleCategoryId: calcCategoryId, serviceName: svc?.name }, fareRules, categories);
+  }, [calcInput, calcCategoryId, fareRules, categories, services]);
 
-  // Run central fare calculation for preview widget whenever inputs, rules or categories change
-  useEffect(() => {
-    if (categories.length > 0) {
-      const result = calculateCentralFare(calcInput, fareRules, categories);
-      setCalcResult(result);
-    }
-  }, [calcInput, fareRules, categories]);
-
-  // Dashboard Summary Stats
   const stats = useMemo(() => {
     const total = fareRules.length;
     const active = fareRules.filter((r) => r.status === "Active").length;
@@ -202,311 +125,106 @@ export default function Pricing() {
     return { total, active, servicesCount, categoriesCount };
   }, [fareRules]);
 
-  // Filtered Rules
   const filteredRules = useMemo(() => {
+    const q = search.trim().toLowerCase();
     return fareRules.filter((rule) => {
-      const q = search.trim().toLowerCase();
-      const matchSearch =
-        !q ||
-        rule.name.toLowerCase().includes(q) ||
-        (rule.serviceName && rule.serviceName.toLowerCase().includes(q)) ||
-        (rule.vehicleCategoryName && rule.vehicleCategoryName.toLowerCase().includes(q)) ||
-        (rule.code && rule.code.toLowerCase().includes(q));
-
+      const matchSearch = !q || [rule.name, rule.serviceName, rule.vehicleCategoryName, rule.code].some((v) => (v || "").toLowerCase().includes(q));
       const matchService = serviceFilter === "All" || rule.serviceName === serviceFilter || rule.serviceId === serviceFilter;
       const matchCategory = categoryFilter === "All" || rule.vehicleCategoryId === categoryFilter;
       const matchModel = modelFilter === "All" || rule.pricingType === modelFilter;
       const matchStatus = statusFilter === "All" || rule.status === statusFilter;
-
       return matchSearch && matchService && matchCategory && matchModel && matchStatus;
     });
   }, [fareRules, search, serviceFilter, categoryFilter, modelFilter, statusFilter]);
 
-  // Open Create Form
-  const handleOpenCreate = () => {
-    setEditingRule(null);
-    const defaultCat = categories.find((c) => c.status === "Active") || categories[0];
-    const defaultSrv = services.find((s) => s.status === "Active") || services[0];
+  const tabHasError = (tab: FormTab) => TAB_FIELDS[tab].some((f) => fieldErrors[f]);
+  const errNode = (f: FareRuleField) => (fieldErrors[f] ? <p className="text-[10px] text-red-600 mt-1">{fieldErrors[f]}</p> : null);
 
-    setFormData({
-      name: "",
-      code: "",
-      serviceId: defaultSrv ? defaultSrv.id : "",
-      serviceName: defaultSrv ? defaultSrv.name : "Airport Taxi",
-      vehicleCategoryId: defaultCat ? defaultCat.id : "",
-      vehicleCategoryName: defaultCat ? defaultCat.name : "Sedan",
-      pricingType: "BASE_PLUS_PER_KM",
-      originLocationId: "",
-      destinationLocationId: "",
-      baseFare: defaultCat?.fare?.baseFare || 350,
-      baseKm: defaultCat?.fare?.baseKm || 10,
-      perKmRate: defaultCat?.fare?.perKmRate || 13,
-      minimumKmPerDay: 250,
-      minimumFare: 350,
-      includedHours: 4,
-      extraKmRate: 14,
-      extraHourRate: 120,
-      driverBatta: defaultCat?.fare?.driverAllowance || 250,
-      nightChargeEnabled: true,
-      nightStartTime: "22:00",
-      nightEndTime: "05:00",
-      nightChargeType: "Percentage",
-      nightChargeValue: 15,
-      freeWaitingMinutes: 15,
-      waitingChargePerHour: defaultCat?.fare?.waitingChargePerHour || 80,
-      tollMode: "Excluded",
-      fixedTollAmount: 0,
-      parkingMode: "Excluded",
-      fixedParkingAmount: 0,
-      permitCharge: 0,
-      priority: 1,
-      status: "Active",
-      effectiveFrom: new Date().toISOString().split("T")[0],
-      effectiveUntil: "",
-    });
-
-    setFormError(null);
-    setActiveTab("identity");
-    setShowModal(true);
-  };
-
-  // Open Edit Form
-  const handleOpenEdit = (rule: FareRule) => {
+  const openForm = (rule: FareRule | null) => {
     setEditingRule(rule);
-    setFormData({
-      name: rule.name || "",
-      code: rule.code || "",
-      serviceId: rule.serviceId || "",
-      serviceName: rule.serviceName || "",
-      vehicleCategoryId: rule.vehicleCategoryId || "",
-      vehicleCategoryName: rule.vehicleCategoryName || "",
-      pricingType: rule.pricingType || "BASE_PLUS_PER_KM",
-      originLocationId: rule.originLocationId || "",
-      destinationLocationId: rule.destinationLocationId || "",
-      baseFare: rule.baseFare || 0,
-      baseKm: rule.baseKm || 0,
-      perKmRate: rule.perKmRate || 0,
-      minimumKmPerDay: rule.minimumKmPerDay || 250,
-      minimumFare: rule.minimumFare || 0,
-      includedHours: rule.includedHours || 4,
-      extraKmRate: rule.extraKmRate || 0,
-      extraHourRate: rule.extraHourRate || 0,
-      driverBatta: rule.driverBatta || 0,
-      nightChargeEnabled: rule.nightChargeEnabled !== false,
-      nightStartTime: rule.nightStartTime || "22:00",
-      nightEndTime: rule.nightEndTime || "05:00",
-      nightChargeType: rule.nightChargeType || "Percentage",
-      nightChargeValue: rule.nightChargeValue || 15,
-      freeWaitingMinutes: rule.freeWaitingMinutes || 15,
-      waitingChargePerHour: rule.waitingChargePerHour || 80,
-      tollMode: rule.tollMode || "Excluded",
-      fixedTollAmount: rule.fixedTollAmount || 0,
-      parkingMode: rule.parkingMode || "Excluded",
-      fixedParkingAmount: rule.fixedParkingAmount || 0,
-      permitCharge: rule.permitCharge || 0,
-      priority: rule.priority || 1,
-      status: rule.status || "Active",
-      effectiveFrom: rule.effectiveFrom || "",
-      effectiveUntil: rule.effectiveUntil || "",
-    });
-
+    setFormData(rule ? formFromRule(rule) : { ...emptyFareRuleForm(), vehicleCategoryId: categories.find((c) => c.status === "Active")?.id || "" });
     setFormError(null);
+    setFieldErrors({});
     setActiveTab("identity");
     setShowModal(true);
   };
+  const handleOpenCreate = () => openForm(null);
+  const handleOpenEdit = (rule: FareRule) => openForm(rule);
 
-  // Save Form Handler
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setFormError(null);
-
-    const nameTrim = formData.name.trim();
-    if (!nameTrim) {
-      setFormError("Rule Name is required.");
-      setActiveTab("identity");
+    const errors = validateFareRule(formData, fareRules, editingRule?.id ?? null);
+    setFieldErrors(errors);
+    const keys = Object.keys(errors) as FareRuleField[];
+    if (keys.length) {
+      setFormError(`Please fix: ${keys.map((k) => errors[k]).join(" ")}`);
+      const tab = (Object.keys(TAB_FIELDS) as FormTab[]).find((t) => TAB_FIELDS[t].includes(keys[0]));
+      if (tab) setActiveTab(tab);
       return;
     }
-
-    if (!formData.vehicleCategoryId) {
-      setFormError("Please select a Vehicle Category.");
-      setActiveTab("identity");
-      return;
-    }
-
-    if (formData.pricingType === "FIXED_ROUTE") {
-      if (!formData.originLocationId || !formData.destinationLocationId) {
-        setFormError("Origin and Destination locations are required for Fixed Route pricing.");
-        setActiveTab("identity");
-        return;
-      }
-    }
-
-    // Overlapping Rule Protection Check
-    const overlapping = fareRules.find(
-      (r) =>
-        r.status === "Active" &&
-        r.vehicleCategoryId === formData.vehicleCategoryId &&
-        r.serviceName === formData.serviceName &&
-        r.pricingType === formData.pricingType &&
-        (!editingRule || r.id !== editingRule.id) &&
-        (formData.pricingType !== "FIXED_ROUTE" ||
-          (r.originLocationId === formData.originLocationId && r.destinationLocationId === formData.destinationLocationId))
-    );
-
-    if (overlapping && formData.status === "Active") {
-      setFormError(
-        `An active fare rule "${overlapping.name}" already covers ${formData.serviceName} + ${formData.vehicleCategoryName}. Deactivate it first or change rule scope.`
-      );
-      setActiveTab("identity");
-      return;
-    }
-
     setIsSubmitting(true);
-
-    const catObj = categories.find((c) => c.id === formData.vehicleCategoryId);
-    const srvObj = services.find((s) => s.id === formData.serviceId || s.name === formData.serviceName);
-    const originLoc = locations.find((l) => l.id === formData.originLocationId);
-    const destLoc = locations.find((l) => l.id === formData.destinationLocationId);
-
-    const payload: Partial<FareRule> = {
-      name: nameTrim,
-      code: formData.code.trim() || `FARE-${Date.now().toString().slice(-4)}`,
-      serviceId: srvObj ? srvObj.id : undefined,
-      serviceName: srvObj ? srvObj.name : formData.serviceName,
-      vehicleCategoryId: formData.vehicleCategoryId,
-      vehicleCategoryName: catObj ? catObj.name : formData.vehicleCategoryName,
-      pricingType: formData.pricingType,
-      originLocationId: formData.originLocationId || undefined,
-      originLocationName: originLoc ? originLoc.name : undefined,
-      destinationLocationId: formData.destinationLocationId || undefined,
-      destinationLocationName: destLoc ? destLoc.name : undefined,
-      baseFare: Number(formData.baseFare) || 0,
-      baseKm: Number(formData.baseKm) || 0,
-      perKmRate: Number(formData.perKmRate) || 0,
-      minimumKmPerDay: Number(formData.minimumKmPerDay) || 0,
-      minimumFare: Number(formData.minimumFare) || 0,
-      includedHours: Number(formData.includedHours) || 0,
-      extraKmRate: Number(formData.extraKmRate) || 0,
-      extraHourRate: Number(formData.extraHourRate) || 0,
-      driverBatta: Number(formData.driverBatta) || 0,
-      nightChargeEnabled: formData.nightChargeEnabled,
-      nightStartTime: formData.nightStartTime,
-      nightEndTime: formData.nightEndTime,
-      nightChargeType: formData.nightChargeType,
-      nightChargeValue: Number(formData.nightChargeValue) || 0,
-      freeWaitingMinutes: Number(formData.freeWaitingMinutes) || 0,
-      waitingChargePerHour: Number(formData.waitingChargePerHour) || 0,
-      tollMode: formData.tollMode,
-      fixedTollAmount: Number(formData.fixedTollAmount) || 0,
-      parkingMode: formData.parkingMode,
-      fixedParkingAmount: Number(formData.fixedParkingAmount) || 0,
-      permitCharge: Number(formData.permitCharge) || 0,
-      priority: Number(formData.priority) || 1,
-      status: formData.status,
-      effectiveFrom: formData.effectiveFrom,
-      effectiveUntil: formData.effectiveUntil,
-    };
-
-    let ok = false;
-    let newDocId: string | null = null;
-    if (editingRule) {
-      ok = await setFirestoreDocument(COLLECTIONS.FARE_RULES, editingRule.id, payload);
-    } else {
-      newDocId = await addFirestoreDocument(COLLECTIONS.FARE_RULES, payload);
-      ok = !!newDocId;
-    }
-
-    setIsSubmitting(false);
-
-    if (ok) {
-      if (editingRule) {
-        setFareRules((prev) => prev.map((r) => (r.id === editingRule.id ? ({ ...r, ...payload } as FareRule) : r)));
-      } else {
-        setFareRules((prev) => [{ id: newDocId || `FARE-${Date.now()}`, ...payload } as FareRule, ...prev]);
-      }
+    try {
+      await saveFareRule(formData, editingRule, { services, categories, locations }, auth.currentUser?.uid || "");
       setShowModal(false);
-      showToast(
-        editingRule
-          ? `Fare rule "${nameTrim}" updated successfully.`
-          : `Fare rule "${nameTrim}" created successfully.`
-      );
-    } else {
-      setFormError("Failed to save fare rule to database. Please check your internet connection.");
+      showToast(editingRule ? `Fare rule "${formData.name.trim()}" updated.` : `Fare rule "${formData.name.trim()}" created.`);
+    } catch (err) {
+      setFormError(errText(err));
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  // Toggle Active Status
-  const handleToggleStatus = async (rule: FareRule) => {
-    const nextStatus = rule.status === "Active" ? "Inactive" : "Active";
-    const ok = await setFirestoreDocument(COLLECTIONS.FARE_RULES, rule.id, {
-      status: nextStatus,
+  const rowAction = async (rule: FareRule, work: () => Promise<string>) => {
+    if (rowBusyId) return;
+    setRowBusyId(rule.id);
+    try {
+      showToast(await work());
+    } catch (err) {
+      showToast(errText(err), "error");
+    } finally {
+      setRowBusyId(null);
+    }
+  };
+  const handleToggleStatus = (rule: FareRule) =>
+    rowAction(rule, async () => {
+      const next = rule.status === "Active" ? "Inactive" : "Active";
+      await setFareRuleStatus(rule, next, fareRules);
+      return `Fare rule "${rule.name}" is now ${next}.`;
     });
-    if (ok) {
-      showToast(`Fare rule "${rule.name}" is now ${nextStatus}.`);
-    }
-  };
-
-  // Duplicate Fare Rule
-  const handleDuplicate = async (rule: FareRule) => {
-    const copyPayload: Partial<FareRule> = {
-      ...rule,
-      name: `${rule.name} (Copy)`,
-      code: `FARE-${Date.now().toString().slice(-4)}`,
-      status: "Inactive",
-    };
-    delete (copyPayload as any).id;
-
-    const newId = await addFirestoreDocument(COLLECTIONS.FARE_RULES, copyPayload);
-    if (newId) {
-      showToast(`Duplicated "${rule.name}" as new Inactive Draft rule.`);
-    }
-  };
-
-  // Prompt Delete
+  const handleDuplicate = (rule: FareRule) =>
+    rowAction(rule, async () => `Duplicated as inactive draft "${await duplicateFareRule(rule, fareRules, auth.currentUser?.uid || "")}".`);
   const handlePromptDelete = (rule: FareRule) => {
+    setDeleteError(null);
     setDeletingRule(rule);
-    setDeleteRefNotice(null);
-
-    // Check if any existing booking relies on this rule
-    const refBookings = bookings.filter(
-      (b) =>
-        (b.vehicleCategory && b.vehicleCategory.toLowerCase() === rule.vehicleCategoryName?.toLowerCase()) ||
-        (b.service && b.service.toLowerCase() === rule.serviceName?.toLowerCase())
-    );
-
-    if (refBookings.length > 0) {
-      setDeleteRefNotice(
-        `This rule covers ${refBookings.length} existing booking(s). Hard deletion will remove auditable fare parameters. Deactivating is recommended.`
-      );
-    }
   };
-
-  // Confirm Delete
   const handleConfirmDelete = async () => {
-    if (!deletingRule) return;
-    const ok = await deleteFirestoreDocument(COLLECTIONS.FARE_RULES, deletingRule.id);
-    if (ok) {
+    if (!deletingRule || deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await deleteFareRule(deletingRule);
       showToast(`Fare rule "${deletingRule.name}" deleted.`);
+      setDeletingRule(null);
+    } catch (err) {
+      setDeleteError(errText(err));
+    } finally {
+      setDeleteBusy(false);
     }
-    setDeletingRule(null);
   };
 
   return (
     <div className="p-4 lg:p-6 space-y-6 max-w-[1600px] mx-auto min-h-screen">
-      {/* Toast Notification */}
-      {toastMessage && (
-        <div className="fixed bottom-5 right-5 z-50 bg-[#111111] text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 border border-gray-800 animate-slide-up text-xs font-semibold">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-          {toastMessage}
-        </div>
-      )}
+      <Toast toast={toast} />
+      {loadError && <ErrorBanner message={loadError} onRetry={() => setRetryKey((k) => k + 1)} />}
 
       {/* Header Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-[#111111] tracking-tight">Pricing & Fare Management</h1>
           <p className="text-xs text-[#666] mt-0.5">
-            Centralized master engine for base fares, per-KM rates, driver batta, waiting charges, night surcharges & route fares.
+            Customer app fares come from vehicle category fares. Fare rules below are quotation rate cards for admin / phone bookings and are not applied to app bookings.
           </p>
         </div>
 
@@ -523,6 +241,8 @@ export default function Pricing() {
           </button>
         </div>
       </div>
+
+      <FareAdjustmentCard />
 
       {/* Summary Cards */}
       {fareRules.length > 0 && (
@@ -577,54 +297,42 @@ export default function Pricing() {
         </div>
       )}
 
-      {/* Central Interactive Fare Test Calculator Widget */}
+      <AppFarePreview categories={categories} />
+
+      {/* Rate-card quotation calculator (admin / phone bookings) */}
       <div className="bg-white rounded-2xl border border-[#E5E5E5] p-4 sm:p-5 space-y-4 shadow-xs">
-        <div className="flex items-center justify-between border-b border-[#E5E5E5] pb-3">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-red-50 text-[#E21B23] flex items-center justify-center font-bold text-xs">
-              ⚡
-            </div>
-            <div>
-              <h2 className="text-sm font-bold text-[#111111]">Central Fare Calculator Test Engine</h2>
-              <p className="text-[11px] text-[#666]">
-                Simulate trip parameters to test matching fare rules and real-time breakdowns.
-              </p>
-            </div>
-          </div>
-          <span className="text-[10px] font-semibold bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded border border-emerald-200">
-            Engine Connected
-          </span>
+        <div className="border-b border-[#E5E5E5] pb-3">
+          <h2 className="text-sm font-bold text-[#111111]">Rate Card Quotation Calculator</h2>
+          <p className="text-[11px] text-[#666]">
+            Quotes a trip from the active fare rules below (highest priority, currently effective). Use for admin / phone quotations — app bookings are priced from category fares above.
+          </p>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3 text-xs">
           <div>
             <label className="block text-[10px] font-semibold text-[#666] mb-1">Service Type</label>
             <select
-              value={calcInput.serviceName}
-              onChange={(e) => setCalcInput({ ...calcInput, serviceName: e.target.value })}
+              value={calcInput.serviceId || ""}
+              onChange={(e) => setCalcInput({ ...calcInput, serviceId: e.target.value })}
               className="w-full p-2 border border-[#E5E5E5] rounded-xl bg-white text-xs focus:border-[#E21B23] focus:outline-none"
             >
-              {services.length > 0
-                ? services.map((s) => (
-                    <option key={s.id} value={s.name}>
-                      {s.name}
-                    </option>
-                  ))
-                : ["Airport Taxi", "Outstation Cab", "One Way Taxi", "Local Rental", "Tour Package"].map((srv) => (
-                    <option key={srv} value={srv}>
-                      {srv}
-                    </option>
-                  ))}
+              <option value="">Any service</option>
+              {services.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
             </select>
           </div>
 
           <div>
             <label className="block text-[10px] font-semibold text-[#666] mb-1">Vehicle Category</label>
             <select
-              value={calcInput.vehicleCategoryId}
+              value={calcCategoryId}
               onChange={(e) => setCalcInput({ ...calcInput, vehicleCategoryId: e.target.value })}
               className="w-full p-2 border border-[#E5E5E5] rounded-xl bg-white text-xs focus:border-[#E21B23] focus:outline-none"
             >
+              {categories.length === 0 && <option value="">No categories</option>}
               {categories.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
@@ -675,17 +383,26 @@ export default function Pricing() {
         </div>
 
         {/* Live Calculation Output Display */}
+        {!calcResult && (
+          <p className="text-[11px] text-[#666] bg-gray-50 border border-[#E5E5E5] rounded-xl p-3">
+            {!calcCategoryId
+              ? "Add a vehicle category to quote fares."
+              : !(Number(calcInput.distanceKm) > 0)
+                ? "Enter a distance to calculate a quotation."
+                : "No active fare rule or category fare is configured for this service and category."}
+          </p>
+        )}
         {calcResult && (
           <div className="bg-gray-50 border border-[#E5E5E5] rounded-xl p-4 text-xs space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-200 pb-2">
               <div className="flex items-center gap-2">
                 <span className="font-bold text-[#111111]">Matched Rule:</span>
                 <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-white border border-gray-200 text-[#E21B23]">
-                  {calcResult.matchedRule ? calcResult.matchedRule.name : "Category Default Fallback"}
+                  {calcResult.matchedRule ? calcResult.matchedRule.name : "Vehicle category fare"}
                 </span>
                 {calcResult.fallbackUsed && (
                   <span className="text-[10px] font-medium text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
-                    Fallback Mode
+                    No matching rule — category fare used
                   </span>
                 )}
               </div>
@@ -717,7 +434,7 @@ export default function Pricing() {
           <div className="w-8 h-8 border-2 border-[#E21B23] border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
           <p className="text-xs text-[#666]">Loading Master Fare Rules from Firestore…</p>
         </div>
-      ) : fareRules.length === 0 ? (
+      ) : loadError && fareRules.length === 0 ? null : fareRules.length === 0 ? (
         /* Empty State Placeholder (Matches Screenshot & Prompt Instructions) */
         <div className="bg-white rounded-2xl border border-[#E5E5E5] p-10 sm:p-16 text-center max-w-2xl mx-auto my-8 shadow-xs">
           <div className="w-16 h-16 rounded-2xl bg-red-50 text-[#E21B23] flex items-center justify-center mx-auto mb-4 border border-red-100 shadow-inner">
@@ -765,7 +482,7 @@ export default function Pricing() {
               >
                 <option value="All">All Services</option>
                 {services.map((s) => (
-                  <option key={s.id} value={s.name}>
+                  <option key={s.id} value={s.id}>
                     {s.name}
                   </option>
                 ))}
@@ -826,6 +543,13 @@ export default function Pricing() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#E5E5E5]">
+                {filteredRules.length === 0 && (
+                  <tr>
+                    <td colSpan={9} className="py-8 text-center text-[#666]">
+                      No fare rules match the current filters.
+                    </td>
+                  </tr>
+                )}
                 {filteredRules.map((rule) => {
                   const badge = MODEL_BADGES[rule.pricingType] || MODEL_BADGES.BASE_PLUS_PER_KM;
                   return (
@@ -833,6 +557,10 @@ export default function Pricing() {
                       <td className="py-3 px-3 font-semibold text-[#111111]">
                         <div>{rule.name}</div>
                         {rule.code && <div className="text-[10px] font-mono text-gray-500">{rule.code}</div>}
+                        <div className="text-[10px] font-normal text-gray-500">
+                          Priority {rule.priority ?? 1}
+                          {(rule.effectiveFrom || rule.effectiveUntil) && ` • ${rule.effectiveFrom || "…"} to ${rule.effectiveUntil || "…"}`}
+                        </div>
                       </td>
 
                       <td className="py-3 px-3">
@@ -843,7 +571,9 @@ export default function Pricing() {
 
                       <td className="py-3 px-3 text-[#111111]">
                         <div className="font-semibold">{rule.serviceName || "All Services"}</div>
-                        <div className="text-[10px] text-gray-500">{rule.vehicleCategoryName || "All Categories"}</div>
+                        <div className="text-[10px] text-gray-500">
+                          {categories.find((c) => c.id === rule.vehicleCategoryId)?.name || rule.vehicleCategoryName || "Unknown category"}
+                        </div>
                       </td>
 
                       <td className="py-3 px-3 font-semibold text-[#111111]">
@@ -884,7 +614,8 @@ export default function Pricing() {
                       <td className="py-3 px-3 text-right space-x-2">
                         <button
                           onClick={() => handleToggleStatus(rule)}
-                          className={`text-[11px] font-semibold ${
+                          disabled={rowBusyId !== null}
+                          className={`text-[11px] font-semibold disabled:opacity-40 ${
                             rule.status === "Active" ? "text-amber-600 hover:underline" : "text-emerald-600 hover:underline"
                           }`}
                         >
@@ -892,7 +623,8 @@ export default function Pricing() {
                         </button>
                         <button
                           onClick={() => handleDuplicate(rule)}
-                          className="text-blue-600 hover:underline font-semibold text-[11px]"
+                          disabled={rowBusyId !== null}
+                          className="text-blue-600 hover:underline font-semibold text-[11px] disabled:opacity-40"
                         >
                           Copy
                         </button>
@@ -934,6 +666,8 @@ export default function Pricing() {
               </div>
               <button
                 onClick={() => setShowModal(false)}
+                disabled={isSubmitting}
+                aria-label="Close"
                 className="w-8 h-8 rounded-full hover:bg-gray-200 flex items-center justify-center text-gray-500 transition-colors"
               >
                 ✕
@@ -948,7 +682,7 @@ export default function Pricing() {
                   activeTab === "identity" ? "border-[#E21B23] text-[#E21B23]" : "border-transparent text-[#666] hover:text-[#111111]"
                 }`}
               >
-                1. Rule Identity & Scope
+                1. Rule Identity & Scope{tabHasError("identity") && <span className="text-red-600"> •</span>}
               </button>
               <button
                 onClick={() => setActiveTab("pricing")}
@@ -956,7 +690,7 @@ export default function Pricing() {
                   activeTab === "pricing" ? "border-[#E21B23] text-[#E21B23]" : "border-transparent text-[#666] hover:text-[#111111]"
                 }`}
               >
-                2. Base & Distance Rules
+                2. Base & Distance Rules{tabHasError("pricing") && <span className="text-red-600"> •</span>}
               </button>
               <button
                 onClick={() => setActiveTab("allowances")}
@@ -964,7 +698,7 @@ export default function Pricing() {
                   activeTab === "allowances" ? "border-[#E21B23] text-[#E21B23]" : "border-transparent text-[#666] hover:text-[#111111]"
                 }`}
               >
-                3. Allowances & Surcharges
+                3. Allowances & Surcharges{tabHasError("allowances") && <span className="text-red-600"> •</span>}
               </button>
               <button
                 onClick={() => setActiveTab("overrides")}
@@ -972,7 +706,7 @@ export default function Pricing() {
                   activeTab === "overrides" ? "border-[#E21B23] text-[#E21B23]" : "border-transparent text-[#666] hover:text-[#111111]"
                 }`}
               >
-                4. Tolls & Settings
+                4. Tolls & Settings{tabHasError("overrides") && <span className="text-red-600"> •</span>}
               </button>
             </div>
 
@@ -1001,29 +735,40 @@ export default function Pricing() {
                         onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                         placeholder="e.g. Airport Taxi Sedan Standard Rate, Outstation Daily Innova"
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
-                        required
+                        maxLength={80}
                       />
+                      {errNode("name")}
                     </div>
 
                     <div>
                       <label className="block text-[11px] font-semibold text-[#111111] mb-1">
-                        Travel Service *
+                        Rule Code (optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={formData.code}
+                        onChange={(e) => setFormData({ ...formData, code: e.target.value.toUpperCase() })}
+                        placeholder="e.g. AIRPORT-SEDAN"
+                        className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs font-mono focus:border-[#E21B23] focus:outline-none"
+                        maxLength={30}
+                      />
+                      {errNode("code")}
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-[#111111] mb-1">
+                        Travel Service
                       </label>
                       <select
-                        value={formData.serviceName}
-                        onChange={(e) => {
-                          const srv = services.find((s) => s.name === e.target.value);
-                          setFormData({
-                            ...formData,
-                            serviceName: e.target.value,
-                            serviceId: srv ? srv.id : "",
-                          });
-                        }}
+                        value={formData.serviceId}
+                        onChange={(e) => setFormData({ ...formData, serviceId: e.target.value })}
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs bg-white focus:border-[#E21B23] focus:outline-none"
                       >
+                        <option value="">Any service</option>
                         {services.map((s) => (
-                          <option key={s.id} value={s.name}>
+                          <option key={s.id} value={s.id}>
                             {s.name}
+                            {s.status && s.status !== "Active" ? ` (${s.status})` : ""}
                           </option>
                         ))}
                       </select>
@@ -1035,22 +780,17 @@ export default function Pricing() {
                       </label>
                       <select
                         value={formData.vehicleCategoryId}
-                        onChange={(e) => {
-                          const cat = categories.find((c) => c.id === e.target.value);
-                          setFormData({
-                            ...formData,
-                            vehicleCategoryId: e.target.value,
-                            vehicleCategoryName: cat ? cat.name : "",
-                          });
-                        }}
+                        onChange={(e) => setFormData({ ...formData, vehicleCategoryId: e.target.value })}
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs bg-white focus:border-[#E21B23] focus:outline-none"
                       >
+                        <option value="">Choose a category</option>
                         {categories.map((c) => (
                           <option key={c.id} value={c.id}>
-                            {c.name} ({c.seatingCapacity} seats)
+                            {c.name} ({c.seatingCapacity} seats){c.status !== "Active" ? ` — ${c.status}` : ""}
                           </option>
                         ))}
                       </select>
+                      {errNode("vehicleCategoryId")}
                     </div>
 
                     <div className="sm:col-span-2">
@@ -1089,6 +829,7 @@ export default function Pricing() {
                               </option>
                             ))}
                           </select>
+                        {errNode("originLocationId")}
                         </div>
 
                         <div>
@@ -1107,6 +848,7 @@ export default function Pricing() {
                               </option>
                             ))}
                           </select>
+                        {errNode("destinationLocationId")}
                         </div>
                       </>
                     )}
@@ -1130,6 +872,7 @@ export default function Pricing() {
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                         required
                       />
+                    {errNode("baseFare")}
                     </div>
 
                     <div>
@@ -1143,6 +886,7 @@ export default function Pricing() {
                         placeholder="e.g. 10 (0 if no base km)"
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                       />
+                    {errNode("baseKm")}
                     </div>
 
                     <div>
@@ -1157,6 +901,7 @@ export default function Pricing() {
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                         required
                       />
+                    {errNode("perKmRate")}
                     </div>
 
                     <div>
@@ -1170,6 +915,22 @@ export default function Pricing() {
                         placeholder="e.g. 250"
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                       />
+                    {errNode("minimumKmPerDay")}
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-[#111111] mb-1">
+                        Minimum Fare (₹)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={formData.minimumFare}
+                        onChange={(e) => setFormData({ ...formData, minimumFare: parseFloat(e.target.value) || 0 })}
+                        placeholder="0 if none"
+                        className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
+                      />
+                      {errNode("minimumFare")}
                     </div>
 
                     {/* Hourly Package fields */}
@@ -1182,9 +943,10 @@ export default function Pricing() {
                           <input
                             type="number"
                             value={formData.includedHours}
-                            onChange={(e) => setFormData({ ...formData, includedHours: parseInt(e.target.value) || 4 })}
+                            onChange={(e) => setFormData({ ...formData, includedHours: parseInt(e.target.value) || 0 })}
                             className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                           />
+                        {errNode("includedHours")}
                         </div>
 
                         <div>
@@ -1197,6 +959,7 @@ export default function Pricing() {
                             onChange={(e) => setFormData({ ...formData, extraKmRate: parseFloat(e.target.value) || 0 })}
                             className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                           />
+                        {errNode("extraKmRate")}
                         </div>
 
                         <div>
@@ -1209,6 +972,7 @@ export default function Pricing() {
                             onChange={(e) => setFormData({ ...formData, extraHourRate: parseFloat(e.target.value) || 0 })}
                             className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                           />
+                        {errNode("extraHourRate")}
                         </div>
                       </>
                     )}
@@ -1231,6 +995,7 @@ export default function Pricing() {
                         placeholder="e.g. 250"
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                       />
+                    {errNode("driverBatta")}
                     </div>
 
                     <div>
@@ -1244,6 +1009,22 @@ export default function Pricing() {
                         placeholder="e.g. 80"
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                       />
+                    {errNode("waitingChargePerHour")}
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-[#111111] mb-1">
+                        Free Waiting (minutes)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={formData.freeWaitingMinutes}
+                        onChange={(e) => setFormData({ ...formData, freeWaitingMinutes: parseInt(e.target.value) || 0 })}
+                        placeholder="0 if none"
+                        className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
+                      />
+                      {errNode("freeWaitingMinutes")}
                     </div>
 
                     {/* Night Surcharge Box */}
@@ -1287,7 +1068,7 @@ export default function Pricing() {
                             <label className="block text-[10px] font-semibold text-[#666]">Charge Type</label>
                             <select
                               value={formData.nightChargeType}
-                              onChange={(e) => setFormData({ ...formData, nightChargeType: e.target.value as any })}
+                              onChange={(e) => setFormData({ ...formData, nightChargeType: e.target.value as FareRuleForm["nightChargeType"] })}
                               className="w-full p-2 border rounded-lg bg-white text-xs"
                             >
                               <option value="Percentage">Percentage (%)</option>
@@ -1305,6 +1086,10 @@ export default function Pricing() {
                               onChange={(e) => setFormData({ ...formData, nightChargeValue: parseFloat(e.target.value) || 0 })}
                               className="w-full p-2 border rounded-lg bg-white text-xs font-bold text-[#E21B23]"
                             />
+                          {errNode("nightChargeValue")}
+                          </div>
+                          <div className="col-span-2 sm:col-span-4">
+                            {errNode("nightStartTime")}
                           </div>
                         </div>
                       )}
@@ -1323,7 +1108,7 @@ export default function Pricing() {
                       </label>
                       <select
                         value={formData.tollMode}
-                        onChange={(e) => setFormData({ ...formData, tollMode: e.target.value as any })}
+                        onChange={(e) => setFormData({ ...formData, tollMode: e.target.value as FareRuleForm["tollMode"] })}
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs bg-white focus:border-[#E21B23] focus:outline-none"
                       >
                         <option value="Excluded">Excluded (Actuals at Toll Gates)</option>
@@ -1343,6 +1128,7 @@ export default function Pricing() {
                           onChange={(e) => setFormData({ ...formData, fixedTollAmount: parseFloat(e.target.value) || 0 })}
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                         />
+                      {errNode("fixedTollAmount")}
                       </div>
                     )}
 
@@ -1354,9 +1140,79 @@ export default function Pricing() {
                         type="number"
                         value={formData.permitCharge}
                         onChange={(e) => setFormData({ ...formData, permitCharge: parseFloat(e.target.value) || 0 })}
-                        placeholder="e.g. 350 for interstate permit"
+                        placeholder="0 if none"
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                       />
+                    {errNode("permitCharge")}
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-[#111111] mb-1">
+                        Parking Charges Mode
+                      </label>
+                      <select
+                        value={formData.parkingMode}
+                        onChange={(e) => setFormData({ ...formData, parkingMode: e.target.value as FareRuleForm["parkingMode"] })}
+                        className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs bg-white focus:border-[#E21B23] focus:outline-none"
+                      >
+                        <option value="Excluded">Excluded (Actuals)</option>
+                        <option value="Included">Included in Fare</option>
+                        <option value="Fixed">Fixed Amount</option>
+                      </select>
+                    </div>
+
+                    {formData.parkingMode === "Fixed" && (
+                      <div>
+                        <label className="block text-[11px] font-semibold text-[#111111] mb-1">
+                          Fixed Parking Amount (₹)
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={formData.fixedParkingAmount}
+                          onChange={(e) => setFormData({ ...formData, fixedParkingAmount: parseFloat(e.target.value) || 0 })}
+                          className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
+                        />
+                        {errNode("fixedParkingAmount")}
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-[#111111] mb-1">
+                        Priority (1 = highest)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={99}
+                        value={formData.priority}
+                        onChange={(e) => setFormData({ ...formData, priority: parseInt(e.target.value) || 0 })}
+                        className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
+                      />
+                      {errNode("priority")}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-[#111111] mb-1">Effective From</label>
+                        <input
+                          type="date"
+                          value={formData.effectiveFrom}
+                          onChange={(e) => setFormData({ ...formData, effectiveFrom: e.target.value })}
+                          className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
+                        />
+                        {errNode("effectiveFrom")}
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-[#111111] mb-1">Effective Until</label>
+                        <input
+                          type="date"
+                          value={formData.effectiveUntil}
+                          onChange={(e) => setFormData({ ...formData, effectiveUntil: e.target.value })}
+                          className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
+                        />
+                        {errNode("effectiveUntil")}
+                      </div>
                     </div>
 
                     <div>
@@ -1365,7 +1221,7 @@ export default function Pricing() {
                       </label>
                       <select
                         value={formData.status}
-                        onChange={(e) => setFormData({ ...formData, status: e.target.value as any })}
+                        onChange={(e) => setFormData({ ...formData, status: e.target.value as FareRuleForm["status"] })}
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs bg-white focus:border-[#E21B23] focus:outline-none font-semibold"
                       >
                         <option value="Active">Active</option>
@@ -1411,14 +1267,15 @@ export default function Pricing() {
                   <button
                     type="button"
                     onClick={() => setShowModal(false)}
-                    className="px-4 py-2 border border-[#E5E5E5] text-[#666] rounded-xl font-semibold text-xs hover:bg-gray-50"
+                    disabled={isSubmitting}
+                    className="px-4 py-2 border border-[#E5E5E5] text-[#666] rounded-xl font-semibold text-xs hover:bg-gray-50 disabled:opacity-50"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
                     disabled={isSubmitting}
-                    className="px-5 py-2 text-white font-semibold rounded-xl text-xs hover:opacity-90 active:scale-95 transition-all shadow-md flex items-center gap-1.5"
+                    className="px-5 py-2 text-white font-semibold rounded-xl text-xs hover:opacity-90 active:scale-95 transition-all shadow-md flex items-center gap-1.5 disabled:opacity-60"
                     style={{ background: "#E21B23" }}
                   >
                     {isSubmitting && (
@@ -1433,62 +1290,17 @@ export default function Pricing() {
         </div>
       )}
 
-      {/* Delete Confirmation & Safeguard Dialog */}
       {deletingRule && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4 border border-[#E5E5E5]">
-            <div className="flex items-center gap-3 text-red-600">
-              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center shrink-0">
-                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                </svg>
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-[#111111]">Delete Fare Rule</h3>
-                <p className="text-xs text-[#666]">{deletingRule.name}</p>
-              </div>
-            </div>
-
-            {deleteRefNotice ? (
-              <div className="p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs space-y-2">
-                <div className="font-bold">⚠️ Linked Bookings Guard</div>
-                <p>{deleteRefNotice}</p>
-              </div>
-            ) : (
-              <p className="text-xs text-[#666]">
-                Are you sure you want to delete <strong>"{deletingRule.name}"</strong>?
-              </p>
-            )}
-
-            <div className="flex items-center justify-end gap-2 pt-2">
-              <button
-                onClick={() => setDeletingRule(null)}
-                className="px-4 py-2 border border-[#E5E5E5] text-[#111111] text-xs font-semibold rounded-xl"
-              >
-                Cancel
-              </button>
-
-              {deleteRefNotice ? (
-                <button
-                  onClick={() => {
-                    handleToggleStatus(deletingRule);
-                    setDeletingRule(null);
-                  }}
-                  className="px-4 py-2 bg-amber-600 text-white text-xs font-semibold rounded-xl hover:bg-amber-700"
-                >
-                  Deactivate Instead
-                </button>
-              ) : (
-                <button
-                  onClick={handleConfirmDelete}
-                  className="px-4 py-2 bg-red-600 text-white text-xs font-semibold rounded-xl hover:bg-red-700"
-                >
-                  Confirm Delete
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        <ConfirmDialog
+          title="Delete Fare Rule"
+          message={`Delete "${deletingRule.name}"? Existing bookings keep their own stored price; only future quotations are affected. To keep it for later, deactivate it instead.`}
+          confirmLabel="Delete"
+          danger
+          busy={deleteBusy}
+          error={deleteError}
+          onConfirm={handleConfirmDelete}
+          onCancel={() => setDeletingRule(null)}
+        />
       )}
     </div>
   );

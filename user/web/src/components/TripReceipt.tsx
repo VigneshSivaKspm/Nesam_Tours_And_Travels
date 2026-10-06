@@ -38,6 +38,8 @@ export function printReceipt(trip: TripRecord, customerName: string): void {
         f.nightCharge ? row('Night charge', f.nightCharge) : '',
         f.driverAllowance ? row('Driver allowance', f.driverAllowance) : '',
         f.minimumFareAdjustment ? row('Minimum fare adjustment', f.minimumFareAdjustment) : '',
+        f.adjustmentAmount ? row(f.adjustmentName || 'Fare adjustment', f.adjustmentAmount) : '',
+        f.adminAdjustment ? row('Agreed fare adjustment', f.adminAdjustment) : '',
         f.discount ? row(`Promo discount${trip.couponCode ? ` (${trip.couponCode})` : ''}`, -f.discount) : '',
         row(`GST (${Math.round(f.gstRate * 100)}%)`, f.gst),
       ].join('')
@@ -55,11 +57,13 @@ table{width:100%;border-collapse:collapse;font-size:13px}td{padding:6px 0;border
 <h1>${escapeHtml(COMPANY_NAME)}</h1><div class="muted">Ride receipt · Booking ${escapeHtml(trip.bookingId)}</div>
 <div class="box"><b>Customer:</b> ${escapeHtml(customerName)}<br>
 <b>Trip:</b> ${escapeHtml(trip.pickup.name)} → ${escapeHtml(trip.drop.name)}<br>
-<b>Service:</b> ${escapeHtml(trip.service)} · ${escapeHtml(trip.tripType)} · ${escapeHtml(trip.categoryName)}<br>
+<b>Service:</b> ${[trip.service, trip.tripType, trip.categoryName].filter(Boolean).map(escapeHtml).join(' · ')}<br>
 <b>Started:</b> ${escapeHtml(formatDateTime(trip.startedAt))} · <b>Completed:</b> ${escapeHtml(formatDateTime(trip.completedAt))}<br>
 ${trip.driver ? `<b>Driver:</b> ${escapeHtml(trip.driver.name)} · ${escapeHtml(trip.driver.vehicleNumber)}<br>` : ''}
 <b>Payment:</b> ${escapeHtml(trip.paymentMethod)} (${escapeHtml(trip.paymentStatus)})</div>
 <table>${rows}${tolls}<tr class="total"><td>Total</td><td class="r">₹${payableAmount(trip).toLocaleString('en-IN')}</td></tr></table>
+${trip.paid ? `<table style="margin-top:8px">${row('Paid so far', trip.paid.totalPaid)}${row('Balance due', trip.paid.balanceDue)}</table>` : ''}
+${trip.fareExtras.length ? `<div class="box"><b>Not included in the fare — payable separately:</b><br>${trip.fareExtras.map((e) => escapeHtml(e.label) + (e.amount ? ' ₹' + Math.round(e.amount).toLocaleString('en-IN') : ' (at actuals)') + ' — ' + escapeHtml(e.detail)).join('<br>')}</div>` : ''}
 <p class="muted">Upfront fare based on ${escapeHtml(formatDistance(trip.distanceKm))} / ${escapeHtml(formatDuration(trip.durationMin))} estimated. Thank you for riding with NESAM.</p>
 <script>window.onload=function(){window.print()}</script></body></html>`);
   w.document.close();
@@ -85,7 +89,23 @@ export const TripReceipt: React.FC<{ trip: TripRecord; customerName: string }> =
             <span>{formatINR(amount)}</span>
           </div>
         )}
-        <button onClick={() => printReceipt(trip, customerName)} className="mt-3 text-xs font-bold text-[#E31E24] hover:underline">
+        {trip.paid && (
+          <p className="mt-2 text-sm text-gray-800">
+            Paid so far <strong>{formatINR(trip.paid.totalPaid)}</strong> · Balance <strong>{formatINR(trip.paid.balanceDue)}</strong>
+          </p>
+        )}
+        {trip.fareExtras.length > 0 && (
+          <div className="mt-2 rounded-xl bg-amber-50 border border-amber-200 p-3 text-xs text-amber-950 space-y-0.5">
+            <p className="font-bold">Not included in the fare — you pay these separately:</p>
+            {trip.fareExtras.map((e) => (
+              <p key={e.label}>
+                {e.label}
+                {e.amount ? ` ${formatINR(e.amount)}` : ' (at actual cost)'} — {e.detail}
+              </p>
+            ))}
+          </div>
+        )}
+        <button onClick={() => printReceipt(trip, customerName)} className="mt-3 text-sm font-bold text-[#E31E24] hover:underline">
           Download / print receipt
         </button>
       </div>

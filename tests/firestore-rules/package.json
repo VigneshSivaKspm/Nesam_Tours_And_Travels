@@ -4,7 +4,8 @@
   "type": "module",
   "description": "Emulator tests for firestore.rules against the mobile apps' write shapes.",
   "scripts": {
-    "test": "node run.mjs"
+    "test": "node run.mjs",
+    "test:storage": "cd ../.. && npx -y firebase-tools@13.35.1 emulators:exec --only firestore,storage --project demo-nesam-storage \"node --test tests/firestore-rules/storage.test.mjs\""
   },
   "dependencies": {
     "@firebase/rules-unit-testing": "^5.0.2",

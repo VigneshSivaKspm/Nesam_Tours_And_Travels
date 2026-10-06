@@ -1,116 +1,31 @@
 import { useState, useEffect, useMemo } from "react";
 import { TravelService, VehicleCategory, Booking } from "../types";
+import { subscribeServices, subscribeVehicleCategories, subscribeBookings } from "../services/adminFirestoreService";
 import {
-  subscribeServices,
-  subscribeVehicleCategories,
-  subscribeBookings,
-  setFirestoreDocument,
-  deleteFirestoreDocument,
-  COLLECTIONS,
-} from "../services/adminFirestoreService";
+  ServiceActionError,
+  deleteService,
+  saveService,
+  setServiceStatus,
+  validateService,
+  type ServiceField,
+  type ServiceForm,
+} from "../services/serviceMasterService";
+import { auth } from "../services/firebase";
+import { ConfirmDialog, ErrorBanner, Toast, useToast } from "../components/Feedback";
 
-const PRESET_SERVICE_TEMPLATES = [
-  {
-    name: "Airport Taxi",
-    code: "AIRPORT_TAXI",
-    slug: "airport-taxi",
-    serviceType: "Airport Taxi",
-    shortDescription: "Reliable airport pickups and drops with guaranteed on-time driver arrival.",
-    fullDescription: "Dedicated airport taxi service offering hassle-free transfers to and from airports across Tamil Nadu. Features flight tracking, driver meet & greet, and baggage assistance.",
-    icon: "✈️",
-    displayOrder: 1,
-    featured: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    airportOptions: { airportPickup: true, airportDrop: true },
-    seoTitle: "Book Airport Taxi in Tamil Nadu | Nesam Tours & Travels",
-    seoDescription: "Book affordable airport cabs with transparent pricing and 24/7 customer support.",
-  },
-  {
-    name: "Outstation Cab",
-    code: "OUTSTATION_CAB",
-    slug: "outstation-cab",
-    serviceType: "Outstation Cab",
-    shortDescription: "Intercity outstation rides for one-way and round trips with experienced drivers.",
-    fullDescription: "Comfortable long-distance outstation travel covering all major cities, tourist destinations, and pilgrimage spots. Transparent per-km rates with driver batta.",
-    icon: "🗺️",
-    displayOrder: 2,
-    featured: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    outstationOptions: { oneWayAllowed: true, roundTripAllowed: true },
-    seoTitle: "Outstation Cab Service | One Way & Round Trip Cabs",
-    seoDescription: "Book outstation cabs with top-rated drivers and all-India tourist permit vehicles.",
-  },
-  {
-    name: "One Way Taxi",
-    code: "ONE_WAY_TAXI",
-    slug: "one-way-taxi",
-    serviceType: "One Way Taxi",
-    shortDescription: "Pay for one way only for drop rides across major city routes.",
-    fullDescription: "Economical one-way drop taxi service between cities. Pay only for the distance traveled one way without return fare charges.",
-    icon: "🚕",
-    displayOrder: 3,
-    featured: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    outstationOptions: { oneWayAllowed: true, roundTripAllowed: false },
-    seoTitle: "One Way Drop Taxi Service | Pay Only One-Way",
-    seoDescription: "Save up to 50% on intercity rides with Nesam One Way Taxi service.",
-  },
-  {
-    name: "Local Rental",
-    code: "LOCAL_RENTAL",
-    slug: "local-rental",
-    serviceType: "Local Rental",
-    shortDescription: "Flexible hourly rental packages (4hr/40km, 8hr/80km, 12hr/120km) for city travel.",
-    fullDescription: "Chauffeur-driven hourly cab rentals for business meetings, shopping, sightseeing, and multi-stop city errands.",
-    icon: "⏱️",
-    displayOrder: 4,
-    featured: false,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    seoTitle: "Hourly Local Cab Rental | 4Hr, 8Hr & 12Hr Packages",
-    seoDescription: "Rent a car with driver in Chennai and major cities for local hourly usage.",
-  },
-  {
-    name: "Corporate Travel",
-    code: "CORPORATE_TRAVEL",
-    slug: "corporate-travel",
-    serviceType: "Corporate Travel",
-    shortDescription: "Executive employee transportation, VIP client transfers, and corporate billing.",
-    fullDescription: "Custom corporate travel solutions featuring monthly invoicing, GST compliance, priority fleet allocation, and dedicated account management.",
-    icon: "💼",
-    displayOrder: 5,
-    featured: false,
-    onlineBookingEnabled: false,
-    adminBookingEnabled: true,
-    seoTitle: "Corporate Taxi & Employee Transport Solutions",
-    seoDescription: "Streamlined corporate cab rentals and executive fleet management.",
-  },
-  {
-    name: "Recurring Transport",
-    code: "RECURRING_TRANSPORT",
-    slug: "recurring-transport",
-    serviceType: "Recurring Transport",
-    shortDescription: "Scheduled daily or weekly commute services for staff and recurring clients.",
-    fullDescription: "Automated recurring bookings for daily office commute, school runs, and fixed routine transportation.",
-    icon: "🔄",
-    displayOrder: 6,
-    featured: false,
-    onlineBookingEnabled: false,
-    adminBookingEnabled: true,
-    seoTitle: "Recurring Daily & Weekly Commute Cab Services",
-    seoDescription: "Automated daily commuting taxi service for hassle-free transportation.",
-  },
-];
+type FormTab = "basic" | "booking" | "seo";
+const TAB_FIELDS: Record<FormTab, ServiceField[]> = {
+  basic: ["name", "code", "slug", "serviceType", "imageUrl", "displayOrder", "shortDescription"],
+  booking: ["channels"],
+  seo: ["seoTitle", "seoDescription"],
+};
 
 const defaultFormState = {
   id: "",
   name: "",
   code: "",
   slug: "",
-  serviceType: "Airport Taxi",
+  serviceType: "",
   shortDescription: "",
   fullDescription: "",
   icon: "✈️",
@@ -122,22 +37,30 @@ const defaultFormState = {
   adminBookingEnabled: true,
   allowedVehicleCategoryIds: [] as string[],
   airportOptions: {
-    airportPickup: true,
-    airportDrop: true,
+    airportPickup: false,
+    airportDrop: false,
   },
   outstationOptions: {
-    oneWayAllowed: true,
-    roundTripAllowed: true,
+    oneWayAllowed: false,
+    roundTripAllowed: false,
   },
   seoTitle: "",
   seoDescription: "",
 };
+
+const toForm = (f: typeof defaultFormState): ServiceForm => {
+  const { id: _id, ...rest } = f;
+  return rest;
+};
+const actionError = (e: unknown) => (e instanceof ServiceActionError ? e.message : "Something went wrong. Please try again.");
 
 export default function Services() {
   const [services, setServices] = useState<TravelService[]>([]);
   const [vehicleCategories, setVehicleCategories] = useState<VehicleCategory[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
 
   // Filters & Search
   const [search, setSearch] = useState("");
@@ -148,41 +71,40 @@ export default function Services() {
   // Modal State
   const [showModal, setShowModal] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [editingOriginal, setEditingOriginal] = useState<TravelService | null>(null);
   const [formData, setFormData] = useState(defaultFormState);
-  const [activeTab, setActiveTab] = useState<"basic" | "booking" | "seo">("basic");
+  const [activeTab, setActiveTab] = useState<FormTab>("basic");
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<ServiceField, string>>>({});
 
-  // Delete State
+  // Delete / status State
   const [deleteTarget, setDeleteTarget] = useState<TravelService | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [statusBusyId, setStatusBusyId] = useState<string | null>(null);
 
-  // Toast
-  const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+  const { toast, show: showToast } = useToast();
 
   useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
+    const fail = (m: string) => {
+      setLoadError(m);
+      setLoading(false);
+    };
     const unsubServices = subscribeServices((data) => {
       setServices(data);
       setLoading(false);
-    });
-    const unsubCats = subscribeVehicleCategories((data) => {
-      setVehicleCategories(data);
-    });
-    const unsubBookings = subscribeBookings((data) => {
-      setBookings(data);
-    });
+    }, fail);
+    const unsubCats = subscribeVehicleCategories(setVehicleCategories, fail);
+    const unsubBookings = subscribeBookings(setBookings, fail);
     return () => {
       unsubServices();
       unsubCats();
       unsubBookings();
     };
-  }, []);
-
-  const showToast = (message: string, type: "success" | "error" = "success") => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 3500);
-  };
+  }, [retryKey]);
 
   // KPIs
   const stats = useMemo(() => {
@@ -216,155 +138,82 @@ export default function Services() {
       });
   }, [services, search, statusFilter, typeFilter, sortBy]);
 
-  // Modal open
-  const handleOpenAdd = () => {
-    setIsEditing(false);
-    setFormData(defaultFormState);
+  const tabHasError = (tab: FormTab) => TAB_FIELDS[tab].some((f) => fieldErrors[f]);
+  const errNode = (f: ServiceField) =>
+    fieldErrors[f] ? <p className="text-[10px] text-red-600 mt-1">{fieldErrors[f]}</p> : null;
+
+  const openForm = (data: typeof defaultFormState, original: TravelService | null) => {
+    setIsEditing(!!original);
+    setEditingOriginal(original);
+    setFormData(data);
     setActiveTab("basic");
     setFormError(null);
+    setFieldErrors({});
     setShowModal(true);
   };
 
-  const handleOpenEdit = (srv: TravelService) => {
-    setIsEditing(true);
-    setFormData({
-      id: srv.id,
-      name: srv.name,
-      code: srv.code || "",
-      slug: srv.slug || "",
-      serviceType: srv.serviceType || "Airport Taxi",
-      shortDescription: srv.shortDescription || "",
-      fullDescription: srv.fullDescription || "",
-      icon: srv.icon || "✈️",
-      imageUrl: srv.imageUrl || "",
-      status: srv.status || "Active",
-      displayOrder: srv.displayOrder || 1,
-      featured: Boolean(srv.featured),
-      onlineBookingEnabled: srv.onlineBookingEnabled !== false,
-      adminBookingEnabled: srv.adminBookingEnabled !== false,
-      allowedVehicleCategoryIds: srv.allowedVehicleCategoryIds || [],
-      airportOptions: srv.airportOptions || { airportPickup: true, airportDrop: true },
-      outstationOptions: srv.outstationOptions || { oneWayAllowed: true, roundTripAllowed: true },
-      seoTitle: srv.seoTitle || "",
-      seoDescription: srv.seoDescription || "",
-    });
-    setActiveTab("basic");
-    setFormError(null);
-    setShowModal(true);
-  };
+  const handleOpenAdd = () =>
+    openForm({ ...defaultFormState, displayOrder: services.reduce((m, s) => Math.max(m, s.displayOrder || 0), 0) + 1 }, null);
 
-  const handleApplyPreset = (tmplName: string) => {
-    const tmpl = PRESET_SERVICE_TEMPLATES.find((t) => t.name === tmplName);
-    if (!tmpl) return;
-    setFormData((prev) => ({
-      ...prev,
-      name: tmpl.name,
-      code: tmpl.code,
-      slug: tmpl.slug,
-      serviceType: tmpl.serviceType,
-      shortDescription: tmpl.shortDescription,
-      fullDescription: tmpl.fullDescription,
-      icon: tmpl.icon,
-      displayOrder: tmpl.displayOrder,
-      featured: tmpl.featured,
-      onlineBookingEnabled: tmpl.onlineBookingEnabled,
-      adminBookingEnabled: tmpl.adminBookingEnabled,
-      airportOptions: tmpl.airportOptions || prev.airportOptions,
-      outstationOptions: tmpl.outstationOptions || prev.outstationOptions,
-      seoTitle: tmpl.seoTitle,
-      seoDescription: tmpl.seoDescription,
-    }));
-  };
+  const handleOpenEdit = (srv: TravelService) =>
+    openForm(
+      {
+        id: srv.id,
+        name: srv.name,
+        code: srv.code || "",
+        slug: srv.slug || "",
+        serviceType: srv.serviceType || "",
+        shortDescription: srv.shortDescription || "",
+        fullDescription: srv.fullDescription || "",
+        icon: srv.icon || "✈️",
+        imageUrl: srv.imageUrl || "",
+        status: srv.status || "Active",
+        displayOrder: srv.displayOrder || 1,
+        featured: Boolean(srv.featured),
+        onlineBookingEnabled: srv.onlineBookingEnabled !== false,
+        adminBookingEnabled: srv.adminBookingEnabled !== false,
+        allowedVehicleCategoryIds: srv.allowedVehicleCategoryIds || [],
+        airportOptions: srv.airportOptions || { airportPickup: false, airportDrop: false },
+        outstationOptions: srv.outstationOptions || { oneWayAllowed: false, roundTripAllowed: false },
+        seoTitle: srv.seoTitle || "",
+        seoDescription: srv.seoDescription || "",
+      },
+      srv,
+    );
 
   const handleToggleCategory = (catId: string) => {
     setFormData((prev) => {
       const current = prev.allowedVehicleCategoryIds || [];
-      const updated = current.includes(catId)
-        ? current.filter((id) => id !== catId)
-        : [...current, catId];
+      const updated = current.includes(catId) ? current.filter((id) => id !== catId) : [...current, catId];
       return { ...prev, allowedVehicleCategoryIds: updated };
     });
   };
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (saving) return;
     setFormError(null);
-
-    const name = formData.name.trim();
-    if (!name) {
-      setFormError("Service Name is required.");
-      setActiveTab("basic");
+    const form = toForm(formData);
+    const errors = validateService(form, services, editingOriginal?.id ?? null);
+    setFieldErrors(errors);
+    const keys = Object.keys(errors) as ServiceField[];
+    if (keys.length) {
+      setFormError(`Please fix: ${keys.map((k) => errors[k]).join(" ")}`);
+      const tab = (Object.keys(TAB_FIELDS) as FormTab[]).find((t) => TAB_FIELDS[t].includes(keys[0]));
+      if (tab) setActiveTab(tab);
       return;
     }
-
-    const code = (formData.code || name).toUpperCase().replace(/\s+/g, "_");
-    const slug = (formData.slug || name).toLowerCase().replace(/[^a-z0-9]+/g, "-");
-
-    // Check duplicate name or code
-    const duplicate = services.find(
-      (s) =>
-        s.id !== formData.id &&
-        (s.name.trim().toLowerCase() === name.toLowerCase() || (s.code && s.code.toUpperCase() === code))
-    );
-
-    if (duplicate) {
-      setFormError(`A service with name "${name}" or code "${code}" already exists.`);
-      setActiveTab("basic");
-      return;
-    }
-
     setSaving(true);
     try {
-      const docId = formData.id ? formData.id : `SRV-${code.substring(0, 12)}`;
-
-      // Resolve category names for reference
-      const categoryNames = vehicleCategories
-        .filter((c) => (formData.allowedVehicleCategoryIds || []).includes(c.id))
-        .map((c) => c.name);
-
-      const payload: TravelService = {
-        id: docId,
-        name,
-        code,
-        slug,
-        serviceType: formData.serviceType,
-        shortDescription: formData.shortDescription.trim(),
-        fullDescription: formData.fullDescription.trim(),
-        icon: formData.icon,
-        imageUrl: formData.imageUrl.trim(),
-        status: formData.status,
-        displayOrder: Number(formData.displayOrder || 1),
-        featured: Boolean(formData.featured),
-        onlineBookingEnabled: Boolean(formData.onlineBookingEnabled),
-        adminBookingEnabled: Boolean(formData.adminBookingEnabled),
-        allowedVehicleCategoryIds: formData.allowedVehicleCategoryIds,
-        allowedVehicleCategoryNames: categoryNames,
-        airportOptions: formData.airportOptions,
-        outstationOptions: formData.outstationOptions,
-        seoTitle: formData.seoTitle.trim(),
-        seoDescription: formData.seoDescription.trim(),
-      };
-
-      const ok = await setFirestoreDocument(COLLECTIONS.SERVICES, docId, payload);
-      if (ok) {
-        if (isEditing) {
-          setServices((prev) => prev.map((s) => (s.id === docId ? payload : s)));
-        } else {
-          setServices((prev) => [payload, ...prev]);
-        }
-        setShowModal(false);
-        showToast(
-          isEditing
-            ? `Service "${name}" updated successfully.`
-            : `Service "${name}" created successfully.`,
-          "success"
-        );
-      } else {
-        setFormError("Failed to save service to database. Please try again.");
-      }
-    } catch (err: any) {
-      console.error("Save service error:", err);
-      setFormError(err.message || "An unexpected error occurred while saving.");
+      const { renamed } = await saveService(form, editingOriginal, vehicleCategories, auth.currentUser?.uid || "");
+      setShowModal(false);
+      showToast(
+        editingOriginal
+          ? `Service "${form.name.trim()}" updated${renamed ? ` (${renamed} linked record${renamed === 1 ? "" : "s"} renamed)` : ""}.`
+          : `Service "${form.name.trim()}" created.`,
+      );
+    } catch (err) {
+      setFormError(actionError(err));
     } finally {
       setSaving(false);
     }
@@ -372,50 +221,30 @@ export default function Services() {
 
   // Toggle active/inactive status
   const handleToggleStatus = async (srv: TravelService) => {
+    if (statusBusyId) return;
     const newStatus = srv.status === "Active" ? "Inactive" : "Active";
-    const ok = await setFirestoreDocument(COLLECTIONS.SERVICES, srv.id, {
-      ...srv,
-      status: newStatus,
-    });
-    if (ok) {
-      showToast(`Service "${srv.name}" marked as ${newStatus}.`, "success");
-    } else {
-      showToast(`Failed to update status for "${srv.name}".`, "error");
+    setStatusBusyId(srv.id);
+    try {
+      await setServiceStatus(srv, newStatus);
+      showToast(`Service "${srv.name}" marked as ${newStatus}.`);
+    } catch (err) {
+      showToast(actionError(err), "error");
+    } finally {
+      setStatusBusyId(null);
     }
   };
 
   // Delete handling
   const handleDeleteConfirm = async () => {
-    if (!deleteTarget) return;
+    if (!deleteTarget || deleting) return;
     setDeleting(true);
     setDeleteError(null);
-
-    // Check if bookings reference this service name
-    const bookingCount = bookings.filter(
-      (b) =>
-        (b.service || "").toLowerCase() === deleteTarget.name.toLowerCase() ||
-        (b.serviceType || "").toLowerCase() === deleteTarget.serviceType.toLowerCase()
-    ).length;
-
-    if (bookingCount > 0) {
-      setDeleteError(
-        `Cannot delete service "${deleteTarget.name}" because ${bookingCount} booking(s) reference it. Please deactivate the service instead.`
-      );
-      setDeleting(false);
-      return;
-    }
-
     try {
-      const ok = await deleteFirestoreDocument(COLLECTIONS.SERVICES, deleteTarget.id);
-      if (ok) {
-        setDeleteTarget(null);
-        showToast(`Service "${deleteTarget.name}" removed successfully.`, "success");
-      } else {
-        setDeleteError("Failed to delete service from database.");
-      }
-    } catch (err: any) {
-      console.error("Delete service error:", err);
-      setDeleteError(err.message || "An error occurred during deletion.");
+      await deleteService(deleteTarget, bookings);
+      showToast(`Service "${deleteTarget.name}" removed.`);
+      setDeleteTarget(null);
+    } catch (err) {
+      setDeleteError(actionError(err));
     } finally {
       setDeleting(false);
     }
@@ -423,17 +252,8 @@ export default function Services() {
 
   return (
     <div className="p-6 space-y-6">
-      {/* Toast Alert */}
-      {toast && (
-        <div
-          className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-xl text-xs font-semibold text-white transition-all ${
-            toast.type === "success" ? "bg-emerald-600" : "bg-red-600"
-          }`}
-        >
-          <span>{toast.type === "success" ? "✓" : "⚠️"}</span>
-          <span>{toast.message}</span>
-        </div>
-      )}
+      <Toast toast={toast} />
+      {loadError && <ErrorBanner message={loadError} onRetry={() => setRetryKey((k) => k + 1)} />}
 
       {/* Header Bar */}
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -712,7 +532,8 @@ export default function Services() {
                       </button>
                       <button
                         onClick={() => handleToggleStatus(srv)}
-                        className={`px-2 py-1 text-[11px] font-medium rounded-lg border transition-colors cursor-pointer ${
+                        disabled={statusBusyId === srv.id}
+                        className={`px-2 py-1 text-[11px] font-medium rounded-lg border transition-colors cursor-pointer disabled:opacity-50 ${
                           srv.status === "Active"
                             ? "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"
                             : "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
@@ -721,7 +542,10 @@ export default function Services() {
                         {srv.status === "Active" ? "Deactivate" : "Activate"}
                       </button>
                       <button
-                        onClick={() => setDeleteTarget(srv)}
+                        onClick={() => {
+                          setDeleteError(null);
+                          setDeleteTarget(srv);
+                        }}
                         className="px-2 py-1 text-[11px] font-medium rounded-lg border border-red-200 bg-red-50 text-[#E21B23] hover:bg-red-100 transition-colors cursor-pointer"
                       >
                         Delete
@@ -750,56 +574,41 @@ export default function Services() {
                 </p>
               </div>
 
-              <div className="flex items-center gap-3">
-                {!isEditing && (
-                  <select
-                    onChange={(e) => handleApplyPreset(e.target.value)}
-                    defaultValue=""
-                    className="px-2.5 py-1 text-[11px] border border-[#E5E5E5] rounded-lg bg-white text-gray-700 focus:outline-none focus:border-[#E21B23]"
-                  >
-                    <option value="" disabled>
-                      Auto-fill Template...
-                    </option>
-                    {PRESET_SERVICE_TEMPLATES.map((t) => (
-                      <option key={t.name} value={t.name}>
-                        {t.name} ({t.serviceType})
-                      </option>
-                    ))}
-                  </select>
-                )}
-
-                <button
-                  onClick={() => setShowModal(false)}
-                  className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-500 font-bold text-sm"
-                >
-                  ✕
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setShowModal(false)}
+                disabled={saving}
+                aria-label="Close"
+                className="w-8 h-8 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-gray-500 font-bold text-sm disabled:opacity-40"
+              >
+                ✕
+              </button>
             </div>
-
             {/* Navigation Tabs */}
             <div className="flex border-b border-[#E5E5E5] bg-[#F5F5F5] px-6 pt-2">
-              {[
+              {([
                 { id: "basic", label: "Basic Info" },
                 { id: "booking", label: "Availability & Categories" },
                 { id: "seo", label: "SEO & Content" },
-              ].map((tab) => (
+              ] as { id: FormTab; label: string }[]).map((tab) => (
                 <button
+                  type="button"
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id as any)}
-                  className={`px-4 py-2 text-[12px] font-semibold border-b-2 transition-colors cursor-pointer ${
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`px-4 py-2 text-[12px] font-semibold border-b-2 transition-colors cursor-pointer flex items-center gap-1.5 ${
                     activeTab === tab.id
                       ? "border-[#E21B23] text-[#E21B23] bg-white rounded-t-lg"
                       : "border-transparent text-[#666666] hover:text-[#111111]"
                   }`}
                 >
                   {tab.label}
+                  {tabHasError(tab.id) && <span className="w-1.5 h-1.5 rounded-full bg-red-600" aria-label="has errors" />}
                 </button>
               ))}
             </div>
 
             {/* Form Body */}
-            <form onSubmit={handleSave}>
+            <form onSubmit={handleSave} noValidate>
               <div className="p-6 space-y-4 max-h-[60vh] overflow-y-auto">
                 {formError && (
                   <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-semibold">
@@ -823,6 +632,7 @@ export default function Services() {
                           onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("name")}
                       </div>
 
                       <div>
@@ -834,6 +644,7 @@ export default function Services() {
                           onChange={(e) => setFormData({ ...formData, serviceType: e.target.value })}
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         >
+                          <option value="">Choose service type</option>
                           <option value="Airport Taxi">Airport Taxi</option>
                           <option value="Outstation Cab">Outstation Cab</option>
                           <option value="One Way Taxi">One Way Taxi</option>
@@ -841,6 +652,7 @@ export default function Services() {
                           <option value="Corporate Travel">Corporate Travel</option>
                           <option value="Recurring Transport">Recurring Transport</option>
                         </select>
+                        {errNode("serviceType")}
                       </div>
                     </div>
 
@@ -856,6 +668,7 @@ export default function Services() {
                           onChange={(e) => setFormData({ ...formData, code: e.target.value.toUpperCase() })}
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] font-mono focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("code")}
                       </div>
 
                       <div>
@@ -869,6 +682,7 @@ export default function Services() {
                           onChange={(e) => setFormData({ ...formData, slug: e.target.value.toLowerCase() })}
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] font-mono focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("slug")}
                       </div>
                     </div>
 
@@ -883,6 +697,7 @@ export default function Services() {
                         onChange={(e) => setFormData({ ...formData, shortDescription: e.target.value })}
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                       />
+                        {errNode("shortDescription")}
                     </div>
 
                     <div>
@@ -930,6 +745,7 @@ export default function Services() {
                           }
                           className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                         />
+                        {errNode("displayOrder")}
                       </div>
 
                       <div>
@@ -963,7 +779,8 @@ export default function Services() {
                 {activeTab === "booking" && (
                   <div className="space-y-4">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl border border-[#E5E5E5]">
+                      {errNode("channels")}
+                    <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-xl border border-[#E5E5E5]">
                         <input
                           type="checkbox"
                           id="onlineBook"
@@ -1056,6 +873,7 @@ export default function Services() {
                         onChange={(e) => setFormData({ ...formData, seoTitle: e.target.value })}
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                       />
+                        {errNode("seoTitle")}
                     </div>
 
                     <div>
@@ -1069,6 +887,7 @@ export default function Services() {
                         onChange={(e) => setFormData({ ...formData, seoDescription: e.target.value })}
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
                       />
+                        {errNode("seoDescription")}
                     </div>
                   </div>
                 )}
@@ -1108,48 +927,17 @@ export default function Services() {
         </div>
       )}
 
-      {/* Delete Confirmation Modal */}
       {deleteTarget && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
-            <div className="flex items-center gap-3 text-red-600">
-              <div className="w-10 h-10 rounded-xl bg-red-100 flex items-center justify-center font-bold text-lg">
-                ⚠️
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-gray-900">Delete Travel Service?</h3>
-                <p className="text-xs text-gray-500 font-mono">{deleteTarget.name} ({deleteTarget.code})</p>
-              </div>
-            </div>
-
-            <p className="text-xs text-gray-600">
-              Are you sure you want to delete this travel service? Historical bookings will not be affected.
-            </p>
-
-            {deleteError && (
-              <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-semibold">
-                {deleteError}
-              </div>
-            )}
-
-            <div className="flex items-center justify-end gap-2 border-t pt-3">
-              <button
-                onClick={() => setDeleteTarget(null)}
-                className="px-4 py-2 border rounded-xl text-xs font-bold text-gray-700 hover:bg-gray-100"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleDeleteConfirm}
-                disabled={deleting}
-                className="px-5 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl shadow cursor-pointer disabled:opacity-50"
-              >
-                {deleting ? "Deleting..." : "Confirm Delete"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+        <ConfirmDialog
+          title={`Delete "${deleteTarget.name}"?`}
+          message="The service is removed permanently. It can only be deleted when no booking, fare rule, coupon or location uses it — otherwise deactivate it to hide it from new bookings."
+          confirmLabel="Delete Service"
+          danger
+          busy={deleting}
+          error={deleteError}
+          onConfirm={handleDeleteConfirm}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}    </div>
   );
 }

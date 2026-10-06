@@ -125,7 +125,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({ account, completed
           </h1>
           <p className="text-xs text-gray-500 font-mono">{driver.phone}</p>
           <p className="text-xs text-gray-500 mt-1">
-            ★ {driver.rating.toFixed(1)} • {completedTrips} trips • Partner since {driver.joiningDate}
+            {driver.rating !== null ? `★ ${driver.rating.toFixed(1)}` : 'No ratings yet'} • {completedTrips} trips{driver.joiningDate ? ` • Partner since ${driver.joiningDate}` : ''}
             {driver.vendorName ? ` • ${driver.vendorName}` : ''}
           </p>
         </div>

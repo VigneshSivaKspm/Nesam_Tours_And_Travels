@@ -4,7 +4,6 @@ import {
   onSnapshot,
   query,
   updateDoc,
-  deleteDoc,
   serverTimestamp,
   addDoc,
   writeBatch,
@@ -13,6 +12,9 @@ import {
 import { db } from "./firebase";
 import { COLLECTIONS } from "./adminFirestoreService";
 import { NotificationRecord } from "../types";
+import { callFunction } from "./callables";
+import { CATEGORIES, categoryOf } from "./notificationModel";
+import { formatShortDateTime12, formatTime12 } from "../utils/time";
 
 const LOCAL_READ_KEY = "nesam_admin_read_operational_notifs";
 const LOCAL_DISMISSED_KEY = "nesam_admin_dismissed_operational_notifs";
@@ -70,16 +72,11 @@ export function formatTimeAgo(input: any): string {
   if (diffMin < 60) return `${diffMin}m ago`;
   if (diffHours < 24) return `${diffHours}h ago`;
   if (diffDays === 1) {
-    return `Yesterday at ${date.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`;
+    return `Yesterday at ${formatTime12(date)}`;
   }
   if (diffDays < 7) return `${diffDays}d ago`;
 
-  return date.toLocaleDateString("en-IN", {
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatShortDateTime12(date);
 }
 
 /**
@@ -128,7 +125,6 @@ export function subscribeAdminNotifications(
   let firestoreNotifs: NotificationRecord[] = [];
   let pendingDriverNotifs: NotificationRecord[] = [];
   let pendingVendorNotifs: NotificationRecord[] = [];
-  let pendingBookingNotifs: NotificationRecord[] = [];
   let sosNotifs: NotificationRecord[] = [];
 
   const publish = () => {
@@ -139,7 +135,6 @@ export function subscribeAdminNotifications(
       ...firestoreNotifs,
       ...pendingDriverNotifs,
       ...pendingVendorNotifs,
-      ...pendingBookingNotifs,
       ...sosNotifs,
     ].filter((n) => !dismissedSet.has(String(n.id)));
 
@@ -201,6 +196,9 @@ export function subscribeAdminNotifications(
       pendingDriverNotifs = pendingDrivers.map((d) => ({
         id: `sys-driver-${d.id}`,
         type: "driver",
+        category: "approvals",
+        severity: "info",
+        cta: { label: "Review documents", page: "drivers" },
         title:
           d.status === "Approved"
             ? "Driver Document Re-upload"
@@ -234,6 +232,9 @@ export function subscribeAdminNotifications(
       pendingVendorNotifs = pendingVendors.map((v) => ({
         id: `sys-vendor-${v.id}`,
         type: "vendor",
+        category: "approvals",
+        severity: "info",
+        cta: { label: "Review vendor", page: "vendors" },
         title: "Vendor Onboarding Pending",
         message: `${v.companyName || v.name || "Vendor"} submitted registration for fleet onboarding.`,
         actionUrl: "vendors",
@@ -245,37 +246,6 @@ export function subscribeAdminNotifications(
       publish();
     },
     (err) => console.warn("Vendor alerts listener error:", err),
-  );
-
-  // 4. Real-time Pending Bookings (Unassigned Rides Alert)
-  const qBookings = query(collection(db, COLLECTIONS.BOOKINGS));
-  const unsubBookings = onSnapshot(
-    qBookings,
-    (snap) => {
-      const pendingBookings = snap.docs
-        .map((d) => ({ id: d.id, ...d.data() } as any))
-        .filter(
-          (b) =>
-            b.status === "Pending" &&
-            !b.assignedDriverId &&
-            !b.assignedVendorId,
-        )
-        .slice(0, 10); // Keep top 10 most recent
-
-      pendingBookingNotifs = pendingBookings.map((b) => ({
-        id: `sys-booking-${b.id}`,
-        type: "booking",
-        title: "New Booking Pending Dispatch",
-        message: `Booking #${b.bookingId || b.id} from ${b.customer || "Customer"} (${b.pickup || "Pickup"} → ${b.drop || "Drop"}) requires assignment.`,
-        actionUrl: "bookings",
-        priority: "high",
-        isSystemAlert: true,
-        read: false,
-        createdAt: b.createdAt || b.date,
-      }));
-      publish();
-    },
-    (err) => console.warn("Booking alerts listener error:", err),
   );
 
   // 5. Real-time Emergency SOS Alerts
@@ -290,7 +260,11 @@ export function subscribeAdminNotifications(
       sosNotifs = activeSos.map((s) => ({
         id: `sys-sos-${s.id}`,
         type: "alert",
-        title: "🚨 Emergency SOS Alert",
+        category: "trips",
+        severity: "critical",
+        bookingId: s.bookingId || undefined,
+        cta: { label: "Open trip", page: s.bookingId ? "booking-detail" : "trips", bookingId: s.bookingId || undefined },
+        title: "Emergency SOS alert",
         message: `Emergency SOS triggered on trip ${s.tripId || s.bookingId || s.id}! Immediate assistance required.`,
         actionUrl: "trips",
         priority: "urgent",
@@ -311,7 +285,6 @@ export function subscribeAdminNotifications(
     unsubNotifs();
     unsubDrivers();
     unsubVendors();
-    unsubBookings();
     unsubSos();
   };
 }
@@ -403,25 +376,16 @@ export async function markAllAdminNotificationsRead(
 }
 
 /**
- * Dismiss / delete a notification.
+ * Hides a notification from this staff member's inbox. The shared admin
+ * inbox is not deleted for everyone; the Notifications page (engagement
+ * permission) manages the records themselves.
  */
 export async function dismissAdminNotification(
   notification: NotificationRecord,
 ): Promise<void> {
-  const notifId = String(notification.id);
-
-  if (notification.isSystemAlert || notifId.startsWith("sys-")) {
-    const dismissedSet = getLocalSet(LOCAL_DISMISSED_KEY);
-    dismissedSet.add(notifId);
-    saveLocalSet(LOCAL_DISMISSED_KEY, dismissedSet);
-    return;
-  }
-
-  try {
-    await deleteDoc(doc(db, COLLECTIONS.NOTIFICATIONS, notifId));
-  } catch (err) {
-    console.warn(`Error deleting notification ${notifId}:`, err);
-  }
+  const dismissedSet = getLocalSet(LOCAL_DISMISSED_KEY);
+  dismissedSet.add(String(notification.id));
+  saveLocalSet(LOCAL_DISMISSED_KEY, dismissedSet);
 }
 
 export interface ComposeNotificationInput {
@@ -436,114 +400,40 @@ export interface ComposeNotificationInput {
   actionUrl?: string;
 }
 
+export interface SendResultSummary {
+  success: boolean;
+  count: number;
+  /** Per-channel outcome so the sender sees "WhatsApp: 3 failed" instead of a single vague status. */
+  channels?: Record<string, { sent: number; failed: number; notConfigured: number }>;
+  error?: string;
+}
+
+const CHANNEL_KEY: Record<ComposeNotificationInput["channel"], string> = {
+  "In-App": "in_app",
+  "Push Notification": "push",
+  WhatsApp: "whatsapp",
+  SMS: "sms",
+  Email: "email",
+};
+
 /**
- * Send a notification with appropriate fanout and recipient targeting.
+ * Sends a staff notice through the server, which delivers it on the chosen
+ * channel, records each attempt's status in the delivery log and audits it.
  */
-export async function sendAdminNotification(
-  input: ComposeNotificationInput,
-  userList?: { id: string; name: string; type: string }[],
-): Promise<{ success: boolean; count: number }> {
+export async function sendAdminNotification(input: ComposeNotificationInput): Promise<SendResultSummary> {
   try {
-    const { target, title, message, channel, type, actionUrl } = input;
-    const now = serverTimestamp();
-
-    if (target === "admin") {
-      await addDoc(collection(db, COLLECTIONS.NOTIFICATIONS), {
-        recipientType: "admin",
-        recipientRole: "admin",
-        recipientId: "admin",
-        target: "admin",
-        channel,
-        type,
-        title,
-        message,
-        actionUrl: actionUrl || "dashboard",
-        read: false,
-        createdAt: now,
-        sentBy: "Super Admin",
-      });
-      return { success: true, count: 1 };
-    }
-
-    if (target === "single_user" && input.recipientId) {
-      await addDoc(collection(db, COLLECTIONS.NOTIFICATIONS), {
-        recipientId: input.recipientId,
-        recipientType: input.recipientType || "customer",
-        recipientName: input.recipientName || "User",
-        channel,
-        type,
-        title,
-        message,
-        actionUrl: actionUrl || "",
-        read: false,
-        createdAt: now,
-        sentBy: "Super Admin",
-      });
-      return { success: true, count: 1 };
-    }
-
-    // Broadcast targets: fan-out to active recipients in the target role
-    let targets: { id: string; type: string; name: string }[] = [];
-    if (userList && userList.length > 0) {
-      if (target === "all_drivers") {
-        targets = userList.filter((u) => u.type === "driver");
-      } else if (target === "all_customers") {
-        targets = userList.filter((u) => u.type === "customer");
-      } else if (target === "all_vendors") {
-        targets = userList.filter((u) => u.type === "vendor");
-      }
-    }
-
-    // Also write a general broadcast marker for the recipient type
-    const roleType =
-      target === "all_drivers"
-        ? "driver"
-        : target === "all_customers"
-          ? "customer"
-          : "vendor";
-
-    if (targets.length > 0) {
-      const batch = writeBatch(db);
-      let count = 0;
-      for (const u of targets.slice(0, 400)) {
-        const docRef = doc(collection(db, COLLECTIONS.NOTIFICATIONS));
-        batch.set(docRef, {
-          recipientId: u.id,
-          recipientType: u.type,
-          recipientName: u.name,
-          channel,
-          type,
-          title,
-          message,
-          actionUrl: actionUrl || "",
-          read: false,
-          createdAt: now,
-          sentBy: "Super Admin",
-        });
-        count++;
-      }
-      await batch.commit();
-      return { success: true, count };
-    }
-
-    // Fallback if userList was not populated: write a broadcast notice
-    await addDoc(collection(db, COLLECTIONS.NOTIFICATIONS), {
-      broadcast: true,
-      recipientType: roleType,
-      channel,
-      type,
-      title,
-      message,
-      actionUrl: actionUrl || "",
-      read: false,
-      createdAt: now,
-      sentBy: "Super Admin",
+    const res = await callFunction<unknown, { recipients: number; channels: Record<string, { sent: number; failed: number; notConfigured: number }> }>("sendNotification", {
+      target: input.target,
+      recipientId: input.recipientId,
+      recipientType: input.recipientType,
+      channels: [CHANNEL_KEY[input.channel]],
+      category: CATEGORIES.includes(input.type as never) ? input.type : categoryOf({ type: input.type }),
+      title: input.title,
+      message: input.message,
     });
-
-    return { success: true, count: 1 };
+    return { success: true, count: res.recipients, channels: res.channels };
   } catch (err) {
-    console.error("Error sending admin notification:", err);
-    return { success: false, count: 0 };
+    return { success: false, count: 0, error: err instanceof Error ? err.message : "The notice could not be sent." };
   }
 }
 

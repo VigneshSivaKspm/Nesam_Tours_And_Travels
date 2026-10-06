@@ -104,7 +104,8 @@ export function mapVendorProfile(uid: string, data: DocumentData): VendorProfile
   const status = normalizeVendorStatus(data);
   return {
     id: uid,
-    companyName: b.businessName || data.companyName || 'Vendor Partner',
+    // The registered business name; the contact name only if none was given.
+    companyName: b.businessName || data.companyName || b.vendorName || '',
     contactPerson: b.vendorName || data.contactPerson || '',
     phone: data.phone || '',
     email: b.email || data.email || '',

@@ -151,7 +151,7 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <Wallet className="w-4 h-4 text-amber-500" />
               <span className="font-bold">
-                ₹{walletBalance.toLocaleString("en-IN")}
+                {walletBalance < 0 ? "−" : ""}₹{Math.abs(Math.round(walletBalance)).toLocaleString("en-IN")}
               </span>
             </button>
 

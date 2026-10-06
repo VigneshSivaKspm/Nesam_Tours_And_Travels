@@ -61,6 +61,22 @@ export interface FareConfig {
   driverAllowance: number;
   /** Per-km rate for outstation trips, when the admin configured one. */
   outstationPerKmRate?: number;
+  /** Charges that are quoted for information and paid separately unless marked included. */
+  extras?: FareExtras;
+}
+
+/** Category-level configuration of the charges outside the package price. */
+export interface FareExtras {
+  /** Rate per hour of waiting beyond the free period (0 = not configured). */
+  waitingPerHour: number;
+  /** Rate for each km beyond the booked distance. */
+  extraKmRate: number;
+  tollIncluded: boolean;
+  parkingIncluded: boolean;
+  /** State tax / permit charge per trip (0 = billed at actuals). */
+  permitCharge: number;
+  /** Carrier / luggage charge per trip (0 = none). */
+  carrierCharge: number;
 }
 
 export interface RideCategory {
@@ -82,6 +98,14 @@ export interface FareBreakdown {
   nightCharge: number;
   driverAllowance: number;
   minimumFareAdjustment: number;
+  /** Pre-GST difference from an admin-authorised fare override (see bookings.fareOverride). */
+  adminAdjustment?: number;
+  /** Package total before the global percentage adjustment. Equals `subtotal` when none applied. */
+  subtotalBeforeAdjustment?: number;
+  /** Global percentage fare adjustment applied once to the package total (never compounded). */
+  globalAdjustment?: FareAdjustmentApplied | null;
+  /** How the discount was derived. Stored apart from the fare so the base is never rewritten. */
+  discountDetail?: DiscountDetail | null;
   subtotal: number;
   discount: number;
   taxableAmount: number;
@@ -92,6 +116,25 @@ export interface FareBreakdown {
   durationMin: number;
   perKmRate: number;
   perMinuteRate: number;
+}
+
+export interface FareAdjustmentApplied {
+  id: string;
+  name: string;
+  direction: 'increase' | 'decrease';
+  percent: number;
+  /** Signed rupees added to (or removed from) the package total. */
+  amount: number;
+}
+
+export interface DiscountDetail {
+  type: 'percentage' | 'fixed' | 'coupon';
+  /** Percent for percentage, rupees for fixed. */
+  value: number;
+  /** Rupees actually taken off (capped so the payable amount is never negative). */
+  amount: number;
+  source: 'admin' | 'coupon';
+  reason: string;
 }
 
 export type PaymentMethod = 'Cash' | 'UPI' | 'Wallet' | 'Card';

@@ -1,78 +1,87 @@
 import { useState, useEffect } from "react";
+import OperationsSettingsCard from "../components/OperationsSettingsCard";
 import {
   subscribeSettings,
   saveSettings,
 } from "../services/adminFirestoreService";
 
-const tabs = ["Company", "Booking", "Payment", "Notifications", "General"];
+const tabs = ["Company", "Booking", "Payment", "Notifications", "General", "Operations & Security"];
+
+// Everything starts empty: company identity, tax and payment details are
+// entered by the operator and never pre-filled with sample values.
+const EMPTY_SETTINGS: Record<string, string | boolean> = {
+  companyName: "",
+  gst: "",
+  phone: "",
+  email: "",
+  website: "",
+  address: "",
+  advanceBookingLimit: "",
+  minBookingNotice: "",
+  cancelWindow: "",
+  cancelCharge: "",
+  allowCod: false,
+  smsEnabled: false,
+  emailEnabled: false,
+  whatsappEnabled: false,
+  pushEnabled: false,
+  currency: "",
+  timezone: "",
+  language: "",
+  gstRate: "",
+  upi: "",
+};
+
+const GSTIN_RE = /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 
 export default function Settings() {
   const [activeTab, setActiveTab] = useState("Company");
   const [saved, setSaved] = useState(false);
-  const [formData, setFormData] = useState<any>({
-    companyName: "Nesam Tours & Travels Pvt. Ltd.",
-    gst: "33AABCN1234F1Z5",
-    phone: "+91 44 4567 8901",
-    email: "info@nesamtours.in",
-    website: "www.nesamtours.in",
-    address: "No. 42, Mount Road, Anna Salai, Chennai - 600002, Tamil Nadu",
-    advanceBookingLimit: "30",
-    minBookingNotice: "2",
-    cancelWindow: "24",
-    cancelCharge: "10",
-    allowCod: true,
-    smsEnabled: true,
-    emailEnabled: true,
-    whatsappEnabled: false,
-    pushEnabled: true,
-    currency: "INR (₹)",
-    timezone: "Asia/Kolkata (IST)",
-    language: "English",
-    gstRate: "5",
-    upi: "nesamtours@hdfc",
-  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState<any>(EMPTY_SETTINGS);
+  const [formData, setFormData] = useState<any>(EMPTY_SETTINGS);
 
   useEffect(() => {
     const unsub = subscribeSettings((data) => {
-      if (Object.keys(data).length > 0) {
-        setFormData((prev: any) => ({ ...prev, ...data }));
-      }
+      const next = { ...EMPTY_SETTINGS, ...data };
+      setLoaded(next);
+      setFormData(next);
     });
     return () => unsub();
   }, []);
 
   const handleSave = async () => {
-    const { rzpKey, rzpSecret, ...safeData } = formData;
-    await saveSettings(safeData);
+    if (saving) return;
+    setError(null);
+    const gst = String(formData.gst || "").trim().toUpperCase();
+    if (gst && !GSTIN_RE.test(gst)) {
+      setActiveTab("Company");
+      setError("Enter a valid 15-character GSTIN (e.g. 33ABCDE1234F1Z5).");
+      return;
+    }
+    if (formData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(formData.email).trim())) {
+      setActiveTab("Company");
+      setError("Enter a valid company email address.");
+      return;
+    }
+    const rate = String(formData.gstRate ?? "").trim();
+    if (rate && (!Number.isFinite(Number(rate)) || Number(rate) < 0 || Number(rate) > 28)) {
+      setActiveTab("General");
+      setError("GST rate must be a number between 0 and 28.");
+      return;
+    }
+    setSaving(true);
+    // Gateway secrets are never stored in Firestore.
+    const { rzpKey: _k, rzpSecret: _s, updatedAt: _u, ...safeData } = formData;
+    const ok = await saveSettings({ ...safeData, gst });
+    setSaving(false);
+    if (!ok) {
+      setError("Settings could not be saved. Check your connection and admin access, then try again.");
+      return;
+    }
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
-  };
-
-  const DEFAULT_TRAVEL_SETTINGS = {
-    companyName: "Nesam Tours & Travels Pvt. Ltd.",
-    gst: "33AABCN1234F1Z5",
-    phone: "+91 44 4567 8901",
-    email: "info@nesamtours.in",
-    website: "www.nesamtours.in",
-    address: "No. 42, Mount Road, Anna Salai, Chennai - 600002, Tamil Nadu",
-    advanceBookingLimit: "30",
-    minBookingNotice: "2",
-    cancelWindow: "24",
-    cancelCharge: "10",
-    allowCod: true,
-    smsEnabled: true,
-    emailEnabled: true,
-    whatsappEnabled: true,
-    pushEnabled: true,
-    currency: "INR (₹)",
-    timezone: "Asia/Kolkata (IST)",
-    language: "English",
-    gstRate: "5",
-    upi: "nesamtours@hdfc",
-  };
-
-  const handleRestoreDefaults = () => {
-    setFormData(DEFAULT_TRAVEL_SETTINGS);
   };
 
   return (
@@ -94,17 +103,15 @@ export default function Settings() {
             </button>
           ))}
         </div>
-
-        <button
-          onClick={handleRestoreDefaults}
-          className="px-4 py-2 border border-amber-300 rounded-xl text-xs font-bold text-amber-900 bg-amber-50 hover:bg-amber-100 shadow-xs flex items-center gap-1.5 cursor-pointer"
-        >
-          <span>⚡</span>
-          <span>Load Travel Agency Presets</span>
-        </button>
       </div>
 
+      {error && (
+        <div role="alert" className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-semibold">
+          {error}
+        </div>
+      )}
       <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-6">
+        {activeTab === "Operations & Security" && <OperationsSettingsCard />}
         {activeTab === "Company" && (
           <div className="space-y-6 max-w-2xl">
             <div>
@@ -337,27 +344,34 @@ export default function Settings() {
                   setFormData({ ...formData, upi: e.target.value })
                 }
                 className="w-full px-3 py-2 text-[13px] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23] text-[#111] font-mono"
-                placeholder="nesamtours@hdfc"
+                placeholder="e.g. company@bank"
               />
             </div>
           </div>
         )}
 
+        {activeTab !== "Operations & Security" && (
         <div className="mt-8 pt-5 border-t border-[#E5E5E5] flex gap-3">
           <button
-            onClick={handleSave}
-            className={`px-6 py-2.5 text-[13px] font-semibold text-white rounded-lg transition-all ${saved ? "bg-green-600" : "hover:opacity-90"}`}
+            onClick={() => void handleSave()}
+            disabled={saving}
+            className={`px-6 py-2.5 text-[13px] font-semibold text-white rounded-lg transition-all disabled:opacity-50 ${saved ? "bg-green-600" : "hover:opacity-90"}`}
             style={!saved ? { background: "#E21B23" } : {}}
           >
-            {saved ? "✓ Saved!" : "Save Changes"}
+            {saving ? "Saving…" : saved ? "✓ Saved!" : "Save Changes"}
           </button>
           <button
-            onClick={() => setSaved(false)}
+            onClick={() => {
+              setFormData(loaded);
+              setError(null);
+            }}
+            disabled={saving}
             className="px-6 py-2.5 text-[13px] font-semibold text-[#666] border border-[#E5E5E5] rounded-lg hover:bg-[#F5F5F5] transition-colors cursor-pointer"
           >
             Cancel
           </button>
         </div>
+        )}
       </div>
     </div>
   );

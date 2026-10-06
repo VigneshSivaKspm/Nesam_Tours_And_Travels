@@ -1,29 +1,49 @@
-import { useState, useEffect } from "react";
-import { vendorStatusLabel } from "../utils/vendorStatus";
-import { Vendor, Booking, PaymentTransaction } from "../types";
+import { useEffect, useMemo, useState } from "react";
+import type { Booking, Vendor } from "../types";
+import { subscribeBookings, subscribePayoutRequests, subscribeVendors } from "../services/adminFirestoreService";
 import {
-  subscribeVendors,
-  subscribeBookings,
-  subscribePayments,
-  subscribePayoutRequests,
-} from "../services/adminFirestoreService";
+  inRange,
+  monthlyFromLedger,
+  payoutRequestedAt,
+  subscribeLedger,
+  subscribeWallets,
+  summarizePartner,
+  tripDate,
+  tripEarningStatus,
+  tripPayout,
+  walletKey,
+  type DateRange,
+  type LedgerEntry,
+  type PayoutRequest,
+  type Wallet,
+} from "../services/earningsService";
+import { normalizeVendorStatus, VENDOR_STATUS_META } from "../utils/vendorStatus";
+import { formatINR, parseAmount } from "../utils/analytics";
+import { ErrorBanner, Modal, Toast, useToast } from "../components/Feedback";
+import PayoutActionModal from "../components/PayoutActionModal";
 
-const razorpayStyle: Record<string, string> = {
-  Settled: "text-green-700 bg-green-50",
-  Success: "text-green-700 bg-green-50",
-  Processing: "text-blue-700 bg-blue-50",
-  Pending: "text-yellow-700 bg-yellow-50",
-  "On Hold": "text-[#E21B23] bg-red-50",
-  Failed: "text-[#E21B23] bg-red-50",
+type Preset = "this-month" | "last-month" | "last-30" | "all" | "custom";
+type VendorDoc = Vendor & {
+  business?: { businessName?: string; vendorName?: string; gstNumber?: string; address?: { city?: string } };
+  contactPerson?: string;
 };
 
+const rupees = (n: number) => `₹${Math.round(n).toLocaleString("en-IN")}`;
+const dateLabel = (d: Date | null) => (d ? d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "—");
+const vendorName = (v: VendorDoc) => v.companyName || v.business?.businessName || v.name || v.id;
+
+function rangeFor(preset: Preset, from: string, to: string): DateRange {
+  const now = new Date();
+  if (preset === "this-month") return { from: new Date(now.getFullYear(), now.getMonth(), 1), to: null };
+  if (preset === "last-month") return { from: new Date(now.getFullYear(), now.getMonth() - 1, 1), to: new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999) };
+  if (preset === "last-30") return { from: new Date(now.getTime() - 30 * 86400000), to: null };
+  if (preset === "custom") return { from: from ? new Date(`${from}T00:00:00`) : null, to: to ? new Date(`${to}T23:59:59.999`) : null };
+  return { from: null, to: null };
+}
+
 function downloadCsv(filename: string, headers: string[], rows: (string | number)[][]) {
-  const content = [
-    headers.join(","),
-    ...rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")),
-  ].join("\n");
-  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
+  const content = [headers.join(","), ...rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))].join("\n");
+  const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8;" }));
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
@@ -31,611 +51,412 @@ function downloadCsv(filename: string, headers: string[], rows: (string | number
   URL.revokeObjectURL(url);
 }
 
+const payoutStyle: Record<string, string> = {
+  Pending: "bg-amber-50 text-amber-700 border-amber-200",
+  Deferred: "bg-blue-50 text-blue-700 border-blue-200",
+  Paid: "bg-green-50 text-green-700 border-green-200",
+  Rejected: "bg-red-50 text-red-700 border-red-200",
+  Cancelled: "bg-gray-100 text-gray-600 border-gray-200",
+};
+
 export default function VendorFinance() {
-  const [activeTab, setActiveTab] = useState<
-    "settlements" | "gst" | "razorpay"
-  >("settlements");
-  const [liveVendors, setLiveVendors] = useState<Vendor[]>([]);
+  const [activeTab, setActiveTab] = useState<"ledger" | "payouts" | "monthly">("ledger");
+  const [vendors, setVendors] = useState<VendorDoc[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
-  const [payments, setPayments] = useState<PaymentTransaction[]>([]);
-  const [payoutRequests, setPayoutRequests] = useState<any[]>([]);
-  const [selectedVendorModal, setSelectedVendorModal] = useState<any | null>(null);
+  const [payouts, setPayouts] = useState<PayoutRequest[]>([]);
+  const [ledger, setLedger] = useState<LedgerEntry[]>([]);
+  const [wallets, setWallets] = useState<Map<string, Wallet>>(() => new Map());
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+
+  const [preset, setPreset] = useState<Preset>("this-month");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"All" | "APPROVED" | "SUSPENDED">("All");
+  const [payoutFilter, setPayoutFilter] = useState<"Open" | "Paid" | "Rejected" | "All">("Open");
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [action, setAction] = useState<{ kind: "pay" | "reject" | "defer"; payout: PayoutRequest } | null>(null);
+  const { toast, show } = useToast();
 
   useEffect(() => {
-    const unsubVendors = subscribeVendors(setLiveVendors);
-    const unsubBookings = subscribeBookings(setBookings);
-    const unsubPayments = subscribePayments(setPayments);
-    const unsubPayouts = subscribePayoutRequests(setPayoutRequests);
-
-    return () => {
-      unsubVendors();
-      unsubBookings();
-      unsubPayments();
-      unsubPayouts();
+    setLoading(true);
+    setLoadError(null);
+    const fail = (m: string) => {
+      setLoadError(m);
+      setLoading(false);
     };
-  }, []);
-
-  const displayVendors = liveVendors;
-  const displayPayments = payments;
-
-  // Totals are computed from real records only; no records means zero.
-  const computedGrossRevenue = bookings.reduce((sum, b) => {
-    if (b.status === "Cancelled") return sum;
-    const val =
-      typeof b.fare === "number"
-        ? b.fare
-        : parseFloat(String(b.fare || "0").replace(/[^0-9.]/g, ""));
-    return sum + (isNaN(val) ? 0 : val);
-  }, 0);
-
-  const totalGrossRevenue = computedGrossRevenue;
-
-  const computedCommission = bookings.reduce((sum, b) => {
-    if (b.status === "Cancelled") return sum;
-    const val =
-      typeof b.fare === "number"
-        ? b.fare
-        : parseFloat(String(b.fare || "0").replace(/[^0-9.]/g, ""));
-    return sum + (isNaN(val) ? 0 : val * 0.15);
-  }, 0);
-
-  const totalCommission = computedCommission;
-
-  const computedPayouts = payoutRequests
-    .filter((p) => p.status === "Paid" || p.status === "Completed")
-    .reduce((sum, p) => {
-      const val =
-        typeof p.amount === "number"
-          ? p.amount
-          : parseFloat(String(p.amount || "0").replace(/[^0-9.]/g, ""));
-      return sum + (isNaN(val) ? 0 : val);
-    }, 0);
-
-  const totalPayouts = computedPayouts;
-
-  const computedPendingSettlements = payoutRequests
-    .filter((p) => p.status === "Pending")
-    .reduce((sum, p) => {
-      const val =
-        typeof p.amount === "number"
-          ? p.amount
-          : parseFloat(String(p.amount || "0").replace(/[^0-9.]/g, ""));
-      return sum + (isNaN(val) ? 0 : val);
-    }, 0);
-
-  const pendingSettlements = computedPendingSettlements;
-
-  // Group GST records by month from actual bookings
-  const gstSummaryMap: Record<string, number> = {};
-  bookings.forEach((b) => {
-    if (b.status === "Cancelled") return;
-    const fare =
-      typeof b.fare === "number"
-        ? b.fare
-        : parseFloat(String(b.fare || "0").replace(/[^0-9.]/g, ""));
-    if (isNaN(fare) || fare <= 0) return;
-
-    let monthKey = "Current";
-    if (b.date) {
-      const d = new Date(b.date);
-      if (!isNaN(d.getTime())) {
-        monthKey = d.toLocaleString("en-US", {
-          month: "short",
-          year: "numeric",
-        });
-      } else {
-        monthKey = b.date;
-      }
-    }
-    gstSummaryMap[monthKey] = (gstSummaryMap[monthKey] || 0) + fare;
-  });
-
-  const liveGstRecords = Object.entries(gstSummaryMap).map(([month, rev]) => {
-    const gstVal = Math.round(rev * 0.05);
-    return {
-      month,
-      totalTripRevenue: `₹${rev.toLocaleString("en-IN")}`,
-      gstRate: "5%",
-      gstCollected: `₹${gstVal.toLocaleString("en-IN")}`,
-      gstPayable: `₹${gstVal.toLocaleString("en-IN")}`,
-      status: "Pending",
-    };
-  });
-
-  const displayGstRecords = liveGstRecords;
-
-  const handleExportVendorLedger = () => {
-    const headers = ["Vendor ID", "Business Name", "Owner", "City", "Fleet Size", "Active Drivers", "Commission", "Status", "Wallet Balance"];
-    const rows = displayVendors.map((v: any) => [
-      v.id || "—",
-      v.business?.businessName || v.companyName || v.name || "—",
-      v.business?.vendorName || v.contactPerson || v.owner || "—",
-      v.business?.address?.city || v.city || "—",
-      v.fleet?.fleetSize ?? v.fleetSize ?? 0,
-      v.activeDrivers ?? 0,
-      v.commission ? `${v.commission}%` : "15%",
-      v.status || "Active",
-      v.walletBalance !== undefined ? v.walletBalance : (v.wallet || "₹0"),
-    ]);
-    downloadCsv("nesam_vendor_financial_ledger.csv", headers, rows);
-  };
-
-  const handleExportGstr1 = () => {
-    const headers = ["Financial Period", "Gross Trip Revenue", "SAC Code", "GST Rate", "GST Collected (Output Tax)", "GST Payable", "Filing Status"];
-    const rows = displayGstRecords.map((r: any) => [
-      r.month,
-      r.totalTripRevenue,
-      "9964",
-      r.gstRate,
-      r.gstCollected,
-      r.gstPayable,
-      r.status,
-    ]);
-    downloadCsv("nesam_GSTR1_passenger_transport.csv", headers, rows);
-  };
-
-  const handleExportSingleGst = (record: any) => {
-    const headers = ["Tax Field", "Details"];
-    const rows = [
-      ["Tax Period", record.month],
-      ["HSN / SAC", "9964 (Passenger Transport)"],
-      ["Taxable Value", record.totalTripRevenue],
-      ["Applicable GST Rate", record.gstRate],
-      ["CGST (2.5%)", `₹${Math.round(parseInt(String(record.gstCollected).replace(/[^0-9]/g, "") || "0") / 2).toLocaleString("en-IN")}`],
-      ["SGST (2.5%)", `₹${Math.round(parseInt(String(record.gstCollected).replace(/[^0-9]/g, "") || "0") / 2).toLocaleString("en-IN")}`],
-      ["Total Output Tax", record.gstCollected],
-      ["Filing Status", record.status],
+    const unsubs = [
+      subscribeVendors((v) => {
+        setVendors(v as VendorDoc[]);
+        setLoading(false);
+      }, fail),
+      subscribeBookings(setBookings, fail),
+      subscribePayoutRequests(setPayouts, fail),
+      subscribeLedger(setLedger, fail),
+      subscribeWallets(setWallets, fail),
     ];
-    downloadCsv(`GST_Return_${record.month.replace(/\s+/g, "_")}.csv`, headers, rows);
-  };
+    return () => unsubs.forEach((u) => u());
+  }, [retryKey]);
+
+  const range = useMemo(() => rangeFor(preset, customFrom, customTo), [preset, customFrom, customTo]);
+  const rangeError = preset === "custom" && customFrom && customTo && customFrom > customTo ? "The start date is after the end date." : "";
+  const vendorPayouts = useMemo(() => payouts.filter((p) => p.vendorId), [payouts]);
+
+  const rows = useMemo(
+    () =>
+      vendors
+        .filter((v) => {
+          const st = normalizeVendorStatus(v);
+          return st === "APPROVED" || st === "SUSPENDED" || bookings.some((b) => b.assignedVendorId === v.id);
+        })
+        .map((v) => ({ vendor: v, status: normalizeVendorStatus(v), s: summarizePartner("vendor", v.id, bookings, ledger, wallets.get(walletKey("vendor", v.id)), range) }))
+        .sort((a, b) => b.s.earnings - a.s.earnings || vendorName(a.vendor).localeCompare(vendorName(b.vendor))),
+    [vendors, bookings, ledger, wallets, range],
+  );
+
+  const filteredRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return rows.filter(
+      (r) =>
+        (statusFilter === "All" || r.status === statusFilter) &&
+        (!q || [vendorName(r.vendor), r.vendor.phone, r.vendor.gstin, r.vendor.business?.vendorName, r.vendor.contactPerson].some((v) => (v || "").toLowerCase().includes(q))),
+    );
+  }, [rows, search, statusFilter]);
+
+  const kpis = useMemo(() => {
+    const gross = rows.reduce((s, r) => s + r.s.grossFares, 0);
+    const earnings = rows.reduce((s, r) => s + r.s.earnings, 0);
+    const open = vendorPayouts.filter((p) => !p.status || p.status === "Pending" || p.status === "Deferred");
+    return {
+      gross,
+      earnings,
+      platform: rows.reduce((s, r) => s + r.s.platformShare, 0),
+      openCount: open.length,
+      openAmount: open.reduce((s, p) => s + parseAmount(p.amount), 0),
+      paidOut: vendorPayouts.filter((p) => p.status === "Paid").reduce((s, p) => s + parseAmount(p.amount), 0),
+    };
+  }, [rows, vendorPayouts]);
+
+  const shownPayouts = useMemo(
+    () =>
+      vendorPayouts
+        .filter((p) => {
+          const st = p.status || "Pending";
+          if (payoutFilter === "Open") return st === "Pending" || st === "Deferred";
+          return payoutFilter === "All" || st === payoutFilter;
+        })
+        .sort((a, b) => (payoutRequestedAt(b)?.getTime() ?? 0) - (payoutRequestedAt(a)?.getTime() ?? 0)),
+    [vendorPayouts, payoutFilter],
+  );
+
+  const monthly = useMemo(() => monthlyFromLedger("vendor", ledger, vendorPayouts), [ledger, vendorPayouts]);
+
+  const detail = detailId ? rows.find((r) => r.vendor.id === detailId) ?? null : null;
+  // Share of the pre-GST fare (partner payout + platform revenue) kept by the platform.
+  const commissionPct = (s: { platformShare: number; earnings: number }) =>
+    s.platformShare + s.earnings > 0 ? `${((s.platformShare / (s.platformShare + s.earnings)) * 100).toFixed(1)}%` : "—";
+
+  const exportLedger = () =>
+    downloadCsv(
+      `nesam_vendor_finance_${new Date().toISOString().slice(0, 10)}.csv`,
+      ["Vendor", "GSTIN", "Status", "Completed Trips", "Gross Fares", "Vendor Earnings", "Approved Tolls", "Platform Share", "Effective Commission", "Cash Trips", "Cash Collected", "Available", "Reserved For Payouts", "Paid Out"],
+      filteredRows.map((r) => [
+        vendorName(r.vendor),
+        r.vendor.gstin || r.vendor.business?.gstNumber || "",
+        VENDOR_STATUS_META[r.status].label,
+        r.s.completedTrips,
+        r.s.grossFares,
+        r.s.earnings,
+        r.s.tolls,
+        r.s.platformShare,
+        commissionPct(r.s),
+        r.s.cashTrips,
+        r.s.cashCollected,
+        r.s.available,
+        r.s.reserved,
+        r.s.paidOut,
+      ]),
+    );
 
   return (
     <div className="p-6 space-y-5">
-      {/* KPIs */}
+      <Toast toast={toast} />
+      {loadError && <ErrorBanner message={loadError} onRetry={() => setRetryKey((k) => k + 1)} />}
+
+      <div>
+        <h1 className="text-[20px] font-bold text-[#111]">Vendor Finance</h1>
+        <p className="text-[13px] text-[#666]">Fleet vendors earn the payout agreed for each trip (fixed when the trip is finalized) plus approved tolls. All figures come from the partner ledger kept by the server.</p>
+      </div>
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          {
-            label: "Total Gross Revenue (Month)",
-            value: `₹${Math.round(totalGrossRevenue).toLocaleString("en-IN")}`,
-            color: "#E21B23",
-          },
-          {
-            label: "Total Commission Earned",
-            value: `₹${Math.round(totalCommission).toLocaleString("en-IN")}`,
-            color: "#111",
-          },
-          {
-            label: "Total Vendor Payouts",
-            value: `₹${Math.round(totalPayouts).toLocaleString("en-IN")}`,
-            color: "#10B981",
-          },
-          {
-            label: "Pending Route Settlements",
-            value: `₹${Math.round(pendingSettlements).toLocaleString("en-IN")}`,
-            color: "#F59E0B",
-          },
+          { label: "Gross Fares on Vendor Trips (period)", value: formatINR(kpis.gross), color: "#E21B23" },
+          { label: "Vendor Earnings (period)", value: formatINR(kpis.earnings), color: "#111" },
+          { label: `Open Payout Requests (${kpis.openCount})`, value: formatINR(kpis.openAmount), color: "#F59E0B" },
+          { label: "Paid Out to Vendors (all time)", value: formatINR(kpis.paidOut), color: "#10B981" },
         ].map((s) => (
-          <div
-            key={s.label}
-            className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4"
-          >
-            <div className="text-[20px] font-bold" style={{ color: s.color }}>
-              {s.value}
-            </div>
+          <div key={s.label} className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4">
+            <div className="text-[20px] font-bold" style={{ color: s.color }}>{loading ? "—" : s.value}</div>
             <div className="text-[11px] text-[#999] mt-0.5">{s.label}</div>
           </div>
         ))}
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-1 bg-white rounded-xl border border-[#E5E5E5] p-1 w-fit shadow-sm">
-        {[
-          { key: "settlements", label: "Vendor Settlements" },
-          { key: "gst", label: "GST Reports" },
-          { key: "razorpay", label: "Razorpay Route" },
-        ].map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setActiveTab(t.key as any)}
-            className={`px-5 py-2 rounded-lg text-[13px] font-semibold transition-all cursor-pointer ${activeTab === t.key ? "text-white shadow-sm" : "text-[#666] hover:text-[#111]"}`}
-            style={activeTab === t.key ? { background: "#E21B23" } : {}}
-          >
-            {t.label}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex gap-1 bg-white rounded-xl border border-[#E5E5E5] p-1 w-fit shadow-sm">
+          {[
+            { key: "ledger" as const, label: "Vendor Ledger" },
+            { key: "payouts" as const, label: `Payout Requests (${kpis.openCount})` },
+            { key: "monthly" as const, label: "Monthly Summary" },
+          ].map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setActiveTab(t.key)}
+              className={`px-5 py-2 rounded-lg text-[13px] font-semibold transition-all cursor-pointer ${activeTab === t.key ? "text-white shadow-sm" : "text-[#666] hover:text-[#111]"}`}
+              style={activeTab === t.key ? { background: "#E21B23" } : {}}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {activeTab === "ledger" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <select aria-label="Period" value={preset} onChange={(e) => setPreset(e.target.value as Preset)} className="px-3 py-2 text-[12px] border border-[#E5E5E5] rounded-lg bg-white">
+              <option value="this-month">This month</option>
+              <option value="last-month">Last month</option>
+              <option value="last-30">Last 30 days</option>
+              <option value="all">All time</option>
+              <option value="custom">Custom range</option>
+            </select>
+            {preset === "custom" && (
+              <>
+                <input type="date" aria-label="From" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} className="px-2 py-1.5 text-[12px] border border-[#E5E5E5] rounded-lg" />
+                <input type="date" aria-label="To" value={customTo} onChange={(e) => setCustomTo(e.target.value)} className="px-2 py-1.5 text-[12px] border border-[#E5E5E5] rounded-lg" />
+              </>
+            )}
+            {rangeError && <span className="text-[11px] text-red-600">{rangeError}</span>}
+          </div>
+        )}
       </div>
 
-      {/* Vendor Settlements */}
-      {activeTab === "settlements" && (
+      {activeTab === "ledger" && (
         <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
-          <div className="flex items-center justify-between px-5 py-4 border-b border-[#E5E5E5]">
-            <div>
-              <span className="text-[13px] font-bold text-[#111]">
-                Vendor Financial Ledger
-              </span>
-              <span className="ml-2 text-[11px] text-[#888]">
-                ({displayVendors.length} active vendors)
-              </span>
+          <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-b border-[#E5E5E5] bg-[#FAFAFA]">
+            <div className="flex flex-wrap items-center gap-2">
+              <input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search vendor, contact, GSTIN…" className="px-3 py-1.5 text-[12px] border border-[#DDD] rounded-lg min-w-[220px]" />
+              <select aria-label="Vendor status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)} className="px-3 py-1.5 text-[12px] border border-[#DDD] rounded-lg bg-white">
+                <option value="All">All vendors</option>
+                <option value="APPROVED">Approved</option>
+                <option value="SUSPENDED">Suspended</option>
+              </select>
             </div>
-            <button
-              onClick={handleExportVendorLedger}
-              className="text-[12px] font-semibold px-4 py-2 rounded-lg border border-[#E5E5E5] text-[#E21B23] hover:bg-[#FEF2F2] cursor-pointer transition-colors"
-            >
+            <button onClick={exportLedger} disabled={filteredRows.length === 0} className="text-[12px] font-semibold px-4 py-2 rounded-lg border border-[#E5E5E5] bg-white text-[#E21B23] hover:bg-[#FEF2F2] disabled:opacity-40">
               📥 Export CSV
             </button>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1200px]">
+            <table className="w-full min-w-[1100px]">
               <thead>
                 <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
-                  {[
-                    "Vendor",
-                    "Owner",
-                    "City",
-                    "Fleet",
-                    "Active Drivers",
-                    "Commission",
-                    "Status",
-                    "Wallet",
-                    "Actions",
-                  ].map((h) => (
-                    <th
-                      key={h}
-                      className="px-4 py-3 text-left text-[11px] font-semibold text-[#999] uppercase tracking-wide whitespace-nowrap"
-                    >
-                      {h}
-                    </th>
+                  {["Vendor", "Status", "Trips", "Gross Fares", "Vendor Earnings", "Tolls", "Platform Share", "Commission", "Available", "Reserved", ""].map((h) => (
+                    <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-[#999] uppercase tracking-wide whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {displayVendors.map((v: any, i) => (
-                  <tr
-                    key={v.id || i}
-                    className="table-row border-b border-[#F5F5F5] last:border-0 hover:bg-[#FAFAFA] transition-colors"
-                  >
+                {filteredRows.map(({ vendor: v, status, s }) => (
+                  <tr key={v.id} className="border-b border-[#F5F5F5] last:border-0 hover:bg-[#FAFAFA]">
                     <td className="px-4 py-3">
-                      <div className="text-[12px] font-semibold text-[#111]">
-                        {v.business?.businessName ||
-                          v.companyName ||
-                          v.name ||
-                          "Unnamed"}
-                      </div>
-                      <div className="text-[10px] text-[#999]">{v.id}</div>
-                    </td>
-                    <td className="px-4 py-3 text-[12px] text-[#111]">
-                      {v.business?.vendorName ||
-                        v.contactPerson ||
-                        v.owner ||
-                        "—"}
-                    </td>
-                    <td className="px-4 py-3 text-[12px] text-[#666]">
-                      {v.business?.address?.city || v.city || "—"}
-                    </td>
-                    <td className="px-4 py-3 text-[12px] font-semibold text-[#111]">
-                      {v.fleet?.fleetSize ?? v.fleetSize ?? "0"} vehicles
-                    </td>
-                    <td className="px-4 py-3 text-[12px] text-[#666]">
-                      {v.activeDrivers ?? "0"}
-                    </td>
-                    <td
-                      className="px-4 py-3 text-[11px]"
-                      style={{ color: "#E21B23" }}
-                    >
-                      {v.commission ? `${v.commission}%` : "15%"}
+                      <div className="text-[12px] font-semibold text-[#111]">{vendorName(v)}</div>
+                      <div className="text-[10px] text-[#999]">{v.gstin || v.business?.gstNumber || "GSTIN not provided"}</div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className="text-[12px] font-semibold text-green-700">
-                        {v.status === "Approved" || v.status === "Active"
-                          ? "APPROVED"
-                          : vendorStatusLabel(v)}
-                      </span>
+                      <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold border ${VENDOR_STATUS_META[status].badge}`}>{VENDOR_STATUS_META[status].label}</span>
                     </td>
-                    <td
-                      className="px-4 py-3 text-[12px] font-semibold"
-                      style={{ color: "#111" }}
-                    >
-                      {v.walletBalance !== undefined
-                        ? `₹${v.walletBalance.toLocaleString("en-IN")}`
-                        : v.wallet || "₹0"}
+                    <td className="px-4 py-3 text-[12px] font-bold">{s.completedTrips}</td>
+                    <td className="px-4 py-3 text-[12px]">{rupees(s.grossFares)}</td>
+                    <td className="px-4 py-3 text-[12px] font-bold text-green-700">
+                      {rupees(s.earnings)}
+                      {s.awaitingFinance > 0 && <div className="text-[10px] font-normal text-amber-700">{s.awaitingFinance} trip(s) awaiting fare verification</div>}
                     </td>
+                    <td className="px-4 py-3 text-[12px]">{rupees(s.tolls)}</td>
+                    <td className="px-4 py-3 text-[12px]" style={{ color: "#E21B23" }}>{rupees(s.platformShare)}</td>
+                    <td className="px-4 py-3 text-[12px] text-[#666]">{commissionPct(s)}</td>
+                    <td className={`px-4 py-3 text-[12px] font-bold ${s.available < 0 ? "text-red-700" : ""}`}>
+                      {rupees(s.available)}
+                      {s.pending > 0 && <div className="text-[10px] font-normal text-[#888]">+{rupees(s.pending)} awaiting payment</div>}
+                    </td>
+                    <td className="px-4 py-3 text-[12px] text-amber-700">{s.reserved ? rupees(s.reserved) : "—"}</td>
                     <td className="px-4 py-3">
-                      <button
-                        onClick={() => setSelectedVendorModal(v)}
-                        className="text-[11px] px-2.5 py-1 rounded-md border border-[#E5E5E5] hover:bg-[#FEF2F2] text-[#E21B23] font-medium transition-colors cursor-pointer"
-                      >
-                        Details
-                      </button>
+                      <button onClick={() => setDetailId(v.id)} className="text-[11px] px-2.5 py-1 rounded-md border border-[#E5E5E5] hover:bg-[#FEF2F2] text-[#E21B23] font-medium">Details</button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {!loading && filteredRows.length === 0 && (
+              <div className="py-12 text-center text-[13px] text-[#999]">{rows.length === 0 ? "No approved vendors yet." : "No vendors match your filters."}</div>
+            )}
+            {loading && <div className="py-12 text-center text-[13px] text-[#999]">Loading vendor finance…</div>}
+          </div>
+          <div className="px-5 py-3 text-[11px] text-[#888] border-t border-[#F0F0F0]">
+            Commission is the platform's share of the pre-GST fare on credited trips in the period. Cash fares collected by the vendor's drivers are debited from the balance, which can therefore go negative.
           </div>
         </div>
       )}
 
-      {/* GST Reports */}
-      {activeTab === "gst" && (
-        <div className="space-y-4">
-          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-start gap-3">
-            <svg
-              className="w-5 h-5 text-blue-600 shrink-0 mt-0.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
-            </svg>
-            <div className="text-[12px] text-blue-800">
-              <span className="font-semibold">GST Compliance (SAC 9964 - Passenger Transport):</span>{" "}
-              Passenger road transport services are taxed at 5% GST without Input Tax
-              Credit (ITC). GSTR-1 to be filed by the 11th of each month, and
-              GSTR-3B by the 20th.
-            </div>
-          </div>
-          <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
-            <div className="px-5 py-4 border-b border-[#E5E5E5] flex items-center justify-between">
-              <span className="text-[13px] font-bold text-[#111]">
-                Monthly GST Summary
-              </span>
-              <button
-                onClick={handleExportGstr1}
-                className="text-[12px] font-semibold px-4 py-2 rounded-lg border border-[#E5E5E5] text-[#E21B23] hover:bg-[#FEF2F2] cursor-pointer transition-colors"
-              >
-                📥 Export GSTR-1 Format (CSV)
+      {activeTab === "payouts" && (
+        <div className="space-y-3">
+          <div className="flex gap-1">
+            {(["Open", "Paid", "Rejected", "All"] as const).map((f) => (
+              <button key={f} onClick={() => setPayoutFilter(f)} className={`px-3 py-1 rounded-lg text-[11px] font-semibold ${payoutFilter === f ? "bg-[#111] text-white" : "bg-white border border-[#E5E5E5] text-[#666]"}`}>
+                {f === "Open" ? "Pending & deferred" : f}
               </button>
+            ))}
+          </div>
+          {shownPayouts.map((p) => {
+            const v = vendors.find((x) => x.id === p.vendorId);
+            const bal = p.vendorId ? wallets.get(walletKey("vendor", p.vendorId)) ?? null : null;
+            const status = p.status || "Pending";
+            const open = status === "Pending" || status === "Deferred";
+            return (
+              <div key={p.id} className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div>
+                  <div className="text-[13px] font-bold text-[#111]">{p.vendorName || (v ? vendorName(v) : p.vendorId)}</div>
+                  <div className="text-[11px] text-[#888]">Requested {dateLabel(payoutRequestedAt(p))} • {p.method || "—"}: <span className="font-mono">{p.details || "—"}</span></div>
+                  {bal && open && (
+                    <div className="text-[11px] text-[#666] mt-0.5">Balance after reserving requests {rupees(bal.available)} • reserved incl. this request {rupees(bal.reserved)} • paid out {rupees(bal.paidOut)}</div>
+                  )}
+                  {p.utr && <div className="text-[11px] text-green-700 mt-0.5">UTR {p.utr}</div>}
+                  {p.adminNote && <div className="text-[11px] text-[#666] mt-0.5">Note: {p.adminNote}</div>}
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="text-right">
+                    <div className="text-[16px] font-bold text-[#111]">{rupees(parseAmount(p.amount))}</div>
+                    <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold border ${payoutStyle[status] || payoutStyle.Cancelled}`}>{status}</span>
+                  </div>
+                  {open && (
+                    <div className="flex gap-2">
+                      <button onClick={() => setAction({ kind: "pay", payout: p })} className="text-[12px] font-semibold px-3 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700">Mark Paid</button>
+                      {status === "Pending" && <button onClick={() => setAction({ kind: "defer", payout: p })} className="text-[12px] font-semibold px-3 py-2 rounded-lg border border-[#E5E5E5] text-[#555] hover:bg-[#F5F5F5]">Defer</button>}
+                      <button onClick={() => setAction({ kind: "reject", payout: p })} className="text-[12px] font-semibold px-3 py-2 rounded-lg border border-red-200 text-red-700 hover:bg-red-50">Reject</button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {!loading && shownPayouts.length === 0 && <div className="bg-white rounded-xl border border-[#E5E5E5] py-14 text-center text-[13px] text-[#999]">No vendor payout requests in this view.</div>}
+        </div>
+      )}
+
+      {activeTab === "monthly" && (
+        <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b border-[#E5E5E5] bg-[#FAFAFA] flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div className="text-[13px] font-bold text-[#111]">Vendor Trips by Month</div>
+              <p className="text-[11px] text-[#888]">Platform GST on customer fares is reported in Reports & Analytics → GST Summary.</p>
+            </div>
+            <button
+              onClick={() =>
+                downloadCsv("nesam_vendor_monthly.csv", ["Month", "Completed Trips", "Gross Fares", "Vendor Earnings incl. Tolls", "Paid Out"], monthly.map((m) => [m.label, m.trips, m.gross, m.earnings, m.paid]))
+              }
+              disabled={monthly.length === 0}
+              className="text-[12px] font-semibold px-4 py-2 rounded-lg border border-[#E5E5E5] bg-white text-[#E21B23] hover:bg-[#FEF2F2] disabled:opacity-40"
+            >
+              📥 Export CSV
+            </button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[650px]">
+              <thead>
+                <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
+                  {["Month", "Completed Trips", "Gross Fares", "Vendor Earnings (incl. tolls)", "Paid Out"].map((h) => (
+                    <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-[#999] uppercase tracking-wide">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {monthly.map((m) => (
+                  <tr key={m.label} className="border-b border-[#F5F5F5] last:border-0">
+                    <td className="px-4 py-3 text-[12px] font-semibold">{m.label}</td>
+                    <td className="px-4 py-3 text-[12px]">{m.trips}</td>
+                    <td className="px-4 py-3 text-[12px]">{rupees(m.gross)}</td>
+                    <td className="px-4 py-3 text-[12px] font-bold">{rupees(m.earnings)}</td>
+                    <td className="px-4 py-3 text-[12px]">{rupees(m.paid)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {monthly.length === 0 && <div className="py-12 text-center text-[13px] text-[#999]">No completed vendor trips or payouts yet.</div>}
+          </div>
+        </div>
+      )}
+
+      {detail && (
+        <Modal title={vendorName(detail.vendor)} subtitle={`Vendor ID ${detail.vendor.id}`} onClose={() => setDetailId(null)} size="xl">
+          <div className="space-y-4 text-[12px]">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              {[
+                ["Contact", detail.vendor.business?.vendorName || detail.vendor.contactPerson || detail.vendor.owner || "—"],
+                ["Phone", detail.vendor.phone || "—"],
+                ["GSTIN", detail.vendor.gstin || detail.vendor.business?.gstNumber || "Not provided"],
+                ["City", detail.vendor.business?.address?.city || detail.vendor.city || "—"],
+                ["Available to withdraw", rupees(detail.s.available)],
+                ["Reserved for payouts", rupees(detail.s.reserved)],
+                ["Paid out (all time)", rupees(detail.s.paidOut)],
+                ["Cash collected (period)", rupees(detail.s.cashCollected)],
+              ].map(([k, val]) => (
+                <div key={k} className="p-2.5 bg-gray-50 rounded-lg border border-gray-100">
+                  <div className="text-[10px] text-gray-500">{k}</div>
+                  <div className="font-semibold text-gray-900 break-words">{val}</div>
+                </div>
+              ))}
             </div>
             <div className="overflow-x-auto">
               <table className="w-full min-w-[700px]">
                 <thead>
-                  <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
-                    {[
-                      "Month",
-                      "Trip Revenue",
-                      "GST Rate",
-                      "GST Collected",
-                      "GST Payable",
-                      "Status",
-                      "Action",
-                    ].map((h) => (
-                      <th
-                        key={h}
-                        className="px-4 py-3 text-left text-[11px] font-semibold text-[#999] uppercase tracking-wide whitespace-nowrap"
-                      >
-                        {h}
-                      </th>
+                  <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5] text-[10px] uppercase text-[#888]">
+                    {["Completed", "Booking", "Route", "Fare", "Vendor Payout", "Tolls", "Payment", "Ledger"].map((h) => (
+                      <th key={h} className="px-3 py-2 text-left">{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {displayGstRecords.map((r: any, i: number) => (
-                    <tr
-                      key={i}
-                      className="table-row border-b border-[#F5F5F5] last:border-0 hover:bg-[#FAFAFA]"
-                    >
-                      <td className="px-4 py-3 text-[12px] font-semibold text-[#111]">
-                        {r.month}
-                      </td>
-                      <td className="px-4 py-3 text-[12px] text-[#444]">
-                        {r.totalTripRevenue}
-                      </td>
-                      <td
-                        className="px-4 py-3 text-[12px] font-semibold"
-                        style={{ color: "#E21B23" }}
-                      >
-                        {r.gstRate}
-                      </td>
-                      <td className="px-4 py-3 text-[13px] font-bold text-[#111]">
-                        {r.gstCollected}
-                      </td>
-                      <td className="px-4 py-3 text-[13px] font-bold text-[#111]">
-                        {r.gstPayable}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`text-[11px] font-semibold px-2 py-0.5 rounded ${r.status === "Filed" ? "text-green-700 bg-green-50" : "text-yellow-700 bg-yellow-50"}`}
-                        >
-                          {r.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <button
-                          onClick={() => handleExportSingleGst(r)}
-                          className="text-[11px] px-2.5 py-1 rounded-md border border-[#E5E5E5] hover:bg-[#FEF2F2] text-[#E21B23] font-medium transition-colors cursor-pointer"
-                        >
-                          Download Return
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Razorpay Route Settlements */}
-      {activeTab === "razorpay" && (
-        <div className="space-y-4">
-          <div className="bg-purple-50 border border-purple-200 rounded-xl p-4 flex items-start gap-3">
-            <svg
-              className="w-5 h-5 text-purple-600 shrink-0 mt-0.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M13 10V3L4 14h7v7l9-11h-7z"
-              />
-            </svg>
-            <div className="text-[12px] text-purple-800">
-              <span className="font-semibold">
-                Razorpay Route (Automated Splits):
-              </span>{" "}
-              Customer payments are instantly split between the platform
-              commission account and vendor linked accounts via Razorpay Route.
-            </div>
-          </div>
-          <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
-            <div className="px-5 py-4 border-b border-[#E5E5E5] flex items-center justify-between">
-              <span className="text-[13px] font-bold text-[#111]">
-                Razorpay Route Settlements ({displayPayments.length})
-              </span>
-              <button
-                onClick={() => {
-                  const headers = ["Transfer ID", "Booking ID", "Customer", "Amount", "Method", "Date", "Status"];
-                  const rows = displayPayments.map((p: any) => [
-                    p.id,
-                    p.bookingId,
-                    p.customer,
-                    p.amount,
-                    p.method,
-                    p.date,
-                    p.status,
-                  ]);
-                  downloadCsv("razorpay_route_settlements.csv", headers, rows);
-                }}
-                className="text-[12px] font-semibold px-4 py-2 rounded-lg border border-[#E5E5E5] text-[#E21B23] hover:bg-[#FEF2F2] cursor-pointer"
-              >
-                📥 Export Settlements
-              </button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[800px]">
-                <thead>
-                  <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
-                    {[
-                      "Transfer ID",
-                      "Booking ID",
-                      "Customer",
-                      "Amount",
-                      "Method",
-                      "Date",
-                      "Status",
-                    ].map((h) => (
-                      <th
-                        key={h}
-                        className="px-4 py-3 text-left text-[11px] font-semibold text-[#999] uppercase tracking-wide whitespace-nowrap"
-                      >
-                        {h}
-                      </th>
+                  {bookings
+                    .filter((b) => b.assignedVendorId === detail.vendor.id && b.status === "Completed" && inRange(tripDate(b), range))
+                    .sort((a, b) => (tripDate(b)?.getTime() ?? 0) - (tripDate(a)?.getTime() ?? 0))
+                    .map((b) => (
+                      <tr key={b.id} className="border-b border-[#F5F5F5]">
+                        <td className="px-3 py-2">{dateLabel(tripDate(b))}</td>
+                        <td className="px-3 py-2 font-mono text-[#E21B23]">{b.bookingId || b.id}</td>
+                        <td className="px-3 py-2 max-w-[200px] truncate">{b.pickup} → {b.drop}</td>
+                        <td className="px-3 py-2">{rupees(parseAmount(b.fare))}</td>
+                        <td className="px-3 py-2">{tripPayout(b) !== null ? rupees(tripPayout(b)!) : "Not finalized"}</td>
+                        <td className="px-3 py-2">{b.tollCharges ? `${rupees(Number(b.tollCharges))}${b.tollsApproved ? "" : " (not approved)"}` : "—"}</td>
+                        <td className="px-3 py-2">{b.paymentMethod || "—"} • {b.payment === "Paid" ? "Paid" : "Pending"}</td>
+                        <td className="px-3 py-2">{tripEarningStatus(ledger, b.id) || "—"}</td>
+                      </tr>
                     ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayPayments.map((p: any, i: number) => (
-                    <tr
-                      key={p.id || i}
-                      className="table-row border-b border-[#F5F5F5] last:border-0 hover:bg-[#FAFAFA]"
-                    >
-                      <td className="px-4 py-3 text-[11px] font-mono font-semibold text-[#444]">
-                        {p.id}
-                      </td>
-                      <td
-                        className="px-4 py-3 text-[11px] font-mono font-semibold"
-                        style={{ color: "#E21B23" }}
-                      >
-                        {p.bookingId}
-                      </td>
-                      <td className="px-4 py-3 text-[12px] font-medium text-[#111]">
-                        {p.customer}
-                      </td>
-                      <td className="px-4 py-3 text-[12px] font-bold text-[#111]">
-                        {p.amount}
-                      </td>
-                      <td className="px-4 py-3 text-[12px] text-[#666]">
-                        {p.method}
-                      </td>
-                      <td className="px-4 py-3 text-[11px] text-[#666]">
-                        {p.date}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`text-[11px] font-semibold px-2 py-0.5 rounded ${razorpayStyle[p.status] || "text-green-700 bg-green-50"}`}
-                        >
-                          {p.status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
                 </tbody>
               </table>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
 
-      {/* Vendor Details Modal */}
-      {selectedVendorModal && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between border-b pb-3">
-              <div>
-                <h3 className="font-bold text-[16px] text-[#111]">
-                  {selectedVendorModal.business?.businessName || selectedVendorModal.companyName || selectedVendorModal.name}
-                </h3>
-                <p className="text-[12px] text-[#666]">Vendor ID: {selectedVendorModal.id}</p>
-              </div>
-              <button
-                onClick={() => setSelectedVendorModal(null)}
-                className="text-gray-400 hover:text-black text-xl font-bold w-8 h-8 rounded-full flex items-center justify-center"
-              >
-                ✕
-              </button>
-            </div>
-            <div className="grid grid-cols-2 gap-3 text-[13px]">
-              <div className="p-3 bg-gray-50 rounded-xl">
-                <span className="text-[#888] block text-[11px]">Primary Contact</span>
-                <span className="font-semibold text-[#111]">
-                  {selectedVendorModal.business?.vendorName || selectedVendorModal.contactPerson || selectedVendorModal.owner || "—"}
-                </span>
-                <div className="text-[11px] text-[#555]">{selectedVendorModal.phone || "—"}</div>
-              </div>
-              <div className="p-3 bg-gray-50 rounded-xl">
-                <span className="text-[#888] block text-[11px]">Wallet Balance</span>
-                <span className="font-bold text-[15px] text-[#10B981]">
-                  {selectedVendorModal.walletBalance !== undefined ? `₹${selectedVendorModal.walletBalance.toLocaleString("en-IN")}` : (selectedVendorModal.wallet || "₹0")}
-                </span>
-              </div>
-              <div className="p-3 bg-gray-50 rounded-xl">
-                <span className="text-[#888] block text-[11px]">Fleet Size</span>
-                <span className="font-semibold text-[#111]">
-                  {selectedVendorModal.fleet?.fleetSize ?? selectedVendorModal.fleetSize ?? 0} Vehicles
-                </span>
-              </div>
-              <div className="p-3 bg-gray-50 rounded-xl">
-                <span className="text-[#888] block text-[11px]">Platform Commission</span>
-                <span className="font-bold text-[#E21B23]">
-                  {selectedVendorModal.commission ? `${selectedVendorModal.commission}%` : "15%"}
-                </span>
-              </div>
-              <div className="p-3 bg-gray-50 rounded-xl col-span-2">
-                <span className="text-[#888] block text-[11px]">GSTIN Registration</span>
-                <span className="font-mono font-medium text-[#111]">
-                  {selectedVendorModal.gstin || selectedVendorModal.gst || selectedVendorModal.business?.gstNumber || "Not provided"}
-                </span>
-              </div>
-            </div>
-            <div className="pt-2 flex justify-end">
-              <button
-                onClick={() => setSelectedVendorModal(null)}
-                className="px-5 py-2 rounded-xl bg-[#111] text-white text-[13px] font-semibold hover:bg-black cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
+      {action && (
+        <PayoutActionModal
+          kind={action.kind}
+          payout={action.payout}
+          onClose={() => setAction(null)}
+          onDone={(msg) => {
+            setAction(null);
+            show(msg);
+          }}
+        />
       )}
     </div>
   );

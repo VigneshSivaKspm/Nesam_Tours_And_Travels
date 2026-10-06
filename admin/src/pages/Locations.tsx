@@ -1,26 +1,20 @@
 import { useState, useEffect, useMemo } from "react";
-import { MasterLocation, LocationType, TravelService, Booking, TourPackage } from "../types";
+import { MasterLocation, LocationType, TravelService, TourPackage } from "../types";
+import { subscribeLocations, subscribeServices, subscribeTourPackages } from "../services/adminFirestoreService";
 import {
-  subscribeLocations,
-  subscribeServices,
-  subscribeBookings,
-  subscribeTourPackages,
-  addFirestoreDocument,
-  setFirestoreDocument,
-  deleteFirestoreDocument,
-  COLLECTIONS,
-} from "../services/adminFirestoreService";
-
-const LOCATION_TYPES: LocationType[] = [
-  "City",
-  "Area / Locality",
-  "Airport",
-  "Railway Station",
-  "Bus Stand",
-  "Landmark",
-  "Tourist Place",
-  "Other",
-];
+  LOCATION_TYPES,
+  LocationActionError,
+  deleteLocation,
+  findLocationReferences,
+  saveLocation,
+  setLocationStatus,
+  validateLocation,
+  type LocationField,
+  type LocationForm,
+  type LocationReferences,
+} from "../services/locationService";
+import { auth } from "../services/firebase";
+import { ErrorBanner, Modal, Toast, useToast } from "../components/Feedback";
 
 const STATES_LIST = [
   "Tamil Nadu",
@@ -45,12 +39,44 @@ const TYPE_BADGES: Record<LocationType, { bg: string; text: string; border: stri
   Other: { bg: "bg-gray-50", text: "text-gray-700", border: "border-gray-200" },
 };
 
+type FormTab = "basic" | "geo" | "services";
+const TAB_FIELDS: Record<FormTab, LocationField[]> = {
+  basic: ["name", "code", "type", "parentLocationId"],
+  geo: ["state", "city", "pincode", "lat", "lng"],
+  services: ["usage", "displayOrder"],
+};
+const actionError = (e: unknown) => (e instanceof LocationActionError ? e.message : "Something went wrong. Please try again.");
+
+const emptyForm = (serviceIds: string[], displayOrder: number): LocationForm => ({
+  name: "",
+  code: "",
+  type: "City",
+  state: "Tamil Nadu",
+  district: "",
+  city: "",
+  area: "",
+  pincode: "",
+  address: "",
+  parentLocationId: "",
+  lat: "",
+  lng: "",
+  placeId: "",
+  pickupEnabled: true,
+  dropEnabled: true,
+  onlineBookingEnabled: true,
+  adminBookingEnabled: true,
+  serviceIds,
+  status: "Active",
+  displayOrder,
+});
+
 export default function Locations() {
   const [locations, setLocations] = useState<MasterLocation[]>([]);
   const [services, setServices] = useState<TravelService[]>([]);
-  const [bookings, setBookings] = useState<Booking[]>([]);
   const [packages, setPackages] = useState<TourPackage[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
 
   // Filters & Controls
   const [search, setSearch] = useState("");
@@ -65,371 +91,181 @@ export default function Locations() {
   const [editingLocation, setEditingLocation] = useState<MasterLocation | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"basic" | "geo" | "services">("basic");
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<LocationField, string>>>({});
+  const [activeTab, setActiveTab] = useState<FormTab>("basic");
+  const [formData, setFormData] = useState<LocationForm>(emptyForm([], 1));
 
-  // Form Fields
-  const [formData, setFormData] = useState<{
-    name: string;
-    code: string;
-    type: LocationType;
-    state: string;
-    district: string;
-    city: string;
-    area: string;
-    pincode: string;
-    address: string;
-    parentLocationId: string;
-    lat: string;
-    lng: string;
-    placeId: string;
-    pickupEnabled: boolean;
-    dropEnabled: boolean;
-    onlineBookingEnabled: boolean;
-    adminBookingEnabled: boolean;
-    serviceIds: string[];
-    status: "Active" | "Inactive";
-    displayOrder: number;
-  }>({
-    name: "",
-    code: "",
-    type: "City",
-    state: "Tamil Nadu",
-    district: "",
-    city: "",
-    area: "",
-    pincode: "",
-    address: "",
-    parentLocationId: "",
-    lat: "",
-    lng: "",
-    placeId: "",
-    pickupEnabled: true,
-    dropEnabled: true,
-    onlineBookingEnabled: true,
-    adminBookingEnabled: true,
-    serviceIds: [],
-    status: "Active",
-    displayOrder: 1,
-  });
-
-  // Delete & Safety Dialog
+  // Delete dialog
   const [deletingLocation, setDeletingLocation] = useState<MasterLocation | null>(null);
-  const [deleteRefNotice, setDeleteRefNotice] = useState<string | null>(null);
-
-  // Success Notification
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [deleteRefs, setDeleteRefs] = useState<LocationReferences | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [statusBusyId, setStatusBusyId] = useState<string | null>(null);
+  const { toast, show: showToast } = useToast();
 
   useEffect(() => {
-    const unsubLoc = subscribeLocations((data) => {
-      setLocations(data);
+    setLoading(true);
+    setLoadError(null);
+    const fail = (m: string) => {
+      setLoadError(m);
       setLoading(false);
-    });
-    const unsubSrv = subscribeServices(setServices);
-    const unsubBkg = subscribeBookings(setBookings);
-    const unsubPkg = subscribeTourPackages(setPackages);
-
-    return () => {
-      unsubLoc();
-      unsubSrv();
-      unsubBkg();
-      unsubPkg();
     };
-  }, []);
+    const unsubs = [
+      subscribeLocations((data) => {
+        setLocations(data);
+        setLoading(false);
+      }, fail),
+      subscribeServices(setServices, fail),
+      subscribeTourPackages(setPackages, fail),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, [retryKey]);
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 4000);
-  };
-
-  // Dashboard Stats
   const stats = useMemo(() => {
     const total = locations.length;
     const active = locations.filter((l) => l.status === "Active").length;
-    const cities = new Set(locations.map((l) => l.city.trim().toLowerCase()).filter(Boolean)).size;
-    const transportHubs = locations.filter((l) =>
-      ["Airport", "Railway Station", "Bus Stand"].includes(l.type)
-    ).length;
+    const cities = new Set(locations.map((l) => (l.city || "").trim().toLowerCase()).filter(Boolean)).size;
+    const transportHubs = locations.filter((l) => ["Airport", "Railway Station", "Bus Stand"].includes(l.type)).length;
     return { total, active, cities, transportHubs };
   }, [locations]);
 
-  // Filtered & Sorted Locations
   const filteredLocations = useMemo(() => {
+    const q = search.trim().toLowerCase();
     return locations
       .filter((loc) => {
-        const query = search.trim().toLowerCase();
         const matchSearch =
-          !query ||
-          loc.name.toLowerCase().includes(query) ||
-          (loc.code && loc.code.toLowerCase().includes(query)) ||
-          loc.city.toLowerCase().includes(query) ||
-          (loc.district && loc.district.toLowerCase().includes(query)) ||
-          loc.state.toLowerCase().includes(query) ||
-          (loc.area && loc.area.toLowerCase().includes(query)) ||
-          (loc.pincode && loc.pincode.includes(query));
-
+          !q ||
+          [loc.name, loc.code, loc.city, loc.district, loc.state, loc.area, loc.pincode].some((v) => (v || "").toLowerCase().includes(q));
         const matchType = typeFilter === "All" || loc.type === typeFilter;
         const matchState = stateFilter === "All" || loc.state === stateFilter;
         const matchStatus = statusFilter === "All" || loc.status === statusFilter;
-
         return matchSearch && matchType && matchState && matchStatus;
       })
       .sort((a, b) => {
-        if (sortBy === "name") return a.name.localeCompare(b.name);
-        if (sortBy === "city") return a.city.localeCompare(b.city);
-        if (sortBy === "type") return a.type.localeCompare(b.type);
+        if (sortBy === "name") return (a.name || "").localeCompare(b.name || "");
+        if (sortBy === "city") return (a.city || "").localeCompare(b.city || "");
+        if (sortBy === "type") return (a.type || "").localeCompare(b.type || "");
         return (a.displayOrder || 99) - (b.displayOrder || 99);
       });
   }, [locations, search, typeFilter, stateFilter, statusFilter, sortBy]);
 
-  // Reset & Open Create Form
-  const handleOpenCreate = () => {
-    setEditingLocation(null);
-    setFormData({
-      name: "",
-      code: "",
-      type: "City",
-      state: "Tamil Nadu",
-      district: "",
-      city: "",
-      area: "",
-      pincode: "",
-      address: "",
-      parentLocationId: "",
-      lat: "",
-      lng: "",
-      placeId: "",
-      pickupEnabled: true,
-      dropEnabled: true,
-      onlineBookingEnabled: true,
-      adminBookingEnabled: true,
-      serviceIds: services.filter((s) => s.status === "Active").map((s) => s.id),
-      status: "Active",
-      displayOrder: locations.length + 1,
-    });
-    setFormError(null);
-    setActiveTab("basic");
-    setShowModal(true);
-  };
+  const tabHasError = (tab: FormTab) => TAB_FIELDS[tab].some((f) => fieldErrors[f]);
+  const errNode = (f: LocationField) => (fieldErrors[f] ? <p className="text-[10px] text-red-600 mt-1">{fieldErrors[f]}</p> : null);
 
-  // Open Edit Form
-  const handleOpenEdit = (loc: MasterLocation) => {
+  const openForm = (loc: MasterLocation | null) => {
     setEditingLocation(loc);
-    setFormData({
-      name: loc.name || "",
-      code: loc.code || "",
-      type: loc.type || "City",
-      state: loc.state || "Tamil Nadu",
-      district: loc.district || "",
-      city: loc.city || "",
-      area: loc.area || "",
-      pincode: loc.pincode || "",
-      address: loc.address || "",
-      parentLocationId: loc.parentLocationId || "",
-      lat: loc.lat !== undefined ? String(loc.lat) : "",
-      lng: loc.lng !== undefined ? String(loc.lng) : "",
-      placeId: loc.placeId || "",
-      pickupEnabled: loc.pickupEnabled !== false,
-      dropEnabled: loc.dropEnabled !== false,
-      onlineBookingEnabled: loc.onlineBookingEnabled !== false,
-      adminBookingEnabled: loc.adminBookingEnabled !== false,
-      serviceIds: loc.serviceIds || [],
-      status: loc.status || "Active",
-      displayOrder: loc.displayOrder || 1,
-    });
+    setFormData(
+      loc
+        ? {
+            name: loc.name || "",
+            code: loc.code || "",
+            type: loc.type || "City",
+            state: loc.state || "",
+            district: loc.district || "",
+            city: loc.city || "",
+            area: loc.area || "",
+            pincode: loc.pincode || "",
+            address: loc.address || "",
+            parentLocationId: loc.parentLocationId || "",
+            lat: typeof loc.lat === "number" ? String(loc.lat) : "",
+            lng: typeof loc.lng === "number" ? String(loc.lng) : "",
+            placeId: loc.placeId || "",
+            pickupEnabled: loc.pickupEnabled !== false,
+            dropEnabled: loc.dropEnabled !== false,
+            onlineBookingEnabled: loc.onlineBookingEnabled !== false,
+            adminBookingEnabled: loc.adminBookingEnabled !== false,
+            serviceIds: loc.serviceIds || [],
+            status: loc.status || "Active",
+            displayOrder: loc.displayOrder || 1,
+          }
+        : emptyForm(
+            services.filter((s) => s.status === "Active").map((s) => s.id),
+            locations.reduce((m, l) => Math.max(m, l.displayOrder || 0), 0) + 1,
+          ),
+    );
     setFormError(null);
+    setFieldErrors({});
     setActiveTab("basic");
     setShowModal(true);
   };
+  const handleOpenCreate = () => openForm(null);
+  const handleOpenEdit = (loc: MasterLocation) => openForm(loc);
 
-  // Save Form Handler
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setFormError(null);
-
-    // Validation
-    const nameTrim = formData.name.trim();
-    const cityTrim = formData.city.trim();
-    const stateTrim = formData.state.trim();
-
-    if (!nameTrim) {
-      setFormError("Location Name is required.");
-      setActiveTab("basic");
+    const errors = validateLocation(formData, locations, editingLocation?.id ?? null);
+    setFieldErrors(errors);
+    const keys = Object.keys(errors) as LocationField[];
+    if (keys.length) {
+      setFormError(`Please fix: ${keys.map((k) => errors[k]).join(" ")}`);
+      const tab = (Object.keys(TAB_FIELDS) as FormTab[]).find((t) => TAB_FIELDS[t].includes(keys[0]));
+      if (tab) setActiveTab(tab);
       return;
     }
-
-    if (!cityTrim) {
-      setFormError("City / Town is required.");
-      setActiveTab("geo");
-      return;
-    }
-
-    if (!stateTrim) {
-      setFormError("State is required.");
-      setActiveTab("geo");
-      return;
-    }
-
-    // Latitude & Longitude validation
-    let latNum: number | undefined;
-    let lngNum: number | undefined;
-
-    if (formData.lat.trim()) {
-      latNum = parseFloat(formData.lat.trim());
-      if (isNaN(latNum) || latNum < -90 || latNum > 90) {
-        setFormError("Latitude must be a valid number between -90 and 90.");
-        setActiveTab("geo");
-        return;
-      }
-    }
-
-    if (formData.lng.trim()) {
-      lngNum = parseFloat(formData.lng.trim());
-      if (isNaN(lngNum) || lngNum < -180 || lngNum > 180) {
-        setFormError("Longitude must be a valid number between -180 and 180.");
-        setActiveTab("geo");
-        return;
-      }
-    }
-
-    // Duplicate Check in same city
-    const existingDup = locations.find(
-      (l) =>
-        l.name.trim().toLowerCase() === nameTrim.toLowerCase() &&
-        l.city.trim().toLowerCase() === cityTrim.toLowerCase() &&
-        (!editingLocation || l.id !== editingLocation.id)
-    );
-
-    if (existingDup) {
-      setFormError(`A location named "${nameTrim}" already exists in ${cityTrim}.`);
-      setActiveTab("basic");
-      return;
-    }
-
     setIsSubmitting(true);
-
-    const generatedCode =
-      formData.code.trim().toUpperCase() ||
-      nameTrim
-        .replace(/[^a-z0-9]/gi, "")
-        .substring(0, 8)
-        .toUpperCase();
-
-    const parentLoc = locations.find((l) => l.id === formData.parentLocationId);
-
-    const payload: Partial<MasterLocation> = {
-      name: nameTrim,
-      normalizedName: nameTrim.toLowerCase(),
-      code: generatedCode,
-      type: formData.type,
-      state: stateTrim,
-      district: formData.district.trim(),
-      city: cityTrim,
-      area: formData.area.trim(),
-      pincode: formData.pincode.trim(),
-      address: formData.address.trim(),
-      parentLocationId: formData.parentLocationId || undefined,
-      parentLocationName: parentLoc ? parentLoc.name : undefined,
-      lat: latNum,
-      lng: lngNum,
-      placeId: formData.placeId.trim() || undefined,
-      pickupEnabled: formData.pickupEnabled,
-      dropEnabled: formData.dropEnabled,
-      onlineBookingEnabled: formData.onlineBookingEnabled,
-      adminBookingEnabled: formData.adminBookingEnabled,
-      serviceIds: formData.serviceIds,
-      status: formData.status,
-      displayOrder: Number(formData.displayOrder) || 1,
-    };
-
-    let success = false;
-    let newDocId: string | null = null;
-    if (editingLocation) {
-      success = await setFirestoreDocument(COLLECTIONS.LOCATIONS, editingLocation.id, payload);
-    } else {
-      newDocId = await addFirestoreDocument(COLLECTIONS.LOCATIONS, payload);
-      success = !!newDocId;
-    }
-
-    setIsSubmitting(false);
-
-    if (success) {
-      if (editingLocation) {
-        setLocations((prev) => prev.map((l) => (l.id === editingLocation.id ? ({ ...l, ...payload } as MasterLocation) : l)));
-      } else {
-        setLocations((prev) => [{ id: newDocId || `LOC-${Date.now()}`, ...payload } as MasterLocation, ...prev]);
-      }
+    try {
+      const { renamed } = await saveLocation(formData, editingLocation, locations, auth.currentUser?.uid || "");
       setShowModal(false);
       showToast(
         editingLocation
-          ? `Location "${nameTrim}" updated successfully.`
-          : `Location "${nameTrim}" created successfully.`
+          ? `Location "${formData.name.trim()}" updated${renamed ? ` (${renamed} linked record${renamed === 1 ? "" : "s"} renamed)` : ""}.`
+          : `Location "${formData.name.trim()}" created.`,
       );
-    } else {
-      setFormError("Failed to save location to database. Please check your internet connection.");
+    } catch (err) {
+      setFormError(actionError(err));
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  // Toggle Active Status Quick Action
-  const handleToggleStatus = async (loc: MasterLocation) => {
-    const nextStatus = loc.status === "Active" ? "Inactive" : "Active";
-    const ok = await setFirestoreDocument(COLLECTIONS.LOCATIONS, loc.id, {
-      status: nextStatus,
-    });
-    if (ok) {
-      showToast(`Location "${loc.name}" is now ${nextStatus}.`);
-    } else {
-      showToast("Failed to update status.");
+  const changeStatus = async (loc: MasterLocation, status: "Active" | "Inactive") => {
+    if (statusBusyId) return;
+    setStatusBusyId(loc.id);
+    try {
+      await setLocationStatus(loc, status);
+      showToast(`Location "${loc.name}" is now ${status}.`);
+    } catch (err) {
+      showToast(actionError(err), "error");
+    } finally {
+      setStatusBusyId(null);
     }
   };
+  const handleToggleStatus = (loc: MasterLocation) => changeStatus(loc, loc.status === "Active" ? "Inactive" : "Active");
 
-  // Check references before deletion
-  const handlePromptDelete = (loc: MasterLocation) => {
+  const handlePromptDelete = async (loc: MasterLocation) => {
     setDeletingLocation(loc);
-    setDeleteRefNotice(null);
-
-    // Check bookings reference
-    const refBookings = bookings.filter(
-      (b) =>
-        (b.pickup && b.pickup.toLowerCase().includes(loc.name.toLowerCase())) ||
-        (b.drop && b.drop.toLowerCase().includes(loc.name.toLowerCase()))
-    );
-
-    // Check packages reference
-    const refPackages = packages.filter(
-      (p) =>
-        p.startingLocation?.toLowerCase() === loc.name.toLowerCase() ||
-        p.endingLocation?.toLowerCase() === loc.name.toLowerCase() ||
-        (p.destinations && p.destinations.some((d) => d.toLowerCase() === loc.name.toLowerCase()))
-    );
-
-    if (refBookings.length > 0 || refPackages.length > 0) {
-      setDeleteRefNotice(
-        `This location is referenced by ${refBookings.length} booking(s) and ${refPackages.length} tour package(s). Hard deletion will break transaction history. Deactivating is strongly recommended.`
-      );
+    setDeleteRefs(null);
+    setDeleteError(null);
+    try {
+      setDeleteRefs(await findLocationReferences(loc, packages));
+    } catch (err) {
+      setDeleteError(actionError(err));
     }
   };
 
-  // Confirm Delete Handler
   const handleConfirmDelete = async () => {
-    if (!deletingLocation) return;
-    const ok = await deleteFirestoreDocument(COLLECTIONS.LOCATIONS, deletingLocation.id);
-    if (ok) {
+    if (!deletingLocation || deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await deleteLocation(deletingLocation, packages);
       showToast(`Location "${deletingLocation.name}" removed.`);
-    } else {
-      showToast("Failed to delete location.");
+      setDeletingLocation(null);
+    } catch (err) {
+      setDeleteError(actionError(err));
+    } finally {
+      setDeleteBusy(false);
     }
-    setDeletingLocation(null);
   };
+
+  const blockingRefs = deleteRefs ? deleteRefs.fareRules + deleteRefs.coupons + deleteRefs.children : 0;
 
   return (
     <div className="p-4 lg:p-6 space-y-6 max-w-[1600px] mx-auto min-h-screen">
-      {/* Toast Notification */}
-      {toastMessage && (
-        <div className="fixed bottom-5 right-5 z-50 bg-[#111111] text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-3 border border-gray-800 animate-slide-up text-xs font-semibold">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-          {toastMessage}
-        </div>
-      )}
+      <Toast toast={toast} />
+      {loadError && <ErrorBanner message={loadError} onRetry={() => setRetryKey((k) => k + 1)} />}
 
       {/* Header Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -872,6 +708,7 @@ export default function Locations() {
             {/* Modal Form Tabs */}
             <div className="flex border-b border-[#E5E5E5] bg-white px-5 pt-2 gap-4 text-xs font-semibold">
               <button
+                type="button"
                 onClick={() => setActiveTab("basic")}
                 className={`pb-2.5 border-b-2 transition-all ${
                   activeTab === "basic"
@@ -880,8 +717,10 @@ export default function Locations() {
                 }`}
               >
                 1. Basic Info & Type
+                {tabHasError("basic") && <span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-red-600 align-middle" aria-label="has errors" />}
               </button>
               <button
+                type="button"
                 onClick={() => setActiveTab("geo")}
                 className={`pb-2.5 border-b-2 transition-all ${
                   activeTab === "geo"
@@ -890,8 +729,10 @@ export default function Locations() {
                 }`}
               >
                 2. Geography & Coordinates
+                {tabHasError("geo") && <span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-red-600 align-middle" aria-label="has errors" />}
               </button>
               <button
+                type="button"
                 onClick={() => setActiveTab("services")}
                 className={`pb-2.5 border-b-2 transition-all ${
                   activeTab === "services"
@@ -900,11 +741,12 @@ export default function Locations() {
                 }`}
               >
                 3. Availability & Services
+                {tabHasError("services") && <span className="ml-1 inline-block w-1.5 h-1.5 rounded-full bg-red-600 align-middle" aria-label="has errors" />}
               </button>
             </div>
 
             {/* Modal Body */}
-            <form onSubmit={handleSave} className="p-5 space-y-4 overflow-y-auto flex-1 text-xs">
+            <form onSubmit={handleSave} noValidate className="p-5 space-y-4 overflow-y-auto flex-1 text-xs">
               {formError && (
                 <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs flex items-center gap-2">
                   <svg className="w-4 h-4 text-red-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -930,6 +772,7 @@ export default function Locations() {
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                         required
                       />
+                      {errNode("name")}
                     </div>
 
                     <div>
@@ -960,6 +803,7 @@ export default function Locations() {
                         placeholder="e.g. MAA, CJB, MDU"
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs uppercase font-mono focus:border-[#E21B23] focus:outline-none"
                       />
+                      {errNode("code")}
                     </div>
 
                     <div className="sm:col-span-2">
@@ -980,6 +824,7 @@ export default function Locations() {
                             </option>
                           ))}
                       </select>
+                      {errNode("parentLocationId")}
                       <span className="text-[10px] text-[#666] mt-0.5 block">
                         Allows linking an airport or bus stand to a master parent city.
                       </span>
@@ -1007,6 +852,7 @@ export default function Locations() {
                           </option>
                         ))}
                       </select>
+                      {errNode("state")}
                     </div>
 
                     <div>
@@ -1034,6 +880,7 @@ export default function Locations() {
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                         required
                       />
+                      {errNode("city")}
                     </div>
 
                     <div>
@@ -1060,6 +907,7 @@ export default function Locations() {
                         placeholder="e.g. 600027, 641014"
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs font-mono focus:border-[#E21B23] focus:outline-none"
                       />
+                      {errNode("pincode")}
                     </div>
 
                     <div className="sm:col-span-2">
@@ -1087,6 +935,7 @@ export default function Locations() {
                         placeholder="e.g. 12.9941"
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs font-mono focus:border-[#E21B23] focus:outline-none"
                       />
+                      {errNode("lat")}
                     </div>
 
                     <div>
@@ -1100,6 +949,7 @@ export default function Locations() {
                         placeholder="e.g. 80.1709"
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs font-mono focus:border-[#E21B23] focus:outline-none"
                       />
+                      {errNode("lng")}
                     </div>
                   </div>
                 </div>
@@ -1110,7 +960,8 @@ export default function Locations() {
                 <div className="space-y-4">
                   <div className="p-3 bg-gray-50 border border-[#E5E5E5] rounded-xl space-y-2">
                     <div className="text-[11px] font-bold text-[#111111]">Booking Availability Config</div>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
+                    {errNode("usage")}
+                  <div className="grid grid-cols-2 gap-2 text-xs">
                       <label className="flex items-center gap-2 cursor-pointer p-2 bg-white rounded-lg border border-[#E5E5E5]">
                         <input
                           type="checkbox"
@@ -1179,6 +1030,7 @@ export default function Locations() {
                         onChange={(e) => setFormData({ ...formData, displayOrder: parseInt(e.target.value) || 1 })}
                         className="w-full p-2.5 border border-[#E5E5E5] rounded-xl text-xs focus:border-[#E21B23] focus:outline-none"
                       />
+                      {errNode("displayOrder")}
                     </div>
                   </div>
 
@@ -1263,63 +1115,54 @@ export default function Locations() {
         </div>
       )}
 
-      {/* Delete Confirmation & Safeguard Dialog */}
       {deletingLocation && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4 border border-[#E5E5E5]">
-            <div className="flex items-center gap-3 text-red-600">
-              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center shrink-0">
-                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                </svg>
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-[#111111]">Delete Location</h3>
-                <p className="text-xs text-[#666]">{deletingLocation.name}</p>
-              </div>
-            </div>
-
-            {deleteRefNotice ? (
-              <div className="p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl text-xs space-y-2">
-                <div className="font-bold">⚠️ Linked References Guard</div>
-                <p>{deleteRefNotice}</p>
-              </div>
-            ) : (
-              <p className="text-xs text-[#666]">
-                Are you sure you want to delete <strong>"{deletingLocation.name}"</strong> from master locations?
-              </p>
-            )}
-
-            <div className="flex items-center justify-end gap-2 pt-2">
-              <button
-                onClick={() => setDeletingLocation(null)}
-                className="px-4 py-2 border border-[#E5E5E5] text-[#111111] text-xs font-semibold rounded-xl"
-              >
+        <Modal
+          title={`Delete "${deletingLocation.name}"?`}
+          onClose={() => setDeletingLocation(null)}
+          busy={deleteBusy}
+          footer={
+            <>
+              <button onClick={() => setDeletingLocation(null)} disabled={deleteBusy} className="px-4 py-2 border border-[#E5E5E5] text-[#111111] text-xs font-semibold rounded-xl disabled:opacity-50">
                 Cancel
               </button>
-
-              {deleteRefNotice ? (
+              {deletingLocation.status === "Active" && (
                 <button
                   onClick={() => {
-                    handleToggleStatus(deletingLocation);
+                    void changeStatus(deletingLocation, "Inactive");
                     setDeletingLocation(null);
                   }}
-                  className="px-4 py-2 bg-amber-600 text-white text-xs font-semibold rounded-xl hover:bg-amber-700"
+                  disabled={deleteBusy}
+                  className="px-4 py-2 bg-amber-600 text-white text-xs font-semibold rounded-xl hover:bg-amber-700 disabled:opacity-50"
                 >
                   Deactivate Instead
                 </button>
-              ) : (
-                <button
-                  onClick={handleConfirmDelete}
-                  className="px-4 py-2 bg-red-600 text-white text-xs font-semibold rounded-xl hover:bg-red-700"
-                >
-                  Confirm Delete
-                </button>
               )}
-            </div>
+              <button
+                onClick={() => void handleConfirmDelete()}
+                disabled={deleteBusy || !deleteRefs || blockingRefs > 0}
+                className="px-4 py-2 bg-red-600 text-white text-xs font-semibold rounded-xl hover:bg-red-700 disabled:opacity-50"
+              >
+                {deleteBusy ? "Deleting…" : "Confirm Delete"}
+              </button>
+            </>
+          }
+        >
+          <div className="space-y-3 text-xs text-[#444]">
+            {!deleteRefs && !deleteError && <p>Checking where this location is used…</p>}
+            {deleteRefs && blockingRefs > 0 && (
+              <div className="p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xl">
+                Used by {deleteRefs.fareRules} fare rule(s), {deleteRefs.coupons} coupon(s) and {deleteRefs.children} sub-location(s). Update those records or deactivate this location instead.
+              </div>
+            )}
+            {deleteRefs && blockingRefs === 0 && (
+              <p>
+                No fare rules, coupons or sub-locations use this location.
+                {deleteRefs.packages > 0 ? ` ${deleteRefs.packages} tour package(s) mention it by name and keep their text.` : ""} Past bookings keep their recorded addresses.
+              </p>
+            )}
+            {deleteError && <div role="alert" className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl font-semibold">{deleteError}</div>}
           </div>
-        </div>
-      )}
-    </div>
+        </Modal>
+      )}    </div>
   );
 }

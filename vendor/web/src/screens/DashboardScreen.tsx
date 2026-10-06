@@ -12,14 +12,18 @@ import {
   Users,
   Gavel,
   ShieldCheck,
-  TrendingUp,
   Wallet,
-  ArrowRight,
   Navigation,
-  CheckCircle,
-  Building2,
-  PhoneCall
 } from 'lucide-react';
+import { dispatchableDriver } from '../services/vendorMappers';
+
+const rupees = (n: number) => `${n < 0 ? '−' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
+const DOC_LABEL: Record<FleetVehicle['docStatus'], { text: string; cls: string }> = {
+  Approved: { text: '✓ Approved', cls: 'text-emerald-600' },
+  Pending: { text: 'Awaiting review', cls: 'text-amber-600' },
+  'Needs Correction': { text: 'Needs correction', cls: 'text-amber-700' },
+  Rejected: { text: 'Rejected', cls: 'text-red-600' },
+};
 
 interface DashboardScreenProps {
   profile: VendorProfile;
@@ -40,8 +44,10 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   wallet,
   onNavigate
 }) => {
-  const activeVehicles = vehicles.filter(v => v.status === 'Active' || v.status === 'On Trip').length;
-  const availableDrivers = drivers.filter(d => d.status === 'Available').length;
+  const activeVehicles = vehicles.filter(v => v.status === 'Active' && v.docStatus === 'Approved').length;
+  const availableDrivers = drivers.filter(d => dispatchableDriver(d) && d.online).length;
+  const recordedEarnings = wallet.tripEarnings + wallet.tollReimbursements;
+  const initials = (profile.companyName || '?').substring(0, 2).toUpperCase();
 
   return (
     <div className="space-y-6 pb-20">
@@ -53,29 +59,29 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 relative z-10">
           <div className="flex items-center gap-4">
             <div className="w-16 h-16 rounded-2xl bg-[#E21E26] flex items-center justify-center text-white font-black text-2xl shadow-lg">
-              {profile.companyName.substring(0, 2).toUpperCase()}
+              {initials}
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xl font-extrabold tracking-tight">{profile.companyName}</h1>
+                <h1 className="text-xl font-extrabold tracking-tight">{profile.companyName || 'Your fleet'}</h1>
                 <span className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
                   <ShieldCheck className="w-3.5 h-3.5" /> VERIFIED FLEET VENDOR
                 </span>
               </div>
               <p className="text-xs text-gray-400 mt-1">
-                GSTIN: <span className="font-mono text-white">{profile.gstin}</span> • City: <span className="text-white font-bold">{profile.city}</span>
+                GSTIN: <span className="font-mono text-white">{profile.gstin || 'Not provided'}</span>{profile.city && <> • City: <span className="text-white font-bold">{profile.city}</span></>}
               </p>
               <p className="text-[11px] text-gray-400 mt-0.5 font-mono">
-                Contact: {profile.contactPerson} ({profile.phone})
+                Contact: {[profile.contactPerson, profile.phone].filter(Boolean).join(' · ') || '—'}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-3 bg-[#1A1A1A] p-4 rounded-2xl border border-[#333] shrink-0">
             <div>
-              <span className="text-[10px] uppercase font-bold text-gray-400 block">Fleet Revenue</span>
-              <p className="text-2xl font-black text-[#E21E26]">₹{wallet.lifetimeEarnings.toLocaleString('en-IN')}</p>
-              <span className="text-[10px] text-emerald-400 font-semibold">10% Platform Commission</span>
+              <span className="text-[10px] uppercase font-bold text-gray-400 block">Earnings Recorded (all time)</span>
+              <p className="text-2xl font-black text-[#E21E26]">{rupees(recordedEarnings)}</p>
+              <span className="text-[10px] text-gray-400 font-semibold">Agreed trip payouts + approved tolls</span>
             </div>
           </div>
         </div>
@@ -90,7 +96,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <Car className="w-4 h-4 text-[#E21E26]" />
           </div>
           <div className="text-2xl font-black text-gray-900 mt-1">{vehicles.length}</div>
-          <span className="text-[11px] text-emerald-600 font-semibold mt-1 block">{activeVehicles} Active Vehicles</span>
+          <span className="text-[11px] text-emerald-600 font-semibold mt-1 block">{activeVehicles} approved & in service</span>
         </div>
 
         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:border-[#E21E26]" onClick={() => onNavigate('drivers')}>
@@ -99,7 +105,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <Users className="w-4 h-4 text-emerald-600" />
           </div>
           <div className="text-2xl font-black text-gray-900 mt-1">{drivers.length}</div>
-          <span className="text-[11px] text-emerald-600 font-semibold mt-1 block">{availableDrivers} Drivers Ready for Ride</span>
+          <span className="text-[11px] text-emerald-600 font-semibold mt-1 block">{availableDrivers} approved & online</span>
         </div>
 
         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:border-[#E21E26]" onClick={() => onNavigate('marketplace')}>
@@ -108,7 +114,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <Gavel className="w-4 h-4 text-amber-500" />
           </div>
           <div className="text-2xl font-black text-amber-600 mt-1">{openTrips.length}</div>
-          <span className="text-[11px] text-gray-500 mt-1 block">Live Bidding Engine</span>
+          <span className="text-[11px] text-gray-500 mt-1 block">Open for accept or bid</span>
         </div>
 
         <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm cursor-pointer hover:border-[#E21E26]" onClick={() => onNavigate('wallet')}>
@@ -116,8 +122,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             <span>Wallet Balance</span>
             <Wallet className="w-4 h-4 text-[#E21E26]" />
           </div>
-          <div className="text-2xl font-black text-[#E21E26] mt-1">₹{wallet.availableBalance.toLocaleString('en-IN')}</div>
-          <span className="text-[11px] text-gray-500 mt-1 block">Instant UPI / Bank Payouts</span>
+          <div className={`text-2xl font-black mt-1 ${wallet.available < 0 ? 'text-red-600' : 'text-[#E21E26]'}`}>{rupees(wallet.available)}</div>
+          <span className="text-[11px] text-gray-500 mt-1 block">Paid by NESAM Finance on request</span>
         </div>
 
       </div>
@@ -152,16 +158,18 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                           {t.status}
                         </span>
                       </div>
-                      <p className="text-xs font-bold text-gray-800 mt-1">{t.customerName} • {t.scheduledTime}</p>
-                      <p className="text-xs text-gray-600 mt-0.5">Route: {t.pickupAddress} ➔ {t.dropAddress}</p>
+                      <p className="text-xs font-bold text-gray-800 mt-1">{[t.customerName, t.scheduledTime].filter(Boolean).join(' • ') || '—'}</p>
+                      <p className="text-xs text-gray-600 mt-0.5">Route: {t.pickupAddress || '—'} ➔ {t.dropAddress || '—'}</p>
                       <p className="text-[11px] text-gray-500 font-mono mt-1">
-                        Assigned Driver: <span className="font-bold text-gray-900">{t.driverName}</span> ({t.vehicleNumber})
+                        {t.driverId
+                          ? <>Assigned Driver: <span className="font-bold text-gray-900">{t.driverName || 'Driver'}</span>{t.vehicleNumber ? ` (${t.vehicleNumber})` : ''}</>
+                          : <span className="text-amber-600 font-bold">Driver not assigned yet</span>}
                       </p>
                     </div>
 
                     <div className="text-right border-t md:border-t-0 pt-2 md:pt-0 border-gray-200">
-                      <span className="text-[10px] text-gray-500">Vendor Net Earnings</span>
-                      <p className="text-lg font-black text-[#E21E26]">₹{t.vendorPayout}</p>
+                      <span className="text-[10px] text-gray-500">Your Payout</span>
+                      <p className="text-lg font-black text-[#E21E26]">{t.vendorPayout !== null ? rupees(t.vendorPayout) : 'Not recorded'}</p>
                     </div>
                   </div>
                 ))}
@@ -189,26 +197,25 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                     <th className="p-3">Make / Model</th>
                     <th className="p-3">Assigned Driver</th>
                     <th className="p-3">Status</th>
-                    <th className="p-3">Compliance</th>
+                    <th className="p-3">Documents</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {vehicles.map(v => (
                     <tr key={v.id} className="hover:bg-gray-50">
                       <td className="p-3 font-mono font-bold text-gray-900">{v.vehicleNumber}</td>
-                      <td className="p-3 font-semibold text-gray-700">{v.category}</td>
-                      <td className="p-3 text-gray-600">{v.make} {v.model} ({v.year})</td>
-                      <td className="p-3 font-medium text-gray-900">{v.assignedDriverName || 'Unassigned'}</td>
+                      <td className="p-3 font-semibold text-gray-700">{v.category || '—'}</td>
+                      <td className="p-3 text-gray-600">{[v.make, v.model].filter(Boolean).join(' ') || '—'}{v.year ? ` (${v.year})` : ''}</td>
+                      <td className="p-3 font-medium text-gray-900">{v.assignedDriverName || 'Unpaired'}</td>
                       <td className="p-3">
                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                          v.status === 'Active' ? 'bg-emerald-100 text-emerald-800' :
-                          v.status === 'On Trip' ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-600'
+                          v.status === 'Active' ? 'bg-emerald-100 text-emerald-800' : 'bg-gray-100 text-gray-600'
                         }`}>
-                          {v.status}
+                          {v.status === 'Active' ? 'In service' : v.status}
                         </span>
                       </td>
                       <td className="p-3">
-                        <span className="text-emerald-600 text-[11px] font-bold">✓ Approved</span>
+                        <span className={`text-[11px] font-bold ${DOC_LABEL[v.docStatus].cls}`}>{DOC_LABEL[v.docStatus].text}</span>
                       </td>
                     </tr>
                   ))}
@@ -228,7 +235,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                 <h2 className="text-sm font-bold text-gray-900 flex items-center gap-1.5">
                   <Gavel className="w-4 h-4 text-[#E21E26]" /> Open Trips Marketplace
                 </h2>
-                <p className="text-[11px] text-gray-500">Accept rate or place counter bids</p>
+                <p className="text-[11px] text-gray-500">Accept the offered payout or place a counter bid</p>
               </div>
 
               <button
@@ -240,22 +247,23 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             </div>
 
             <div className="space-y-3">
+              {openTrips.length === 0 && <p className="text-xs text-gray-500 py-4 italic text-center">No open trips right now.</p>}
               {openTrips.map(trip => (
                 <div key={trip.id} className="border border-gray-200 rounded-xl p-3 bg-gray-50 hover:border-[#E21E26] transition-all space-y-2">
                   <div className="flex items-center justify-between text-xs">
                     <span className="font-mono text-gray-500">{trip.bookingId}</span>
                     <span className="font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                      {trip.vehicleCategory}
+                      {trip.vehicleCategory || 'Any category'}
                     </span>
                   </div>
 
-                  <p className="text-xs font-bold text-gray-900 line-clamp-1">{trip.route}</p>
-                  <p className="text-[11px] text-gray-600">Date: {trip.travelDate} ({trip.distanceKm} km)</p>
+                  <p className="text-xs font-bold text-gray-900 line-clamp-1">{trip.route || '—'}</p>
+                  <p className="text-[11px] text-gray-600">Date: {trip.travelDate || '—'}{trip.distanceKm !== null ? ` (${trip.distanceKm} km)` : ''}</p>
 
                   <div className="flex items-center justify-between border-t border-gray-200 pt-2 mt-1">
                     <div>
                       <span className="text-[10px] text-gray-500">Offered Payout</span>
-                      <p className="text-base font-black text-[#E21E26]">₹{trip.offeredPayout}</p>
+                      <p className="text-base font-black text-[#E21E26]">{trip.offeredPayout !== null ? rupees(trip.offeredPayout) : 'Under review'}</p>
                     </div>
 
                     <button

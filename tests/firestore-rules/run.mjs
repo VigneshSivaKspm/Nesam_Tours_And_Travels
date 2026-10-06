@@ -51,7 +51,9 @@ if (!(await listening())) {
   }
 }
 
-const child = spawn(process.execPath, ['--test', '--test-concurrency=1', ...process.argv.slice(2), 'rules.test.mjs', 'server.test.mjs', 'marketplace.test.mjs'], {
+// TEST_FILES="rules.test.mjs server.test.mjs" npm test runs a subset while developing.
+const files = (process.env.TEST_FILES || 'rules.test.mjs server.test.mjs finance.test.mjs marketplace.test.mjs admin.test.mjs access.test.mjs workflow.test.mjs').split(/\s+/).filter(Boolean);
+const child = spawn(process.execPath, ['--test', '--test-concurrency=1', '--test-timeout=60000', ...process.argv.slice(2), ...files], {
   stdio: 'inherit',
   env: { ...process.env, FIRESTORE_EMULATOR_PORT: String(PORT) },
 });

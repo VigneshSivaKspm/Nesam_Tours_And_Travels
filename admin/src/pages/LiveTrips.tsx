@@ -1,10 +1,23 @@
+import { formatDateTime12, formatShortDateTime12, formatHourLabel } from "../utils/time";
 import { useState, useEffect } from "react";
-import { Booking } from "../types";
+import { serverTimestamp } from "firebase/firestore";
+import type { Booking } from "../types";
 import {
   subscribeBookings,
   updateFirestoreDocument,
   COLLECTIONS,
 } from "../services/adminFirestoreService";
+import { toDate } from "../services/paymentService";
+import { ConfirmDialog, ErrorBanner, Toast, useToast } from "../components/Feedback";
+import { cancelBooking } from "../services/bookingOpsService";
+
+const when = (v: unknown) =>
+  formatShortDateTime12(toDate(v)) || null;
+
+const coords = (v: unknown): { lat: number; lng: number } | null => {
+  const p = v as { lat?: unknown; lng?: unknown } | null;
+  return p && typeof p.lat === "number" && typeof p.lng === "number" && Number.isFinite(p.lat) && Number.isFinite(p.lng) ? { lat: p.lat, lng: p.lng } : null;
+};
 
 const statusConfig: Record<string, { color: string; bg: string; dot: string }> =
   {
@@ -24,16 +37,22 @@ const statusConfig: Record<string, { color: string; bg: string; dot: string }> =
     Assigned: { color: "#8B5CF6", bg: "#F5F3FF", dot: "bg-purple-500" },
   };
 
-export default function LiveTrips() {
+export default function LiveTrips({ onOpenBooking }: { onOpenBooking?: (id: string) => void } = {}) {
   const [liveTripsList, setLiveTripsList] = useState<any[]>([]);
   const [selectedTrip, setSelectedTrip] = useState<string | null>(null);
   const [photoModal, setPhotoModal] = useState<{
     title: string;
     src: string;
   } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [cancelTarget, setCancelTarget] = useState<{ id: string; bookingId: string } | null>(null);
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const { toast, show } = useToast();
 
   useEffect(() => {
     const unsub = subscribeBookings((bookings: Booking[]) => {
+      setLoadError(null);
       const active = bookings.filter(
         (b: any) =>
           b.status === "Ongoing" ||
@@ -60,14 +79,15 @@ export default function LiveTrips() {
             drop: a.drop || a.dropAddress || "—",
             customerPhone: a.phone || a.customerPhone || "",
             status:
+              (a.tripSubStatus === "Trip Started" ? "Trip Started" : a.tripSubStatus === "Reached Pickup" ? "Waiting at Pickup" : "") ||
               STAGE_LABELS[a.tripStage] ||
               a.tripStage ||
               (a.status === "Ongoing" ? "Trip Started" : a.status),
-            startedAt: a.time || "—",
-            eta: a.eta || "—",
-            currentLocation:
-              a.currentLocation || a.pickup || a.pickupAddress || "—",
-            boardingOTPVerified: a.status === "Ongoing",
+            startedAt: when(a.tripStartedAt ?? a.startedAt) ?? (a.status === "Ongoing" ? "Time not recorded" : "Not started"),
+            // Only a position the driver app actually reported (at pickup); no continuous GPS feed yet.
+            location: coords(a.driverLocation),
+            locationAt: when(a.reachedPickupAt),
+            boardingOTPVerified: !!a.boardingVerifiedAt || (a.status === "Ongoing" && !a.tripStartedAt),
             fare:
               a.fare === undefined || a.fare === null || a.fare === ""
                 ? "—"
@@ -76,23 +96,44 @@ export default function LiveTrips() {
                   : String(a.fare).startsWith("₹")
                     ? a.fare
                     : `₹${a.fare}`,
-            vendor: a.vendor || a.vendorName || "Direct Fleet",
+            vendor: a.assignedVendorId ? a.assignedVendorName || a.vendor || "Vendor fleet" : a.assignedDriverId ? "Independent driver" : "—",
             driverPhone: a.driverPhone || a.assignedDriverPhone || "",
             preTrip: a.preTrip || null,
+            vehicleVerification: a.vehicleVerification || null,
+            hasVerificationPhotos: !!(a.vehicleFrontPhoto || a.vehicleRearPhoto || a.vehicleInteriorPhoto),
           })),
         );
       } else {
         setLiveTripsList([]);
       }
-    });
+    }, setLoadError);
     return () => unsub();
   }, []);
+
+  const confirmCancel = async () => {
+    if (!cancelTarget || cancelBusy) return;
+    setCancelBusy(true);
+    setCancelError(null);
+    try {
+      // Cancelling is a server action: it records who, why and any refund, and closes the marketplace offer.
+      await cancelBooking({ bookingId: cancelTarget.id, reason: 'Emergency cancel by admin' });
+    } catch (e) {
+      setCancelError(e instanceof Error ? e.message : 'The trip was not cancelled. Check your connection and try again.');
+      setCancelBusy(false);
+      return;
+    }
+    show(`Trip ${cancelTarget.bookingId} cancelled.`);
+    setCancelTarget(null);
+    setCancelBusy(false);
+  };
 
   const trip =
     liveTripsList.find((t) => t.id === selectedTrip) || liveTripsList[0];
 
   return (
     <div className="p-6 space-y-5">
+      <Toast toast={toast} />
+      {loadError && <ErrorBanner message={loadError} />}
       {/* Stats Bar */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
@@ -195,7 +236,7 @@ export default function LiveTrips() {
                 </div>
                 <div className="mt-3 flex items-center justify-between">
                   <span className="text-[11px] text-[#999]">
-                    📍 {t.currentLocation}
+                    {t.location ? `📍 Reported at pickup${t.locationAt ? ` ${t.locationAt}` : ""}` : "No location reported"}
                   </span>
                   <span
                     className="text-[11px] font-semibold"
@@ -236,21 +277,25 @@ export default function LiveTrips() {
                       d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z M15 11a3 3 0 11-6 0 3 3 0 016 0z"
                     />
                   </svg>
-                  <p className="text-[12px] text-[#999] font-medium">
-                    Live Map — Google Maps Integration
-                  </p>
-                  <p className="text-[11px] text-[#999]">
-                    Current Location: {trip.currentLocation}
-                  </p>
-                  <div className="flex items-center gap-1 mt-1">
-                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-                    <span className="text-[11px] text-green-600 font-medium">
-                      Live GPS Tracking Active
-                    </span>
-                  </div>
-                </div>
-                <div className="absolute top-3 left-3 bg-white/90 backdrop-blur-sm rounded-lg px-3 py-2 text-[11px] font-semibold text-[#111] shadow-sm border border-[#E5E5E5]">
-                  ETA: {trip.eta}
+                  {trip.location ? (
+                    <>
+                      <p className="text-[12px] text-[#555] font-medium">
+                        Last reported position: {trip.location.lat.toFixed(5)}, {trip.location.lng.toFixed(5)}
+                      </p>
+                      <p className="text-[11px] text-[#999]">Reported when the driver reached pickup{trip.locationAt ? ` (${trip.locationAt})` : ""}</p>
+                      <a
+                        href={`https://www.google.com/maps?q=${trip.location.lat},${trip.location.lng}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[11px] font-semibold text-[#E21B23] underline"
+                      >
+                        Open in Google Maps
+                      </a>
+                    </>
+                  ) : (
+                    <p className="text-[12px] text-[#999] font-medium">No position reported for this trip yet.</p>
+                  )}
+                  <p className="text-[10px] text-[#AAA]">Continuous live GPS tracking and ETA are not enabled yet.</p>
                 </div>
                 <div
                   className="absolute top-3 right-3 bg-white/90 backdrop-blur-sm rounded-lg px-3 py-2 text-[11px] font-semibold shadow-sm border border-[#E5E5E5]"
@@ -359,7 +404,6 @@ export default function LiveTrips() {
             {/* Pre-Trip Verification Photos */}
             {(() => {
               const photos = [
-                { label: "Driver Selfie", src: trip.preTrip?.selfie },
                 { label: "Vehicle Front", src: trip.preTrip?.vehicleFront },
                 { label: "Odometer", src: trip.preTrip?.odometer },
                 { label: "Rear Seat", src: trip.preTrip?.rearSeat },
@@ -376,17 +420,29 @@ export default function LiveTrips() {
                     />
                     Pre-Trip Verification Photos
                     <span
-                      className={`ml-auto text-[10px] font-semibold px-2 py-0.5 rounded-full ${submitted.length === 4 ? "text-green-600 bg-green-50" : "text-[#999] bg-[#F5F5F5]"}`}
+                      className={`ml-auto text-[10px] font-semibold px-2 py-0.5 rounded-full ${trip.hasVerificationPhotos || submitted.length === 3 ? "text-green-600 bg-green-50" : "text-[#999] bg-[#F5F5F5]"}`}
                     >
-                      {submitted.length}/4 Submitted
+                      {trip.hasVerificationPhotos ? "Camera verification submitted" : `${submitted.length}/3 Submitted`}
                     </span>
                   </h4>
-                  {submitted.length === 0 ? (
+                  {trip.hasVerificationPhotos ? (
+                    <div className="py-3 text-[12px] text-[#333] space-y-2">
+                      <div>
+                        Front, rear and dashboard photos were captured live with the camera
+                        {trip.vehicleVerification?.riskLevel ? ` — fraud risk: ${String(trip.vehicleVerification.riskLevel).toUpperCase()}` : ""}.
+                      </div>
+                      {onOpenBooking && (
+                        <button onClick={() => onOpenBooking(trip.id)} className="px-3 py-1.5 rounded-lg border border-[#D4D4D4] text-[12px] font-semibold hover:bg-gray-50">
+                          Review photos in booking details
+                        </button>
+                      )}
+                    </div>
+                  ) : submitted.length === 0 ? (
                     <div className="py-6 text-center text-[11px] text-[#999]">
                       Driver has not uploaded verification photos yet
                     </div>
                   ) : (
-                    <div className="grid grid-cols-4 gap-3">
+                    <div className="grid grid-cols-3 gap-3">
                       {photos.map((p) => (
                         <div key={p.label} className="text-center">
                           <button
@@ -439,44 +495,30 @@ export default function LiveTrips() {
 
             {/* Actions */}
             <div className="flex gap-3">
-              <a
-                href={`tel:${trip.driverPhone || ""}`}
-                className="flex-1 text-center py-2.5 text-[12px] font-semibold border border-[#E5E5E5] rounded-xl hover:bg-[#F5F5F5] text-[#444] transition-colors cursor-pointer block"
-              >
-                Contact Driver
-              </a>
-              <a
-                href={`tel:${trip.customerPhone || ""}`}
-                className="flex-1 text-center py-2.5 text-[12px] font-semibold border border-[#E5E5E5] rounded-xl hover:bg-[#F5F5F5] text-[#444] transition-colors cursor-pointer block"
-              >
-                Contact Customer
-              </a>
+              {trip.driverPhone ? (
+                <a
+                  href={`tel:${trip.driverPhone}`}
+                  className="flex-1 text-center py-2.5 text-[12px] font-semibold border border-[#E5E5E5] rounded-xl hover:bg-[#F5F5F5] text-[#444] transition-colors cursor-pointer block"
+                >
+                  Contact Driver
+                </a>
+              ) : (
+                <span className="flex-1 text-center py-2.5 text-[12px] font-semibold border border-[#E5E5E5] rounded-xl text-[#BBB] block">No driver phone</span>
+              )}
+              {trip.customerPhone ? (
+                <a
+                  href={`tel:${trip.customerPhone}`}
+                  className="flex-1 text-center py-2.5 text-[12px] font-semibold border border-[#E5E5E5] rounded-xl hover:bg-[#F5F5F5] text-[#444] transition-colors cursor-pointer block"
+                >
+                  Contact Customer
+                </a>
+              ) : (
+                <span className="flex-1 text-center py-2.5 text-[12px] font-semibold border border-[#E5E5E5] rounded-xl text-[#BBB] block">No customer phone</span>
+              )}
               <button
-                onClick={async () => {
-                  if (
-                    window.confirm(
-                      `Are you sure you want to trigger an Emergency Cancel for booking ${trip.bookingId}?`,
-                    )
-                  ) {
-                    await updateFirestoreDocument(
-                      COLLECTIONS.BOOKINGS,
-                      trip.id,
-                      {
-                        status: "Cancelled",
-                        cancelledAt: new Date().toISOString(),
-                        cancelReason: "Emergency cancel by admin",
-                      },
-                    );
-                    await updateFirestoreDocument(
-                      COLLECTIONS.MARKETPLACE,
-                      trip.id,
-                      { status: "Closed" },
-                    );
-                    setLiveTripsList((prev) =>
-                      prev.filter((t) => t.id !== trip.id),
-                    );
-                    alert(`Trip ${trip.bookingId} cancelled.`);
-                  }
+                onClick={() => {
+                  setCancelError(null);
+                  setCancelTarget({ id: trip.id, bookingId: trip.bookingId });
                 }}
                 className="flex-1 py-2.5 text-[12px] font-semibold border border-[#E5E5E5] rounded-xl hover:bg-[#FEF2F2] text-[#E21B23] transition-colors cursor-pointer"
               >
@@ -486,6 +528,19 @@ export default function LiveTrips() {
           </div>
         )}
       </div>
+
+      {cancelTarget && (
+        <ConfirmDialog
+          title="Emergency cancel"
+          message={`Cancel booking ${cancelTarget.bookingId} now? The driver and customer see the trip as cancelled and its marketplace offer is withdrawn.`}
+          confirmLabel="Cancel trip"
+          danger
+          busy={cancelBusy}
+          error={cancelError}
+          onConfirm={() => void confirmCancel()}
+          onCancel={() => setCancelTarget(null)}
+        />
+      )}
 
       {/* Photo Modal */}
       {photoModal && (

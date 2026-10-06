@@ -17,14 +17,135 @@ export interface Booking {
   fareVerified?: boolean;
   couponCode?: string;
   discount?: number;
+  /** Written only by the booking server (createBooking / createAdminBooking / overrideBookingFare). */
   fareBreakdown?: {
+    baseFare?: number;
+    distanceFare?: number;
+    timeFare?: number;
+    nightCharge?: number;
+    driverAllowance?: number;
+    minimumFareAdjustment?: number;
+    /** Pre-GST difference from an admin-authorised override. */
+    adminAdjustment?: number;
     subtotal?: number;
     discount?: number;
     taxableAmount?: number;
     gstRate?: number;
     gst?: number;
     total?: number;
+    distanceKm?: number;
+    durationMin?: number;
   };
+  /** Audit of an admin-authorised fare (null when the calculated fare is charged). */
+  fareOverride?: {
+    calculatedFare: number | null;
+    overriddenFare: number;
+    previousFare?: number;
+    reason: string;
+    byUid: string;
+    byName?: string;
+    at?: any;
+  } | null;
+  /** Commission the booking was published under (server-written). */
+  commission?: { rate: number; base: "taxable" | "total"; source: string; policyVersion?: number } | null;
+  /** How the partner payout was set: offered (policy), bid or manual. */
+  payoutSource?: string;
+  /** Immutable financial snapshot written by the server when the trip is finalized. */
+  finance?: {
+    fareTotal: number;
+    taxableAmount: number;
+    gst: number;
+    partnerType: "vendor" | "driver";
+    partnerId: string;
+    partnerPayout: number | null;
+    payoutSource: string;
+    commissionRate: number | null;
+    commissionBase: "taxable" | "total" | null;
+    commissionSource: string;
+    platformRevenue: number | null;
+    tollCharges: number;
+    paymentMethod: string;
+    warnings: string[];
+    finalizedAt?: unknown;
+  };
+  /** Customer-readable breakup written by the server: each line is "included" in the fare or "extra" (payable separately). */
+  fareBreakup?: {
+    lines: { key: string; label: string; amount: number | null; treatment: "included" | "extra" | "not_applicable"; detail: string }[];
+    packageTotal: number;
+    knownExtras: number;
+    hasActualsExtras: boolean;
+  } | null;
+  discountDetails?: { type: string; value: number; amount: number; source: string; reason: string; byName?: string } | null;
+  globalAdjustmentApplied?: { id: string; name: string; direction: string; percent: number; amount: number } | null;
+  customerWhatsapp?: { countryCode: string; number: string; e164: string; sameAsMobile: boolean } | null;
+  customerEmail?: string;
+  customerVerified?: boolean;
+  driverPhone?: string;
+  tolls?: { id: string; name: string; amount: number; receiptPhotoUrl?: string }[];
+  pickupLat?: number;
+  pickupLng?: number;
+  dropLat?: number;
+  dropLng?: number;
+  pickupSource?: string;
+  /** Pickup instant (UTC timestamp). The display strings `date` / `time` are copies for older screens. */
+  pickupAt?: any;
+  scheduledAt?: any;
+  rideTiming?: string;
+  approvedAt?: any;
+  approvedByName?: string;
+  rejectionReason?: string;
+  cancelReason?: string;
+  cancelledAt?: any;
+  cancellation?: { cancelledBy?: { type?: string; id?: string; name?: string }; reason?: string; charge?: number; at?: any; amountPaid?: number; rejected?: boolean } | null;
+  refund?: {
+    status: string;
+    eligible?: boolean;
+    amount: number;
+    method?: string;
+    reference?: string;
+    requestedAt?: any;
+    processedAt?: any;
+    processedByName?: string;
+    history?: { status: string; amount: number; method?: string; reference?: string; note?: string; byName?: string; at?: any }[];
+  } | null;
+  /** Derived by the server from the payment transactions; never typed in. */
+  paymentSummary?: {
+    amountDue: number;
+    totalPaid: number;
+    balanceDue: number;
+    partnerCashHeld: number;
+    advancePaid: number;
+    paidByMethod: Record<string, number>;
+    refunded: number;
+    status: string;
+    overpaid: number;
+    transactions: number;
+  } | null;
+  /** Trip steps: Not Started → Trip Started → Reached Pickup → Trip Ended. */
+  tripSubStatus?: string;
+  tripStartedAt?: any;
+  reachedPickupAt?: any;
+  tripEndedAt?: any;
+  tripStartedLocation?: { lat: number; lng: number; accuracy?: number | null } | null;
+  reachedPickupLocation?: { lat: number; lng: number; accuracy?: number | null } | null;
+  tripEndedLocation?: { lat: number; lng: number; accuracy?: number | null } | null;
+  boardingVerifiedAt?: any;
+  vehicleFrontPhoto?: string;
+  vehicleRearPhoto?: string;
+  vehicleInteriorPhoto?: string;
+  vehicleVerification?: { status: string; riskLevel: string; flagged: boolean; submittedAt?: any } | null;
+  unassignedAlert?: { severity: string; since?: any; acknowledgedBy?: string; acknowledgedByName?: string; acknowledgedAt?: any; acknowledgedSeverity?: string } | null;
+  lastAssignment?: { action: string; byName?: string; reason?: string } | null;
+  /** Stable reference to vehicles/{id}; assignedVehicleNumber is a display copy. */
+  assignedVehicleId?: string;
+  serviceId?: string;
+  tripType?: string;
+  notes?: string;
+  /** Set while an invoice is active for the trip (invoiceService). */
+  invoiceId?: string;
+  invoiceNumber?: string;
+  source?: string;
+  createdBy?: string;
   completedAt?: any;
   customer: string;
   customerName?: string;
@@ -109,6 +230,8 @@ export interface VehicleCategoryFare {
   tollIncluded: boolean;
   parkingIncluded: boolean;
   permitCharge: number;
+  /** Carrier / luggage charge per trip, quoted as an extra. */
+  carrierCharge?: number;
   outstationPerKmRate?: number;
   outstationDriverBattaPerDay?: number;
   outstationMinKmPerDay?: number;
@@ -204,16 +327,17 @@ export interface Vendor {
   createdAt?: any;
 }
 
+/** customers/{uid}. Booking counts and spend are derived from bookings (services/customerStats). */
 export interface Customer {
   id: string;
   name: string;
   phone: string;
   email: string;
-  bookings: number;
-  spent: string;
-  wallet: string;
   status: string;
-  lastBooking: string;
+  city?: string;
+  gender?: string;
+  notes?: string;
+  source?: string;
   createdAt?: any;
 }
 
@@ -290,23 +414,16 @@ export interface NotificationRecord {
   priority?: "low" | "normal" | "high" | "urgent";
   isSystemAlert?: boolean;
   broadcast?: boolean;
-}
-
-export interface StaffMember {
-  id: string;
-  name: string;
-  email: string;
-  role: string;
-  phone: string;
-  status: string;
-  lastLogin: string;
-  permissions: string[];
-}
-
-export interface RoleDefinition {
-  name: string;
-  permissions: string[];
-  color: string;
+  /** Tab the notification belongs to; older records are classified from their type. */
+  category?: string;
+  severity?: "info" | "success" | "warning" | "critical";
+  /** Which of the three tones plays for it. */
+  sound?: "new_booking" | "approval" | "general";
+  bookingId?: string;
+  bookingCode?: string;
+  cta?: { label: string; page: string; bookingId?: string } | null;
+  /** false = quiet inbox entry only (no popup or tone). */
+  push?: boolean;
 }
 
 export interface InvoiceItem {
@@ -351,7 +468,11 @@ export interface TripSnapshot {
 export interface Invoice {
   id: string;
   invoiceNumber: string;
+  /** Booking code shown to customers. */
   bookingId: string;
+  /** Firestore id of the booking. */
+  bookingDocumentId?: string;
+  voidReason?: string;
   customerId?: string;
   invoiceDate: string;
   dueDate?: string;
@@ -489,8 +610,8 @@ export interface MasterLocation {
   address?: string;
   parentLocationId?: string;
   parentLocationName?: string;
-  lat?: number;
-  lng?: number;
+  lat?: number | null;
+  lng?: number | null;
   placeId?: string;
   pickupEnabled: boolean;
   dropEnabled: boolean;

@@ -1,5 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
-import { vendorStatusLabel } from "../utils/vendorStatus";
+import { useEffect, useMemo, useState } from "react";
 import {
   BarChart,
   Bar,
@@ -15,40 +14,19 @@ import {
   LineChart,
   Line,
 } from "recharts";
-import { Booking, Vendor } from "../types";
-import {
-  subscribeBookings,
-  subscribeVendors,
-} from "../services/adminFirestoreService";
-import {
-  parseAmount,
-  bookingDate,
-  isPaid,
-  formatINR,
-  inMonth,
-  pctChange,
-  formatPct,
-  monthlyGstSummary,
-  GST_RATE,
-} from "../utils/analytics";
+import type { Booking, Vendor } from "../types";
+import { subscribeBookings, subscribeVendors } from "../services/adminFirestoreService";
+import { formatINR, formatPct, GST_RATE, monthlyGstSummary, parseAmount, pctChange } from "../utils/analytics";
+import { subscribeLedger, summarizePartner, tripDate, type LedgerEntry } from "../services/earningsService";
+import { toDate } from "../services/paymentService";
+import { normalizeVendorStatus, VENDOR_STATUS_META } from "../utils/vendorStatus";
+import { ErrorBanner } from "../components/Feedback";
 
-const COLORS = ["#E21B23", "#111111", "#444444", "#777777", "#AAAAAA"];
-
-const SERVICE_TYPES = [
-  { name: "Airport Taxi", match: "airport" },
-  { name: "Outstation Cab", match: "outstation" },
-  { name: "One Way Taxi", match: "one way" },
-  { name: "Local Rental", match: "local" },
-  { name: "Tour Package", match: "tour" },
-];
+const COLORS = ["#E21B23", "#111111", "#444444", "#777777", "#AAAAAA", "#F59E0B", "#10B981"];
 
 function downloadCsv(filename: string, headers: string[], rows: (string | number)[][]) {
-  const content = [
-    headers.join(","),
-    ...rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")),
-  ].join("\n");
-  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
+  const content = [headers.join(","), ...rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))].join("\n");
+  const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8;" }));
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
@@ -56,225 +34,220 @@ function downloadCsv(filename: string, headers: string[], rows: (string | number
   URL.revokeObjectURL(url);
 }
 
-export default function Reports() {
-  const [activeTab, setActiveTab] = useState<
-    "bookings" | "revenue" | "vendors" | "cancellations" | "gst"
-  >("bookings");
-  const [liveBookings, setLiveBookings] = useState<Booking[]>([]);
-  const [liveVendors, setLiveVendors] = useState<Vendor[]>([]);
+const monthKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+const monthStart = (key: string) => new Date(Number(key.slice(0, 4)), Number(key.slice(5, 7)) - 1, 1);
+/** Booking date used for demand metrics (when it was booked). */
+const bookedOn = (b: Booking) => toDate(b.createdAt) ?? (b.date ? toDate(b.date) : null);
+const isPaid = (b: Booking) => b.payment === "Paid" || b.paymentStatus === "Paid";
+const serviceOf = (b: Booking) => (b.service || b.serviceType || "Unspecified").trim() || "Unspecified";
+const vendorName = (v: Vendor) => v.companyName || (v as Vendor & { business?: { businessName?: string } }).business?.businessName || v.name || v.id;
+
+interface PeriodStats {
+  bookings: number;
+  completed: number;
+  cancelled: number;
+  completedRevenue: number;
+  collected: number;
+}
+
+function periodStats(bookings: Booking[], key: string): PeriodStats {
+  const s: PeriodStats = { bookings: 0, completed: 0, cancelled: 0, completedRevenue: 0, collected: 0 };
+  for (const b of bookings) {
+    const booked = bookedOn(b);
+    if (booked && monthKey(booked) === key) {
+      s.bookings += 1;
+      if (b.status === "Cancelled") s.cancelled += 1;
+    }
+    if (b.status === "Completed") {
+      const done = tripDate(b);
+      if (done && monthKey(done) === key) {
+        s.completed += 1;
+        s.completedRevenue += parseAmount(b.fare);
+        if (isPaid(b)) s.collected += parseAmount(b.fare) + Number(b.tollCharges || 0);
+      }
+    }
+  }
+  return s;
+}
+
+export default function ReportsAnalytics() {
+  const [activeTab, setActiveTab] = useState<"bookings" | "revenue" | "vendors" | "cancellations" | "gst">("bookings");
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [ledger, setLedger] = useState<LedgerEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+  const [period, setPeriod] = useState(() => monthKey(new Date()));
 
   useEffect(() => {
-    const unsub1 = subscribeBookings(setLiveBookings);
-    const unsub2 = subscribeVendors(setLiveVendors);
-    return () => {
-      unsub1();
-      unsub2();
+    setLoading(true);
+    setLoadError(null);
+    const fail = (m: string) => {
+      setLoadError(m);
+      setLoading(false);
     };
-  }, []);
+    const unsubs = [
+      subscribeBookings((d) => {
+        setBookings(d);
+        setLoading(false);
+      }, fail),
+      subscribeVendors(setVendors, fail),
+      subscribeLedger(setLedger, fail),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, [retryKey]);
 
-  const now = new Date();
-  const lastMonthRef = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const prevPeriod = useMemo(() => {
+    const d = monthStart(period);
+    d.setMonth(d.getMonth() - 1);
+    return monthKey(d);
+  }, [period]);
+  const periodLabel = monthStart(period).toLocaleString("en-IN", { month: "long", year: "numeric" });
+  const periodEnd = useMemo(() => {
+    const d = monthStart(period);
+    return new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
+  }, [period]);
 
-  const thisMonthBookings = useMemo(
-    () => liveBookings.filter((b) => inMonth(bookingDate(b), now)),
-    [liveBookings],
-  );
-  const lastMonthBookings = useMemo(
-    () => liveBookings.filter((b) => inMonth(bookingDate(b), lastMonthRef)),
-    [liveBookings],
-  );
-
-  const revenue = (list: Booking[]) =>
-    list.filter(isPaid).reduce((s, b) => s + parseAmount(b.fare), 0);
-
-  const monthRevenue = revenue(thisMonthBookings);
-  const lastMonthRevenue = revenue(lastMonthBookings);
-  const cancellations = thisMonthBookings.filter((b) => b.status === "Cancelled").length;
-  const lastMonthCancellations = lastMonthBookings.filter((b) => b.status === "Cancelled").length;
-  const avgBookingValue =
-    thisMonthBookings.length > 0 ? monthRevenue / thisMonthBookings.length : 0;
-  const lastAvg =
-    lastMonthBookings.length > 0 ? lastMonthRevenue / lastMonthBookings.length : 0;
+  const cur = useMemo(() => periodStats(bookings, period), [bookings, period]);
+  const prev = useMemo(() => periodStats(bookings, prevPeriod), [bookings, prevPeriod]);
+  const avg = (s: PeriodStats) => (s.completed ? s.completedRevenue / s.completed : 0);
+  const rate = (a: number, b: number) => (b ? `${((a / b) * 100).toFixed(1)}%` : "—");
 
   const summaryCards = [
-    {
-      label: "Total Bookings (Month)",
-      value: thisMonthBookings.length.toLocaleString(),
-      change: pctChange(thisMonthBookings.length, lastMonthBookings.length),
-      invert: false,
-      color: "#E21B23",
-    },
-    {
-      label: "Gross Revenue (Month)",
-      value: formatINR(monthRevenue),
-      change: pctChange(monthRevenue, lastMonthRevenue),
-      invert: false,
-      color: "#111",
-    },
-    {
-      label: "Cancellations (Month)",
-      value: cancellations.toString(),
-      change: pctChange(cancellations, lastMonthCancellations),
-      invert: true,
-      color: "#F59E0B",
-    },
-    {
-      label: "Avg Booking Value",
-      value: formatINR(avgBookingValue),
-      change: pctChange(avgBookingValue, lastAvg),
-      invert: false,
-      color: "#10B981",
-    },
+    { label: `Bookings Received (${periodLabel})`, value: cur.bookings.toLocaleString("en-IN"), change: pctChange(cur.bookings, prev.bookings), invert: false, color: "#E21B23" },
+    { label: "Completed Trip Revenue", value: formatINR(cur.completedRevenue), change: pctChange(cur.completedRevenue, prev.completedRevenue), invert: false, color: "#111" },
+    { label: "Payments Collected (completed trips)", value: formatINR(cur.collected), change: pctChange(cur.collected, prev.collected), invert: false, color: "#10B981" },
+    { label: "Cancellations", value: `${cur.cancelled} (${rate(cur.cancelled, cur.bookings)})`, change: pctChange(cur.cancelled, prev.cancelled), invert: true, color: "#F59E0B" },
+    { label: "Avg Completed Trip Value", value: formatINR(avg(cur)), change: pctChange(avg(cur), avg(prev)), invert: false, color: "#3B82F6" },
   ];
 
-  const bookingsByType = useMemo(() => {
-    const count = (list: Booking[], match: string) =>
-      list.filter((b) =>
-        (b.service || b.serviceType || "").toLowerCase().includes(match),
-      ).length;
-    return SERVICE_TYPES.map((t) => ({
-      name: t.name,
-      thisMonth: count(thisMonthBookings, t.match),
-      lastMonth: count(lastMonthBookings, t.match),
-    }));
-  }, [thisMonthBookings, lastMonthBookings]);
+  const byService = useMemo(() => {
+    const m = new Map<string, { name: string; thisMonth: number; lastMonth: number }>();
+    for (const b of bookings) {
+      const d = bookedOn(b);
+      if (!d) continue;
+      const k = monthKey(d);
+      if (k !== period && k !== prevPeriod) continue;
+      const name = serviceOf(b);
+      const row = m.get(name) ?? { name, thisMonth: 0, lastMonth: 0 };
+      if (k === period) row.thisMonth += 1;
+      else row.lastMonth += 1;
+      m.set(name, row);
+    }
+    return [...m.values()].sort((a, b) => b.thisMonth - a.thisMonth || b.lastMonth - a.lastMonth);
+  }, [bookings, period, prevPeriod]);
 
   const revenueTrend = useMemo(() => {
-    const buckets: { label: string; start: Date; end: Date }[] = [];
+    const out: { month: string; completed: number; collected: number; trips: number }[] = [];
     for (let i = 5; i >= 0; i--) {
-      const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
-      buckets.push({ label: start.toLocaleString("en-US", { month: "short" }), start, end });
+      const d = monthStart(period);
+      d.setMonth(d.getMonth() - i);
+      const s = periodStats(bookings, monthKey(d));
+      out.push({ month: d.toLocaleString("en-IN", { month: "short", year: "2-digit" }), completed: s.completedRevenue, collected: s.collected, trips: s.completed });
     }
-    return buckets.map((bk) => {
-      const inRange = liveBookings.filter((b) => {
-        const d = bookingDate(b);
-        return d !== null && d >= bk.start && d < bk.end;
-      });
-      const total = inRange.reduce((s, b) => s + parseAmount(b.fare), 0);
-      const tour = inRange
-        .filter((b) => (b.service || b.serviceType || "").toLowerCase().includes("tour"))
-        .reduce((s, b) => s + parseAmount(b.fare), 0);
-      return { month: bk.label, total, booking: total - tour, tour };
-    });
-  }, [liveBookings]);
+    return out;
+  }, [bookings, period]);
+
+  const vendorRows = useMemo(() => {
+    const range = { from: monthStart(period), to: periodEnd };
+    return vendors
+      .map((v) => ({ v, status: normalizeVendorStatus(v), s: summarizePartner("vendor", v.id, bookings, ledger, undefined, range) }))
+      .filter((r) => r.status === "APPROVED" || r.s.completedTrips > 0)
+      .sort((a, b) => b.s.grossFares - a.s.grossFares);
+  }, [vendors, bookings, ledger, period, periodEnd]);
 
   const cancellationReasons = useMemo(() => {
-    const cancelled = liveBookings.filter((b) => b.status === "Cancelled");
+    const cancelled = bookings.filter((b) => {
+      const d = bookedOn(b);
+      return b.status === "Cancelled" && d && monthKey(d) === period;
+    });
     const counts = new Map<string, number>();
     for (const b of cancelled) {
-      const reason = (b as any).cancelReason || (b as any).cancellationReason || "Not specified";
+      const x = b as Booking & { cancelReason?: string; cancellationReason?: string; cancelledBy?: string };
+      const reason = (x.cancelReason || x.cancellationReason || "Not specified").trim();
       counts.set(reason, (counts.get(reason) || 0) + 1);
     }
-    const total = cancelled.length;
     return [...counts.entries()]
       .sort((a, b) => b[1] - a[1])
-      .map(([reason, count]) => ({
-        reason,
-        count,
-        pct: total > 0 ? `${Math.round((count / total) * 100)}%` : "0%",
-      }));
-  }, [liveBookings]);
+      .map(([reason, count]) => ({ reason, count, pct: cancelled.length ? `${Math.round((count / cancelled.length) * 100)}%` : "0%" }));
+  }, [bookings, period]);
 
-  const displayVendors = liveVendors;
-  const gstRows = useMemo(() => monthlyGstSummary(liveBookings), [liveBookings]);
+  const gstRows = useMemo(() => monthlyGstSummary(bookings), [bookings]);
+
+  const monthOptions = useMemo(() => {
+    const keys = new Set<string>([monthKey(new Date())]);
+    for (const b of bookings) {
+      const d = bookedOn(b) ?? tripDate(b);
+      if (d) keys.add(monthKey(d));
+    }
+    return [...keys].sort().reverse();
+  }, [bookings]);
 
   const handleExportReport = () => {
     if (activeTab === "bookings") {
-      const headers = ["Service Category", "This Month Trips", "Last Month Trips"];
-      const rows = bookingsByType.map((b: any) => [b.name, b.thisMonth, b.lastMonth]);
-      downloadCsv("nesam_bookings_by_service_report.csv", headers, rows);
+      downloadCsv(`nesam_bookings_by_service_${period}.csv`, ["Service", periodLabel, "Previous month"], byService.map((b) => [b.name, b.thisMonth, b.lastMonth]));
     } else if (activeTab === "revenue") {
-      const headers = ["Month", "Total Revenue", "Standard Bookings", "Tour Packages"];
-      const rows = revenueTrend.map((r: any) => [r.month, r.total, r.booking, r.tour]);
-      downloadCsv("nesam_revenue_trend_report.csv", headers, rows);
+      downloadCsv(`nesam_revenue_trend_${period}.csv`, ["Month", "Completed Trips", "Completed Trip Revenue", "Collected"], revenueTrend.map((r) => [r.month, r.trips, r.completed, r.collected]));
     } else if (activeTab === "vendors") {
-      const headers = ["Vendor Name", "City", "Fleet Size", "Status", "Commission Rate"];
-      const rows = displayVendors.map((v: any) => [
-        v.companyName || v.business?.businessName || v.name,
-        v.city || v.business?.address?.city || "—",
-        v.fleetSize ?? v.fleet?.fleetSize ?? 0,
-        v.status || "Active",
-        v.commission ? `${v.commission}%` : "15%",
-      ]);
-      downloadCsv("nesam_vendor_fleet_performance.csv", headers, rows);
+      downloadCsv(`nesam_vendor_report_${period}.csv`, ["Vendor", "Status", "Completed Trips", "Gross Fares", "Vendor Earnings", "Platform Share"], vendorRows.map((r) => [vendorName(r.v), VENDOR_STATUS_META[r.status].label, r.s.completedTrips, r.s.grossFares, r.s.earnings, r.s.platformShare]));
     } else if (activeTab === "cancellations") {
-      const headers = ["Cancellation Reason", "Trips Cancelled", "Percentage of Total"];
-      const rows = cancellationReasons.map((c: any) => [c.reason, c.count, c.pct]);
-      downloadCsv("nesam_cancellations_root_cause.csv", headers, rows);
+      downloadCsv(`nesam_cancellations_${period}.csv`, ["Cancellation Reason", "Bookings", "Share"], cancellationReasons.map((c) => [c.reason, c.count, c.pct]));
     } else {
-      const headers = ["Month", "Completed Trips", "Taxable Value", "GST Rate", "GST Collected", "Gross (incl. GST)"];
-      const rows = gstRows.map((g) => [g.month, g.trips, g.taxable, `${GST_RATE * 100}%`, g.gst, g.total]);
-      downloadCsv("nesam_gst_compliance_overview.csv", headers, rows);
+      downloadCsv("nesam_gst_summary.csv", ["Month", "Completed Trips", "Taxable Value", "GST Rate", "GST Collected", "Gross (incl. GST)"], gstRows.map((g) => [g.month, g.trips, g.taxable, `${GST_RATE * 100}%`, g.gst, g.total]));
     }
   };
 
-  const CustomTooltip = ({ active, payload, label }: any) => {
-    if (active && payload && payload.length) {
-      return (
-        <div className="bg-white border border-[#E5E5E5] rounded-xl p-3 shadow-xl text-[12px]">
-          <div className="font-semibold text-[#111] mb-1">{label}</div>
-          {payload.map((p: any, i: number) => (
-            <div key={i} className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full" style={{ background: p.color }} />
-              <span className="text-[#666]">{p.name}:</span>
-              <span className="font-semibold text-[#111]">
-                {typeof p.value === "number" && p.value > 1000 ? `₹${(p.value / 1000).toFixed(0)}K` : p.value}
-              </span>
-            </div>
-          ))}
-        </div>
-      );
-    }
-    return null;
-  };
+  const Empty = ({ text }: { text: string }) => <div className="py-16 text-center text-[13px] text-[#999]">{text}</div>;
 
   return (
     <div className="p-6 space-y-5">
-      {/* Header bar */}
-      <div className="flex items-center justify-between">
+      {loadError && <ErrorBanner message={loadError} onRetry={() => setRetryKey((k) => k + 1)} />}
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-[18px] font-bold text-[#111]">Reports & Business Analytics</h2>
-          <p className="text-[12px] text-[#666]">
-            Performance indicators, booking volume, fleet utilization & tax compliance
-          </p>
+          <p className="text-[12px] text-[#666]">All figures are calculated from live bookings, vendors and the partner ledger.</p>
         </div>
-        <button
-          onClick={handleExportReport}
-          className="text-[12px] font-semibold px-4 py-2 rounded-lg border border-[#E5E5E5] bg-white text-[#E21B23] hover:bg-[#FEF2F2] transition-colors cursor-pointer shadow-sm flex items-center gap-1.5"
-        >
-          📥 Export Active View (CSV)
-        </button>
+        <div className="flex items-center gap-2">
+          <select aria-label="Report month" value={period} onChange={(e) => setPeriod(e.target.value)} className="px-3 py-2 text-[12px] border border-[#E5E5E5] rounded-lg bg-white">
+            {monthOptions.map((k) => (
+              <option key={k} value={k}>{monthStart(k).toLocaleString("en-IN", { month: "long", year: "numeric" })}</option>
+            ))}
+          </select>
+          <button onClick={handleExportReport} className="text-[12px] font-semibold px-4 py-2 rounded-lg border border-[#E5E5E5] bg-white text-[#E21B23] hover:bg-[#FEF2F2] shadow-sm">
+            📥 Export Active View (CSV)
+          </button>
+        </div>
       </div>
 
-      {/* Summary Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
         {summaryCards.map((s) => {
           const good = s.change === null ? null : s.invert ? s.change <= 0 : s.change >= 0;
           return (
             <div key={s.label} className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4">
-              <div className="text-[20px] font-bold" style={{ color: s.color }}>{s.value}</div>
+              <div className="text-[20px] font-bold" style={{ color: s.color }}>{loading ? "—" : s.value}</div>
               <div className="text-[11px] text-[#999] mt-0.5">{s.label}</div>
               <div className={`text-[11px] font-semibold mt-1 ${good === null ? "text-[#999]" : good ? "text-green-600" : "text-[#E21B23]"}`}>
-                {formatPct(s.change)}{s.change !== null && " vs last month"}
+                {formatPct(s.change)}
+                {s.change !== null && " vs previous month"}
               </div>
             </div>
           );
         })}
       </div>
 
-      {/* Tabs */}
       <div className="flex flex-wrap gap-1 bg-white rounded-xl border border-[#E5E5E5] p-1 w-fit shadow-sm">
         {[
-          { key: "bookings", label: "Bookings" },
-          { key: "revenue", label: "Revenue" },
-          { key: "vendors", label: "Vendor Reports" },
-          { key: "cancellations", label: "Cancellations" },
-          { key: "gst", label: "GST Summary" },
+          { key: "bookings" as const, label: "Bookings" },
+          { key: "revenue" as const, label: "Revenue" },
+          { key: "vendors" as const, label: "Vendor Reports" },
+          { key: "cancellations" as const, label: "Cancellations" },
+          { key: "gst" as const, label: "GST Summary" },
         ].map((t) => (
           <button
             key={t.key}
-            onClick={() => setActiveTab(t.key as any)}
+            onClick={() => setActiveTab(t.key)}
             className={`px-4 py-2 rounded-lg text-[12px] font-semibold transition-all cursor-pointer ${activeTab === t.key ? "text-white shadow-sm" : "text-[#666] hover:text-[#111]"}`}
             style={activeTab === t.key ? { background: "#E21B23" } : {}}
           >
@@ -283,167 +256,132 @@ export default function Reports() {
         ))}
       </div>
 
-      {/* Bookings Report */}
       {activeTab === "bookings" && (
-        <div className="space-y-5">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
-              <h3 className="text-[14px] font-bold text-[#111] mb-4">Bookings by Service Type</h3>
-              <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={bookingsByType} barSize={26}>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+          <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
+            <h3 className="text-[14px] font-bold text-[#111] mb-4">Bookings by Service — {periodLabel} vs previous month</h3>
+            {byService.length === 0 ? (
+              <Empty text="No bookings in these months." />
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
+                <BarChart data={byService} barSize={24}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#F0F0F0" vertical={false} />
                   <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#999" }} axisLine={false} tickLine={false} />
                   <YAxis tick={{ fontSize: 11, fill: "#999" }} axisLine={false} tickLine={false} allowDecimals={false} />
-                  <Tooltip content={<CustomTooltip />} />
-                  <Bar dataKey="thisMonth" name="This Month" fill="#E21B23" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="lastMonth" name="Last Month" fill="#E5E5E5" radius={[4, 4, 0, 0]} />
+                  <Tooltip formatter={(v, n) => [`${v} bookings`, String(n)]} contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E5E5E5" }} />
+                  <Legend formatter={(v) => <span className="text-[11px] text-[#666]">{v}</span>} />
+                  <Bar dataKey="thisMonth" name={periodLabel} fill="#E21B23" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="lastMonth" name="Previous month" fill="#D4D4D4" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
-            </div>
-            <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
-              <h3 className="text-[14px] font-bold text-[#111] mb-4">Booking Service Mix (Share %)</h3>
-              <ResponsiveContainer width="100%" height={240}>
+            )}
+          </div>
+          <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
+            <h3 className="text-[14px] font-bold text-[#111] mb-4">Service Mix — {periodLabel}</h3>
+            {byService.filter((d) => d.thisMonth > 0).length === 0 ? (
+              <Empty text="No bookings this month." />
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
                 <PieChart>
-                  <Pie
-                    data={bookingsByType
-                      .filter((d: any) => (d.thisMonth || d.value || 0) > 0)
-                      .map((d: any, i: number) => ({
-                        name: d.name,
-                        value: d.thisMonth || d.value,
-                        fill: COLORS[i % COLORS.length],
-                      }))}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={55}
-                    outerRadius={90}
-                    dataKey="value"
-                    paddingAngle={3}
-                  >
-                    {bookingsByType.map((_, i) => (
+                  <Pie data={byService.filter((d) => d.thisMonth > 0).map((d) => ({ name: d.name, value: d.thisMonth }))} cx="50%" cy="50%" innerRadius={55} outerRadius={90} dataKey="value" paddingAngle={3}>
+                    {byService.filter((d) => d.thisMonth > 0).map((_, i) => (
                       <Cell key={i} fill={COLORS[i % COLORS.length]} />
                     ))}
                   </Pie>
                   <Legend formatter={(v) => <span className="text-[11px] text-[#666]">{v}</span>} />
-                  <Tooltip
-                    formatter={(v: any) => [`${v} trips`, ""]}
-                    contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E5E5E5" }}
-                  />
+                  <Tooltip formatter={(v) => [`${v} bookings`, ""]} contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E5E5E5" }} />
                 </PieChart>
               </ResponsiveContainer>
+            )}
+            <div className="mt-2 text-[11px] text-[#888]">
+              Completion rate: {rate(cur.completed, cur.completed + cur.cancelled)} of trips that finished or were cancelled.
             </div>
           </div>
         </div>
       )}
 
-      {/* Revenue Report */}
       {activeTab === "revenue" && (
-        <div className="space-y-5">
-          <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
-            <h3 className="text-[14px] font-bold text-[#111] mb-4">Gross Revenue Trend (Monthly Inflow)</h3>
+        <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
+          <h3 className="text-[14px] font-bold text-[#111] mb-1">Revenue — last 6 months to {periodLabel}</h3>
+          <p className="text-[11px] text-[#888] mb-4">Completed trip revenue is the GST-inclusive fare of trips completed in the month; collected is the verified payment on those trips (incl. tolls).</p>
+          {revenueTrend.every((r) => r.completed === 0 && r.collected === 0) ? (
+            <Empty text="No completed trips in this period." />
+          ) : (
             <ResponsiveContainer width="100%" height={280}>
               <LineChart data={revenueTrend}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#F0F0F0" />
                 <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#999" }} axisLine={false} tickLine={false} />
-                <YAxis
-                  tick={{ fontSize: 11, fill: "#999" }}
-                  axisLine={false}
-                  tickLine={false}
-                  tickFormatter={(v) => `₹${(v / 1000).toFixed(0)}K`}
-                />
-                <Tooltip content={<CustomTooltip />} />
-                <Line
-                  type="monotone"
-                  dataKey="total"
-                  name="Total Revenue"
-                  stroke="#E21B23"
-                  strokeWidth={2.5}
-                  dot={{ r: 4, fill: "#E21B23" }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="booking"
-                  name="Standard Bookings"
-                  stroke="#111111"
-                  strokeWidth={1.5}
-                  dot={false}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="tour"
-                  name="Tour Packages"
-                  stroke="#888888"
-                  strokeWidth={1.5}
-                  strokeDasharray="4 2"
-                  dot={false}
-                />
+                <YAxis tick={{ fontSize: 11, fill: "#999" }} axisLine={false} tickLine={false} tickFormatter={(v) => formatINR(Number(v))} />
+                <Tooltip formatter={(v, n) => [`₹${Math.round(Number(v)).toLocaleString("en-IN")}`, String(n)]} contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E5E5E5" }} />
+                <Legend formatter={(v) => <span className="text-[11px] text-[#666]">{v}</span>} />
+                <Line type="monotone" dataKey="completed" name="Completed trip revenue" stroke="#E21B23" strokeWidth={2.5} dot={{ r: 4, fill: "#E21B23" }} />
+                <Line type="monotone" dataKey="collected" name="Collected" stroke="#111111" strokeWidth={1.5} strokeDasharray="4 2" dot={false} />
               </LineChart>
             </ResponsiveContainer>
-          </div>
+          )}
         </div>
       )}
 
-      {/* Vendor Reports */}
       {activeTab === "vendors" && (
         <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
-          <div className="px-5 py-4 border-b border-[#E5E5E5] flex items-center justify-between">
-            <span className="text-[13px] font-bold text-[#111]">
-              Vendor Fleet & Commission Breakdown ({displayVendors.length})
-            </span>
+          <div className="px-5 py-4 border-b border-[#E5E5E5]">
+            <span className="text-[13px] font-bold text-[#111]">Vendor Performance — {periodLabel} ({vendorRows.length})</span>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[800px]">
               <thead>
                 <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
-                  {["Vendor", "City", "Fleet Size", "Active Drivers", "Status", "Commission Rate"].map((h) => (
-                    <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-[#999] uppercase tracking-wide whitespace-nowrap">
-                      {h}
-                    </th>
+                  {["Vendor", "Status", "Completed Trips", "Gross Fares", "Vendor Earnings", "Platform Share"].map((h) => (
+                    <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-[#999] uppercase tracking-wide whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {displayVendors.map((v: any, i: number) => (
-                  <tr key={v.id || i} className="border-b border-[#F5F5F5] last:border-0 text-[12px] hover:bg-[#FAFAFA] transition-colors">
-                    <td className="px-4 py-3 font-semibold text-[#111]">{v.companyName || v.business?.businessName || v.name}</td>
-                    <td className="px-4 py-3 text-[#666]">{v.city || v.business?.address?.city || "—"}</td>
-                    <td className="px-4 py-3 font-semibold text-[#111]">{v.fleetSize ?? v.fleet?.fleetSize ?? 0} vehicles</td>
-                    <td className="px-4 py-3 text-[#666]">{v.activeDrivers ?? "—"}</td>
-                    <td className="px-4 py-3 text-green-700 font-semibold">{v.status === "Approved" || v.status === "Active" ? "APPROVED" : vendorStatusLabel(v)}</td>
-                    <td className="px-4 py-3 font-semibold text-[#E21B23]">{v.commission ? `${v.commission}%` : "15%"}</td>
+                {vendorRows.map(({ v, status, s }) => (
+                  <tr key={v.id} className="border-b border-[#F5F5F5] last:border-0 text-[12px] hover:bg-[#FAFAFA]">
+                    <td className="px-4 py-3 font-semibold text-[#111]">{vendorName(v)}</td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold border ${VENDOR_STATUS_META[status].badge}`}>{VENDOR_STATUS_META[status].label}</span>
+                    </td>
+                    <td className="px-4 py-3 font-semibold">{s.completedTrips}</td>
+                    <td className="px-4 py-3">{formatINR(s.grossFares)}</td>
+                    <td className="px-4 py-3 text-green-700 font-semibold">{formatINR(s.earnings)}</td>
+                    <td className="px-4 py-3 text-[#E21B23]">{formatINR(s.platformShare)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {vendorRows.length === 0 && <Empty text="No approved vendors or vendor trips yet." />}
           </div>
         </div>
       )}
 
-      {/* Cancellations */}
       {activeTab === "cancellations" && (
-        <div className="space-y-4">
-          <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
-            <h3 className="text-[14px] font-bold text-[#111] mb-4">Cancellation Reason & Root-Cause Analysis</h3>
+        <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
+          <h3 className="text-[14px] font-bold text-[#111] mb-4">Cancellation Reasons — bookings made in {periodLabel}</h3>
+          {cancellationReasons.length === 0 ? (
+            <Empty text="No cancellations for bookings made this month." />
+          ) : (
             <div className="space-y-3">
-              {cancellationReasons.map((r: any, i: number) => (
-                <div key={i} className="flex items-center justify-between p-3 rounded-lg bg-[#F9F9F9] hover:bg-gray-100 transition-colors">
+              {cancellationReasons.map((r) => (
+                <div key={r.reason} className="flex items-center justify-between p-3 rounded-lg bg-[#F9F9F9]">
                   <div className="text-[13px] font-semibold text-[#111]">{r.reason}</div>
                   <div className="flex items-center gap-3">
-                    <span className="text-[12px] text-[#999]">{r.count} incidents</span>
+                    <span className="text-[12px] text-[#999]">{r.count} booking{r.count === 1 ? "" : "s"}</span>
                     <span className="text-[12px] font-bold text-[#E21B23] px-2.5 py-0.5 rounded bg-red-50">{r.pct}</span>
                   </div>
                 </div>
               ))}
             </div>
-          </div>
+          )}
         </div>
       )}
 
-      {/* GST Summary */}
       {activeTab === "gst" && (
         <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
           <div className="px-5 py-4 border-b border-[#E5E5E5]">
-            <h3 className="text-[14px] font-bold text-[#111]">GST Compliance Ledger (SAC 9964)</h3>
-            <p className="text-[12px] text-[#666]">Summary of 5% GST collected on passenger road transport services</p>
+            <h3 className="text-[14px] font-bold text-[#111]">GST on Completed Trips (SAC 9964)</h3>
+            <p className="text-[12px] text-[#666]">Output GST contained in completed trip fares, using each booking's server fare breakdown. Filing is done outside the platform.</p>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[700px]">
@@ -455,29 +393,22 @@ export default function Reports() {
                 </tr>
               </thead>
               <tbody>
-                {gstRows.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="px-4 py-10 text-center text-[12px] text-[#999]">
-                      No completed trips yet, so there is no GST to report.
-                    </td>
-                  </tr>
-                )}
                 {gstRows.map((r) => (
                   <tr key={r.month} className="border-b border-[#F5F5F5] last:border-0 text-[12px] hover:bg-[#FAFAFA]">
                     <td className="px-4 py-3 font-semibold text-[#111]">{r.month}</td>
-                    <td className="px-4 py-3 text-[#444]">{r.trips}</td>
-                    <td className="px-4 py-3 text-[#444]">₹{r.taxable.toLocaleString("en-IN")}</td>
+                    <td className="px-4 py-3">{r.trips}</td>
+                    <td className="px-4 py-3">₹{r.taxable.toLocaleString("en-IN")}</td>
                     <td className="px-4 py-3 font-semibold text-[#E21B23]">{GST_RATE * 100}%</td>
-                    <td className="px-4 py-3 font-bold text-[#111]">₹{r.gst.toLocaleString("en-IN")}</td>
-                    <td className="px-4 py-3 font-bold text-[#111]">₹{r.total.toLocaleString("en-IN")}</td>
+                    <td className="px-4 py-3 font-bold">₹{r.gst.toLocaleString("en-IN")}</td>
+                    <td className="px-4 py-3 font-bold">₹{r.total.toLocaleString("en-IN")}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {gstRows.length === 0 && <Empty text="No completed trips yet, so there is no GST to report." />}
           </div>
         </div>
       )}
     </div>
   );
 }
-

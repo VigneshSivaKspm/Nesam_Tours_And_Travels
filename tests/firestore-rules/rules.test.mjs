@@ -67,7 +67,7 @@ let seq = 0;
 const newId = (p) => `${p}${++seq}`;
 
 /** Customer app: buildRideRequestDocs() written in one batch. */
-function rideBatch(db, id, { otp = '4321', fare = 500, extra = {} } = {}) {
+function rideBatch(db, id, { otp = '4321', fare = 500, extra = {}, status = 'Approved', market = {} } = {}) {
   const b = writeBatch(db);
   b.set(doc(db, 'bookings', id), {
     id,
@@ -84,14 +84,15 @@ function rideBatch(db, id, { otp = '4321', fare = 500, extra = {} } = {}) {
     fare, fareVerified: true,
     payment: 'Pending',
     paymentMethod: 'Cash',
-    status: 'Pending',
+    status,
     source: 'customer-app',
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     ...extra,
   });
   b.set(doc(db, 'booking_secrets', id), { customerId: 'cust1', otp, createdAt: serverTimestamp() });
-  b.set(doc(db, 'marketplace_trips', id), { id, status: 'Open', offeredPayout: Math.round(fare * 0.85), createdAt: serverTimestamp() });
+  // Partners see a trip only once an admin has approved the booking.
+  b.set(doc(db, 'marketplace_trips', id), { id, status: status === 'Approved' ? 'Open' : 'Awaiting Approval', offeredPayout: Math.round(fare * 0.85), createdAt: serverTimestamp(), ...market });
   return b;
 }
 
@@ -240,23 +241,104 @@ test('driver: a pending driver cannot claim', async () => {
   await assertFails(driverClaim(ctx.drvP, 'drvP', id));
 });
 
-test('driver: full trip — pre-trip, location, OTP, tolls, completion', async () => {
+test('driver: after claiming, status and trip steps are server-only; tolls and live position are allowed', async () => {
   const id = await openTrip({ otp: '2468' });
   await assertSucceeds(driverClaim(ctx.drvA, 'drvA', id));
   const ref = doc(ctx.drvA, 'bookings', id);
-  await assertSucceeds(updateDoc(ref, { preTrip: { selfie: 'u', odometerReading: 100 }, startOdometer: 100, tripStage: 'En Route Pickup', updatedAt: serverTimestamp() }));
   await assertSucceeds(updateDoc(ref, { driverLocation: { lat: 10, lng: 77, heading: null, updatedAt: serverTimestamp() }, updatedAt: serverTimestamp() }));
-  await assertSucceeds(updateDoc(ref, { tripStage: 'Reached Pickup', reachedPickupAt: serverTimestamp(), updatedAt: serverTimestamp() }));
-  await assertFails(getDoc(doc(ctx.drvA, 'booking_secrets', id)));
-  await assertFails(updateDoc(ref, { status: 'Ongoing', tripStage: 'In Progress', otpAttempt: '0000', startedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
-  await assertFails(updateDoc(doc(ctx.drvB, 'bookings', id), { status: 'Ongoing', tripStage: 'In Progress', otpAttempt: '2468', startedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
-  await assertSucceeds(updateDoc(ref, { status: 'Ongoing', tripStage: 'In Progress', otpAttempt: '2468', startedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
-  await assertFails(updateDoc(ref, { fare: 1 }));
   const tolls = [{ id: 't1', name: 'Toll: X', amount: 85, receiptPhotoUrl: 'u', uploadedAt: 'now' }];
   await assertSucceeds(updateDoc(ref, { tolls, tollCharges: 85, updatedAt: serverTimestamp() }));
-  await assertSucceeds(updateDoc(ref, { tripStage: 'Arrived Destination', arrivedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
-  await assertSucceeds(updateDoc(ref, { status: 'Completed', tripStage: 'Completed', endOdometer: 180, tolls, tollCharges: 85, completedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
-  await assertFails(updateDoc(ref, { status: 'Ongoing', otpAttempt: '2468', updatedAt: serverTimestamp() }));
+  // The three trip steps, the OTP, evidence and the odometer belong to the trip functions.
+  await assertFails(getDoc(doc(ctx.drvA, 'booking_secrets', id)));
+  await assertFails(updateDoc(ref, { status: 'Ongoing', tripStage: 'En Route Pickup', tripSubStatus: 'Trip Started', updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { tripStage: 'Reached Pickup', reachedPickupAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { status: 'Ongoing', tripStage: 'In Progress', otpAttempt: '2468', startedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { preTrip: { odometerReading: 1 }, startOdometer: 1, updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { vehicleVerification: { status: 'Submitted' }, updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { boardingVerifiedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { status: 'Completed', tripStage: 'Completed', tripSubStatus: 'Trip Ended', completedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { paymentSummary: { totalPaid: 99999 }, payment: 'Paid', updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { fare: 1 }));
+  // Another driver can't touch it either.
+  await assertFails(updateDoc(doc(ctx.drvB, 'bookings', id), { tolls, tollCharges: 85, updatedAt: serverTimestamp() }));
+});
+
+test('approval: partners cannot claim or even see a trip that is not Approved', async () => {
+  const pending = await openTrip({ status: 'Pending' });
+  // Drivers and vendors cannot read the hidden marketplace record…
+  await assertFails(getDoc(doc(ctx.drvA, 'marketplace_trips', pending)));
+  await assertFails(getDoc(doc(ctx.v1, 'marketplace_trips', pending)));
+  const open = await getDocs(query(collection(ctx.drvA, 'marketplace_trips'), where('status', '==', 'Open')));
+  assert.ok(!open.docs.some((d) => d.id === pending));
+  // …and the claim is refused even if they write it directly.
+  await assertFails(driverClaim(ctx.drvA, 'drvA', pending));
+  await assertFails(vendorAccept(ctx.v1, 'v1', pending));
+  // Once an admin approves it (server side) the same claim works.
+  await env.withSecurityRulesDisabled(async (c) => {
+    await updateDoc(doc(c.firestore(), 'bookings', pending), { status: 'Approved' });
+    await updateDoc(doc(c.firestore(), 'marketplace_trips', pending), { status: 'Open' });
+  });
+  await assertSucceeds(driverClaim(ctx.drvA, 'drvA', pending));
+});
+
+test('approval: a trip published for specific vehicle types is claimable only by a matching driver', async () => {
+  await env.withSecurityRulesDisabled((c) => setDoc(doc(c.firestore(), 'drivers/drvSedan'), { role: 'driver', status: 'Approved', vendorId: '', vehicleType: 'Sedan' }));
+  const sedanOnly = await openTrip({ market: { eligibleVehicleTypes: ['sedan'], vehicleCategory: 'Sedan' } });
+  const suvOnly = await openTrip({ market: { eligibleVehicleTypes: ['suv'], vehicleCategory: 'SUV' } });
+  const drv = env.authenticatedContext('drvSedan').firestore();
+  await assertFails(driverClaim(drv, 'drvSedan', suvOnly));
+  await assertSucceeds(driverClaim(drv, 'drvSedan', sedanOnly));
+  // Trips published before the list existed stay open to every approved driver.
+  await assertSucceeds(driverClaim(ctx.drvA, 'drvA', await openTrip()));
+});
+
+test('new records: audit, security, verification and delivery logs are server-only', async () => {
+  await env.withSecurityRulesDisabled(async (c) => {
+    const db = c.firestore();
+    await setDoc(doc(db, 'audit_logs/a1'), { action: 'x', performedBy: 'u' });
+    await setDoc(doc(db, 'security_events/s1'), { type: 'root_detected', userId: 'drvA' });
+    await setDoc(doc(db, 'vehicle_verifications/vv1'), { driverId: 'drvA', status: 'Submitted' });
+    await setDoc(doc(db, 'otp_verifications/o1'), { codeHash: 'x' });
+    await setDoc(doc(db, 'capture_sessions/c1'), { driverId: 'drvA' });
+    await setDoc(doc(db, 'notification_deliveries/d1'), { channel: 'sms' });
+    await setDoc(doc(db, 'legal_documents/terms_driver'), { status: 'Published', version: 1, role: 'driver', body: 'x' });
+    await setDoc(doc(db, 'legal_documents/draft_x'), { status: 'Draft', version: 0, role: 'driver', body: 'x' });
+    await setDoc(doc(db, 'legal_acceptances/drvA_terms_driver_v1'), { userId: 'drvA' });
+    await setDoc(doc(db, 'legal_acceptances/drvB_terms_driver_v1'), { userId: 'drvB' });
+    await setDoc(doc(db, 'public_config/fare_adjustment'), { enabled: true, percent: 10, direction: 'increase' });
+  });
+  for (const path of ['audit_logs/a1', 'security_events/s1', 'otp_verifications/o1', 'capture_sessions/c1', 'notification_deliveries/d1']) {
+    await assertFails(getDoc(doc(ctx.drvA, path)));
+    await assertFails(getDoc(doc(ctx.v1, path)));
+    await assertFails(getDoc(doc(ctx.cust, path)));
+  }
+  for (const db of [ctx.drvA, ctx.v1, ctx.cust]) {
+    await assertFails(setDoc(doc(db, 'audit_logs/forged'), { action: 'x' }));
+    await assertFails(setDoc(doc(db, 'security_events/forged'), { type: 'x' }));
+    await assertFails(setDoc(doc(db, 'vehicle_verifications/forged'), { driverId: 'x', status: 'Submitted' }));
+    await assertFails(setDoc(doc(db, 'legal_acceptances/forged'), { userId: 'x' }));
+    await assertFails(setDoc(doc(db, 'public_config/fare_adjustment'), { enabled: true, percent: 0, direction: 'decrease' }));
+    await assertFails(setDoc(doc(db, 'penalties/forged'), { driverId: 'drvA', amount: 1, status: 'Waived' }));
+  }
+  // A driver reads their own verification record, their own acceptance and published (not draft) documents.
+  await assertSucceeds(getDoc(doc(ctx.drvA, 'vehicle_verifications/vv1')));
+  await assertFails(getDoc(doc(ctx.drvB, 'vehicle_verifications/vv1')));
+  await assertSucceeds(getDoc(doc(ctx.drvA, 'legal_documents/terms_driver')));
+  await assertFails(getDoc(doc(ctx.drvA, 'legal_documents/draft_x')));
+  await assertSucceeds(getDoc(doc(ctx.drvA, 'legal_acceptances/drvA_terms_driver_v1')));
+  await assertFails(getDoc(doc(ctx.drvA, 'legal_acceptances/drvB_terms_driver_v1')));
+  await assertSucceeds(getDoc(doc(ctx.cust, 'public_config/fare_adjustment')));
+  await assertFails(getDoc(doc(ctx.anon, 'public_config/fare_adjustment')));
+});
+
+test('device tokens: a device registers and removes only its own', async () => {
+  const ok = { ownerId: 'drvA', token: 'tok-1', platform: 'android', role: 'driver', createdAt: serverTimestamp() };
+  await assertSucceeds(setDoc(doc(ctx.drvA, 'device_tokens/drvA_tok1'), ok));
+  await assertFails(setDoc(doc(ctx.drvB, 'device_tokens/forged'), ok));
+  await assertFails(setDoc(doc(ctx.drvA, 'device_tokens/extra'), { ...ok, admin: true }));
+  await assertFails(updateDoc(doc(ctx.drvA, 'device_tokens/drvA_tok1'), { ownerId: 'drvB' }));
+  await assertFails(deleteDoc(doc(ctx.drvB, 'device_tokens/drvA_tok1')));
+  await assertSucceeds(deleteDoc(doc(ctx.drvA, 'device_tokens/drvA_tok1')));
 });
 
 test('driver: payout requests are Pending-only and self-scoped', async () => {
@@ -283,8 +365,9 @@ test('vendor: onboarding starts INCOMPLETE and is bound to the verified phone', 
 test('vendor: accepts the offered rate atomically', async () => {
   const id = await openTrip();
   await assertSucceeds(vendorAccept(ctx.v1, 'v1', id));
-  // The app's own guard stops a second vendor before any write…
-  await assert.rejects(vendorAccept(ctx.v2, 'v2', id), /taken/);
+  // A second vendor can no longer even read a trip another vendor won…
+  await assertFails(getDoc(doc(ctx.v2, 'marketplace_trips', id)));
+  await assert.rejects(vendorAccept(ctx.v2, 'v2', id));
   // …and the rules reject the claim even when that guard is bypassed.
   const raw = writeBatch(ctx.v2);
   raw.update(doc(ctx.v2, 'bookings', id), { status: 'Confirmed', assignedVendorId: 'v2', assignedVendorName: 'v2', vendorPayout: 425, confirmedAt: serverTimestamp(), updatedAt: serverTimestamp() });
@@ -321,27 +404,43 @@ test('vendor: counter-bids are isolated per vendor', async () => {
   await assertSucceeds(vendorAccept(ctx.v2, 'v2', id));
 });
 
-test('vendor: dispatches only its own drivers, then the driver runs the trip', async () => {
+test('vendor: dispatches only its own drivers in its own approved vehicle (by id), then the driver runs the trip', async () => {
   const id = await openTrip({ otp: '1357' });
   await assertSucceeds(vendorAccept(ctx.v1, 'v1', id));
-  const dispatch = (driverId) => ({
+  await env.withSecurityRulesDisabled(async (c) => {
+    const db = c.firestore();
+    await setDoc(doc(db, 'vehicles/vehPend'), { vendorId: 'v1', vehicleNumber: 'TN09PP0001', docStatus: 'Pending' });
+    await setDoc(doc(db, 'vehicles/vehV2'), { vendorId: 'v2', vehicleNumber: 'TN09VV0002', docStatus: 'Approved' });
+    await setDoc(doc(db, 'vehicles/vehShop'), { vendorId: 'v1', vehicleNumber: 'TN09SS0003', docStatus: 'Approved', status: 'Maintenance' });
+  });
+  const dispatch = (driverId, vehicleId = 'veh1', number = 'TN01AB1234') => ({
     status: 'Assigned',
     tripStage: 'Assigned',
     assignedDriverId: driverId,
     assignedDriverName: driverId,
     driver: driverId,
     driverPhone: '',
-    assignedVehicleNumber: 'TN01AB1234',
+    ...(vehicleId === null ? {} : { assignedVehicleId: vehicleId }),
+    assignedVehicleNumber: number,
     assignedAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
   await assertFails(updateDoc(doc(ctx.v1, 'bookings', id), dispatch('fd2')));
   await assertFails(updateDoc(doc(ctx.v2, 'bookings', id), dispatch('fd2')));
+  // The vehicle is referenced by id and must be the vendor's own, approved, in service, number matching.
+  await assertFails(updateDoc(doc(ctx.v1, 'bookings', id), dispatch('fd1', null)));
+  await assertFails(updateDoc(doc(ctx.v1, 'bookings', id), dispatch('fd1', 'vehV2', 'TN09VV0002')));
+  await assertFails(updateDoc(doc(ctx.v1, 'bookings', id), dispatch('fd1', 'vehPend', 'TN09PP0001')));
+  await assertFails(updateDoc(doc(ctx.v1, 'bookings', id), dispatch('fd1', 'vehShop', 'TN09SS0003')));
+  await assertFails(updateDoc(doc(ctx.v1, 'bookings', id), dispatch('fd1', 'veh1', 'TN99ZZ9999')));
+  // A vendor never sets its own payout while dispatching.
+  await assertFails(updateDoc(doc(ctx.v1, 'bookings', id), { ...dispatch('fd1'), vendorPayout: 9999 }));
   await assertSucceeds(updateDoc(doc(ctx.v1, 'bookings', id), dispatch('fd1')));
   const fd1 = env.authenticatedContext('fd1').firestore();
-  await assertSucceeds(updateDoc(doc(fd1, 'bookings', id), { tripStage: 'Reached Pickup', updatedAt: serverTimestamp() }));
-  await assertSucceeds(updateDoc(doc(fd1, 'bookings', id), { status: 'Ongoing', tripStage: 'In Progress', otpAttempt: '1357', startedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
-  await assertFails(updateDoc(doc(ctx.v1, 'bookings', id), dispatch('fd1')));
+  // The dispatched driver may keep tolls and position; the trip steps are the server's.
+  await assertSucceeds(updateDoc(doc(fd1, 'bookings', id), { driverLocation: { lat: 10, lng: 77, heading: null }, updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(doc(fd1, 'bookings', id), { tripStage: 'Reached Pickup', updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(doc(fd1, 'bookings', id), { status: 'Ongoing', tripStage: 'In Progress', otpAttempt: '1357', startedAt: serverTimestamp(), updatedAt: serverTimestamp() }));
 });
 
 test('vendor: fleet vehicles await review; driver fleet fields only', async () => {
@@ -418,3 +517,70 @@ test('security: inactive admin retains no privileged writes', async () => {
   await assertFails(setDoc(doc(env.authenticatedContext('inactiveAdmin').firestore(), 'settings/audit'), { changed: true }));
 });
 
+
+// ── Phase B: partner money is server-only ───────────────────────────────────
+
+test('ledger & wallets: partners read only their own; nobody writes them from a client', async () => {
+  await env.withSecurityRulesDisabled(async (c) => {
+    const db = c.firestore();
+    await setDoc(doc(db, 'wallet_ledger/trip_x1'), { schema: 2, walletId: 'driver_drvA', driverId: 'drvA', actorType: 'driver', actorId: 'drvA', netAmount: 500, status: 'available' });
+    await setDoc(doc(db, 'wallet_ledger/trip_x2'), { schema: 2, walletId: 'vendor_v1', vendorId: 'v1', actorType: 'vendor', actorId: 'v1', netAmount: 900, status: 'available' });
+    await setDoc(doc(db, 'wallets/driver_drvA'), { driverId: 'drvA', available: 500 });
+    await setDoc(doc(db, 'wallets/vendor_v1'), { vendorId: 'v1', available: 900 });
+  });
+  await assertSucceeds(getDoc(doc(ctx.drvA, 'wallet_ledger/trip_x1')));
+  await assertSucceeds(getDocs(query(collection(ctx.drvA, 'wallet_ledger'), where('driverId', '==', 'drvA'))));
+  await assertFails(getDoc(doc(ctx.drvB, 'wallet_ledger/trip_x1')));
+  await assertFails(getDocs(collection(ctx.drvA, 'wallet_ledger')));
+  await assertSucceeds(getDocs(query(collection(ctx.v1, 'wallet_ledger'), where('vendorId', '==', 'v1'))));
+  await assertFails(getDoc(doc(ctx.v2, 'wallet_ledger/trip_x2')));
+  await assertFails(getDoc(doc(ctx.cust, 'wallet_ledger/trip_x1')));
+
+  await assertSucceeds(getDoc(doc(ctx.drvA, 'wallets/driver_drvA')));
+  await assertSucceeds(getDoc(doc(ctx.v1, 'wallets/vendor_v1')));
+  // A partner's wallet that the server has not created yet reads as missing, not as an error.
+  await assertSucceeds(getDoc(doc(ctx.drvB, 'wallets/driver_drvB')));
+  await assertFails(getDoc(doc(ctx.drvB, 'wallets/driver_drvA')));
+  await assertFails(getDoc(doc(ctx.v2, 'wallets/vendor_v1')));
+  await assertFails(getDoc(doc(ctx.v1, 'wallets/driver_drvA')));
+
+  for (const db of [ctx.drvA, ctx.v1, ctx.cust]) {
+    await assertFails(setDoc(doc(db, 'wallet_ledger/forged'), { schema: 2, driverId: 'drvA', walletId: 'driver_drvA', netAmount: 99999, status: 'available' }));
+    await assertFails(updateDoc(doc(db, 'wallets/driver_drvA'), { available: 99999 }));
+    await assertFails(setDoc(doc(db, 'wallets/vendor_v1'), { vendorId: 'v1', available: 99999 }));
+  }
+  await assertFails(setDoc(doc(ctx.drvA, 'business_config/commission'), { base: 'taxable', global: { rate: 0 } }));
+  await assertFails(getDoc(doc(ctx.drvA, 'business_config/commission')));
+});
+
+test('driver claim: the vehicle is the one paired on the driver record (by id); money fields stay server-set', async () => {
+  await env.withSecurityRulesDisabled(async (c) => {
+    const db = c.firestore();
+    await setDoc(doc(db, 'drivers/drvV'), { role: 'driver', status: 'Approved', vendorId: '', assignedVehicleId: 'vehIndie', assignedVehicleNumber: 'TN05IN0005' });
+    await setDoc(doc(db, 'vehicles/vehIndie'), { vendorId: '', vehicleNumber: 'TN05IN0005', docStatus: 'Approved', assignedDriverId: 'drvV' });
+    await setDoc(doc(db, 'vehicles/vehOther'), { vendorId: '', vehicleNumber: 'TN05OT0006', docStatus: 'Approved', assignedDriverId: 'drvB' });
+  });
+  const drvV = env.authenticatedContext('drvV').firestore();
+  const claim = (db, uid, id, vehicle) => runTransaction(db, async (tx) => {
+    await tx.get(doc(db, 'marketplace_trips', id));
+    tx.update(doc(db, 'bookings', id), {
+      status: 'Assigned', tripStage: 'Assigned', assignedDriverId: uid, assignedDriverName: uid, driver: uid, driverPhone: '',
+      ...vehicle, driverPayout: 425, assignedAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    });
+    tx.update(doc(db, 'marketplace_trips', id), { status: 'Assigned', assignedDriverId: uid, assignedDriverName: uid, updatedAt: serverTimestamp() });
+  });
+  const id = await openTrip();
+  // Not their paired vehicle, no vehicle id, or a mismatched number: refused.
+  await assertFails(claim(drvV, 'drvV', id, { assignedVehicleId: 'vehOther', assignedVehicleNumber: 'TN05OT0006' }));
+  await assertFails(claim(drvV, 'drvV', id, { assignedVehicleNumber: 'TN05IN0005' }));
+  await assertFails(claim(drvV, 'drvV', id, { assignedVehicleId: 'vehIndie', assignedVehicleNumber: 'TN05IN9999' }));
+  await assertSucceeds(claim(drvV, 'drvV', id, { assignedVehicleId: 'vehIndie', assignedVehicleNumber: 'TN05IN0005' }));
+  // After claiming, the driver cannot change the payout, fare or commission.
+  for (const field of [{ driverPayout: 9999 }, { fare: 1 }, { commission: { rate: 0 } }, { finance: { partnerPayout: 9999 } }, { payoutSource: 'manual' }]) {
+    await assertFails(updateDoc(doc(drvV, 'bookings', id), { ...field, updatedAt: serverTimestamp() }));
+  }
+  // A driver without a paired vehicle record claims with no vehicle id (legacy self-registered vehicle).
+  const id2 = await openTrip();
+  await assertFails(claim(ctx.drvB, 'drvB', id2, { assignedVehicleId: 'vehOther', assignedVehicleNumber: 'TN05OT0006' }));
+  await assertSucceeds(claim(ctx.drvB, 'drvB', id2, { assignedVehicleNumber: 'TN01AB1234' }));
+});

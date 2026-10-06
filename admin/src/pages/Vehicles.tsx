@@ -1,201 +1,266 @@
-import { useState, useEffect, useMemo } from "react";
-import { Vehicle, VehicleCategory, Driver } from "../types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Booking, Driver, Vehicle, VehicleCategory, Vendor } from "../types";
 import {
-  subscribeVehicles,
-  subscribeVehicleCategories,
+  subscribeBookings,
   subscribeDrivers,
-  updateFirestoreDocument,
-  setFirestoreDocument,
-  deleteFirestoreDocument,
-  COLLECTIONS,
+  subscribeVehicleCategories,
+  subscribeVehicles,
+  subscribeVendors,
 } from "../services/adminFirestoreService";
+import {
+  FUEL_TYPES,
+  VEHICLE_STATUSES,
+  VehicleActionError,
+  activeTripFor,
+  approvalBlockers,
+  availabilityOf,
+  deleteVehicle,
+  eligibleDrivers,
+  mapVehicle,
+  newVehicleId,
+  regKey,
+  reviewVehicleDocuments,
+  saveVehicle,
+  uploadVehicleDocument,
+  validateVehicleInput,
+  vehicleDocuments,
+  type Availability,
+  type ComplianceState,
+  type FleetVehicle,
+  type VehicleDocKind,
+  type VehicleFieldErrors,
+  type VehicleInput,
+} from "../services/vehicleService";
+import { normalizeVendorStatus } from "../utils/vendorStatus";
+import { ConfirmDialog, ErrorBanner, Modal, Toast, useToast } from "../components/Feedback";
 
-const statusStyle: Record<string, string> = {
+const availabilityStyle: Record<Availability, string> = {
   Available: "bg-green-50 text-green-700 border-green-200",
   "On Trip": "bg-orange-50 text-orange-700 border-orange-200",
+  "Awaiting Approval": "bg-blue-50 text-blue-700 border-blue-200",
+  "Documents Rejected": "bg-red-50 text-red-700 border-red-200",
   Maintenance: "bg-yellow-50 text-yellow-700 border-yellow-200",
-  Reserved: "bg-blue-50 text-blue-700 border-blue-200",
   Inactive: "bg-gray-100 text-gray-600 border-gray-200",
 };
 
-export default function Vehicles() {
-  const [vehicleList, setVehicleList] = useState<Vehicle[]>([]);
-  const [categories, setCategories] = useState<VehicleCategory[]>([]);
-  const [driverList, setDriverList] = useState<Driver[]>([]);
-  const [selectedVehicle, setSelectedVehicle] = useState<Vehicle | null>(null);
-  const [editVehicle, setEditVehicle] = useState<Vehicle | null>(null);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("All");
-  const [toastMsg, setToastMsg] = useState<string | null>(null);
+const complianceStyle: Record<ComplianceState, string> = {
+  Valid: "bg-green-50 text-green-700 border-green-200",
+  Expiring: "bg-amber-50 text-amber-700 border-amber-200",
+  Expired: "bg-red-50 text-red-700 border-red-200",
+  Missing: "bg-gray-100 text-gray-500 border-gray-200",
+};
 
-  const [newVehicle, setNewVehicle] = useState({
-    number: "",
-    category: "Sedan",
-    make: "",
-    model: "",
-    year: "2023",
-    seats: "4",
-    fuel: "Diesel",
-    driver: "Unassigned",
-    rate: "₹12/km",
-  });
+const AVAILABILITY_FILTERS: ("All" | Availability)[] = [
+  "All",
+  "Available",
+  "On Trip",
+  "Awaiting Approval",
+  "Documents Rejected",
+  "Maintenance",
+  "Inactive",
+];
 
-  const showToast = (msg: string) => {
-    setToastMsg(msg);
-    setTimeout(() => setToastMsg(null), 3500);
+const vendorDisplayName = (v: Vendor & { business?: { businessName?: string } }) =>
+  v.companyName || v.business?.businessName || v.name || v.id;
+
+const errorText = (e: unknown) =>
+  e instanceof VehicleActionError ? e.message : "Something went wrong. Please try again.";
+
+const blankInput = (): VehicleInput => ({
+  vehicleNumber: "",
+  vendorId: "",
+  vendorName: "",
+  categoryId: "",
+  category: "",
+  make: "",
+  model: "",
+  year: "",
+  seatingCapacity: 0,
+  fuelType: "Diesel",
+  status: "Active",
+  assignedDriverId: "",
+  rcNumber: "",
+  rcDocUrl: "",
+  insuranceExpiry: "",
+  insuranceDocUrl: "",
+  fitnessExpiry: "",
+  fitnessDocUrl: "",
+  permitExpiry: "",
+  statePermitDocUrl: "",
+});
+
+const inputFrom = (v: FleetVehicle, categories: VehicleCategory[]): VehicleInput => {
+  // Older vehicles store only the category name; link it to the master record.
+  const cat =
+    categories.find((c) => c.id === v.categoryId) ||
+    categories.find(
+      (c) =>
+        c.name.trim().toLowerCase() === v.category.toLowerCase() ||
+        (c.code || "").toLowerCase() === v.category.toLowerCase(),
+    );
+  return {
+    vehicleNumber: v.vehicleNumber,
+    vendorId: v.vendorId,
+    vendorName: v.vendorName,
+    categoryId: cat?.id || v.categoryId,
+    category: cat?.name || v.category,
+    make: v.make,
+    model: v.model,
+    year: v.year,
+    seatingCapacity: v.seatingCapacity,
+    fuelType: (FUEL_TYPES as readonly string[]).includes(v.fuelType) ? v.fuelType : "",
+    status: v.status,
+    assignedDriverId: v.assignedDriverId,
+    rcNumber: v.rcNumber,
+    rcDocUrl: v.rcDocUrl,
+    insuranceExpiry: v.insuranceExpiry,
+    insuranceDocUrl: v.insuranceDocUrl,
+    fitnessExpiry: v.fitnessExpiry,
+    fitnessDocUrl: v.fitnessDocUrl,
+    permitExpiry: v.permitExpiry,
+    statePermitDocUrl: v.statePermitDocUrl,
   };
+};
+
+export default function Vehicles() {
+  const [rawVehicles, setRawVehicles] = useState<Vehicle[]>([]);
+  const [categories, setCategories] = useState<VehicleCategory[]>([]);
+  const [drivers, setDrivers] = useState<Driver[]>([]);
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+
+  const [search, setSearch] = useState("");
+  const [availabilityFilter, setAvailabilityFilter] = useState<"All" | Availability>("All");
+  const [ownerFilter, setOwnerFilter] = useState("All");
+  const [categoryFilter, setCategoryFilter] = useState("All");
+
+  const [form, setForm] = useState<{ id: string; existing: FleetVehicle | null } | null>(null);
+  const [viewingId, setViewingId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<FleetVehicle | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const { toast, show } = useToast();
 
   useEffect(() => {
-    const unsubV = subscribeVehicles(setVehicleList);
-    const unsubC = subscribeVehicleCategories(setCategories);
-    const unsubD = subscribeDrivers(setDriverList);
-
-    return () => {
-      unsubV();
-      unsubC();
-      unsubD();
+    setLoading(true);
+    setLoadError(null);
+    const fail = (message: string) => {
+      setLoadError(message);
+      setLoading(false);
     };
-  }, []);
+    const unsubs = [
+      subscribeVehicles((data) => {
+        setRawVehicles(data);
+        setLoading(false);
+      }, fail),
+      subscribeVehicleCategories(setCategories, fail),
+      subscribeDrivers(setDrivers, fail),
+      subscribeVendors(setVendors, fail),
+      subscribeBookings(setBookings, fail),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, [retryKey]);
 
-  const handleAddVehicle = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!newVehicle.number.trim()) {
-      alert("Vehicle Registration Number is required (e.g. TN01 AB 1234).");
-      return;
-    }
-    const id = "VEH-" + Date.now();
-    const vehicleName =
-      `${newVehicle.make.trim()} ${newVehicle.model.trim()}`.trim() ||
-      newVehicle.category;
-    const createdVehicle: Vehicle = {
-      id,
-      name: vehicleName,
-      number: newVehicle.number.trim().toUpperCase(),
-      category: newVehicle.category,
-      seats: Number(newVehicle.seats) || 4,
-      driver: newVehicle.driver || "Unassigned",
-      status: "Available",
-      rate: newVehicle.rate.startsWith("₹") ? newVehicle.rate : `₹${newVehicle.rate}`,
-      docStatus: "Approved",
-      fuel: newVehicle.fuel,
-    };
+  const vehicles = useMemo(
+    () =>
+      rawVehicles
+        .map(mapVehicle)
+        .sort((a, b) => a.vehicleNumber.localeCompare(b.vehicleNumber)),
+    [rawVehicles],
+  );
 
-    setVehicleList((prev) => [createdVehicle, ...prev]);
-    setShowAddModal(false);
-    setNewVehicle({
-      number: "",
-      category: "Sedan",
-      make: "",
-      model: "",
-      year: "2023",
-      seats: "4",
-      fuel: "Diesel",
-      driver: "Unassigned",
-      rate: "₹12/km",
+  const vendorNames = useMemo(() => new Map(vendors.map((v) => [v.id, vendorDisplayName(v)])), [vendors]);
+  const driverNames = useMemo(() => new Map(drivers.map((d) => [d.id, d.name || ""])), [drivers]);
+  const vendorName = (id: string, fallback: string) => vendorNames.get(id) || fallback || "Vendor";
+  const driverName = (v: FleetVehicle) => v.assignedDriverName || driverNames.get(v.assignedDriverId) || "";
+
+  const rows = useMemo(
+    () =>
+      vehicles.map((v) => ({
+        vehicle: v,
+        availability: availabilityOf(v, bookings),
+        docs: vehicleDocuments(v),
+      })),
+    [vehicles, bookings],
+  );
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const qKey = regKey(search);
+    const owner = (v: FleetVehicle) => (v.vendorId ? vendorNames.get(v.vendorId) || v.vendorName : "NESAM");
+    const driver = (v: FleetVehicle) => v.assignedDriverName || driverNames.get(v.assignedDriverId) || "";
+    return rows.filter(({ vehicle: v, availability }) => {
+      if (availabilityFilter !== "All" && availability !== availabilityFilter) return false;
+      if (ownerFilter === "NESAM" && v.vendorId) return false;
+      if (ownerFilter !== "All" && ownerFilter !== "NESAM" && v.vendorId !== ownerFilter) return false;
+      if (categoryFilter !== "All" && v.categoryId !== categoryFilter && v.category !== categoryFilter) return false;
+      if (!q) return true;
+      return (
+        (qKey && regKey(v.vehicleNumber).includes(qKey)) ||
+        `${v.make} ${v.model}`.toLowerCase().includes(q) ||
+        v.category.toLowerCase().includes(q) ||
+        v.rcNumber.toLowerCase().includes(q) ||
+        driver(v).toLowerCase().includes(q) ||
+        owner(v).toLowerCase().includes(q)
+      );
     });
+  }, [rows, search, availabilityFilter, ownerFilter, categoryFilter, vendorNames, driverNames]);
 
+  const counts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const r of rows) c[r.availability] = (c[r.availability] || 0) + 1;
+    return c;
+  }, [rows]);
+
+  const ownersInUse = useMemo(() => {
+    const ids = new Set(vehicles.map((v) => v.vendorId).filter(Boolean));
+    return [...ids]
+      .map((id) => ({
+        id,
+        name: vendorNames.get(id) || vehicles.find((v) => v.vendorId === id)?.vendorName || "Vendor",
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [vehicles, vendorNames]);
+
+  const viewing = viewingId ? vehicles.find((v) => v.id === viewingId) ?? null : null;
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
     try {
-      await setFirestoreDocument(COLLECTIONS.VEHICLES, id, createdVehicle);
-      showToast(`Vehicle ${createdVehicle.number} registered successfully!`);
-    } catch (err) {
-      console.warn("Error saving vehicle to Firestore:", err);
+      await deleteVehicle(deleteTarget, bookings);
+      show(`Vehicle ${deleteTarget.vehicleNumber} removed.`);
+      setDeleteTarget(null);
+    } catch (e) {
+      setDeleteError(errorText(e));
+    } finally {
+      setDeleting(false);
     }
   };
 
-  const handleSaveEdit = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!editVehicle) return;
-
-    setVehicleList((prev) =>
-      prev.map((v) => (v.id === editVehicle.id ? editVehicle : v))
-    );
-    const target = editVehicle;
-    setEditVehicle(null);
-
-    try {
-      await setFirestoreDocument(COLLECTIONS.VEHICLES, target.id, target);
-      showToast(`Vehicle ${target.number} updated successfully!`);
-    } catch (err) {
-      console.warn("Error updating vehicle in Firestore:", err);
-    }
-  };
-
-  const handleDeleteVehicle = async (id: string, num: string) => {
-    if (!confirm(`Are you sure you want to remove vehicle ${num}?`)) return;
-    setVehicleList((prev) => prev.filter((v) => v.id !== id));
-    try {
-      await deleteFirestoreDocument(COLLECTIONS.VEHICLES, id);
-      showToast(`Vehicle ${num} deleted.`);
-    } catch (err) {
-      console.warn("Error deleting vehicle:", err);
-    }
-  };
-
-  // Filtered List
-  const filteredVehicles = useMemo(() => {
-    return vehicleList.filter((v) => {
-      const q = search.trim().toLowerCase();
-      const matchSearch =
-        q === "" ||
-        (v.number && v.number.toLowerCase().includes(q)) ||
-        (v.name && v.name.toLowerCase().includes(q)) ||
-        (v.category && v.category.toLowerCase().includes(q)) ||
-        (v.driver && v.driver.toLowerCase().includes(q));
-      const matchStatus =
-        statusFilter === "All" || v.status === statusFilter;
-      return matchSearch && matchStatus;
-    });
-  }, [vehicleList, search, statusFilter]);
-
-  const activeCategories = categories.filter((c) => c.status === "Active");
+  const hasFilters = search.trim() !== "" || availabilityFilter !== "All" || ownerFilter !== "All" || categoryFilter !== "All";
 
   return (
     <div className="p-6 space-y-5">
-      {/* Toast Notification */}
-      {toastMsg && (
-        <div className="fixed top-18 right-6 z-50 bg-[#111] text-white px-4 py-2.5 rounded-xl shadow-2xl text-xs font-semibold flex items-center gap-2 border border-white/10 animate-fade-in">
-          <span className="w-2 h-2 rounded-full bg-emerald-400" />
-          <span>{toastMsg}</span>
-        </div>
-      )}
+      <Toast toast={toast} />
+
+      {loadError && <ErrorBanner message={loadError} onRetry={() => setRetryKey((k) => k + 1)} />}
 
       {/* Stats Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          {
-            label: "Total Registered Vehicles",
-            value: vehicleList.length.toString(),
-            color: "#E21B23",
-          },
-          {
-            label: "Available on Road",
-            value: vehicleList
-              .filter((v) => v.status === "Available")
-              .length.toString(),
-            color: "#10B981",
-          },
-          {
-            label: "Active On Trip",
-            value: vehicleList
-              .filter((v) => v.status === "On Trip")
-              .length.toString(),
-            color: "#F59E0B",
-          },
-          {
-            label: "Service / Maintenance",
-            value: vehicleList
-              .filter((v) => v.status === "Maintenance")
-              .length.toString(),
-            color: "#6B7280",
-          },
+          { label: "Total Registered Vehicles", value: vehicles.length, color: "#E21B23" },
+          { label: "Available for Trips", value: counts["Available"] || 0, color: "#10B981" },
+          { label: "Active On Trip", value: counts["On Trip"] || 0, color: "#F59E0B" },
+          { label: "Awaiting Document Review", value: counts["Awaiting Approval"] || 0, color: "#3B82F6" },
         ].map((s) => (
-          <div
-            key={s.label}
-            className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4"
-          >
+          <div key={s.label} className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4">
             <div className="text-[22px] font-bold" style={{ color: s.color }}>
-              {s.value}
+              {loading ? "—" : s.value}
             </div>
             <div className="text-[11px] text-[#999] mt-0.5">{s.label}</div>
           </div>
@@ -204,669 +269,785 @@ export default function Vehicles() {
 
       {/* Main Table Card */}
       <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
-        {/* Card Header & Controls */}
         <div className="p-4 border-b border-[#E5E5E5] flex flex-col md:flex-row md:items-center justify-between gap-3 bg-[#FAFAFA]">
           <div>
-            <h2 className="text-[14px] font-bold text-[#111]">
-              Fleet Vehicle Directory & Compliance Verification
-            </h2>
+            <h2 className="text-[14px] font-bold text-[#111]">Fleet Vehicle Directory & Compliance Verification</h2>
             <p className="text-[11px] text-[#888]">
-              Manage physical vehicles, driver assignments, and verify RTO compliance documents.
+              Vendor and NESAM-owned vehicles, driver pairing, and RC / insurance / permit review.
             </p>
           </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              onClick={() => setShowAddModal(true)}
-              className="flex items-center gap-1.5 px-4 py-2 text-[12px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 cursor-pointer transition-all"
-              style={{ background: "#E21B23" }}
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-              </svg>
-              Register Vehicle
-            </button>
-          </div>
+          <button
+            onClick={() => setForm({ id: newVehicleId(), existing: null })}
+            className="flex items-center gap-1.5 px-4 py-2 text-[12px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 cursor-pointer transition-all self-start md:self-auto"
+            style={{ background: "#E21B23" }}
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+            </svg>
+            Register Vehicle
+          </button>
         </div>
 
-        {/* Search & Filter Toolbar */}
-        <div className="px-4 py-3 border-b border-[#EBEBEB] flex flex-wrap items-center justify-between gap-3 bg-white">
-          <div className="relative flex-1 min-w-[220px] max-w-sm">
-            <svg
-              className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#999]"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
+        {/* Search & Filters */}
+        <div className="px-4 py-3 border-b border-[#EBEBEB] space-y-3 bg-white">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative flex-1 min-w-[220px] max-w-sm">
+              <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#999]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+              <input
+                type="search"
+                placeholder="Search number, model, driver, owner, RC…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full pl-9 pr-3 py-1.5 text-[12px] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23]"
+              />
+            </div>
+            <select
+              aria-label="Owner"
+              value={ownerFilter}
+              onChange={(e) => setOwnerFilter(e.target.value)}
+              className="px-3 py-1.5 text-[12px] border border-[#E5E5E5] rounded-lg bg-white"
             >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
-            <input
-              type="text"
-              placeholder="Search by vehicle number, model, driver..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-9 pr-3 py-1.5 text-[12px] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23]"
-            />
+              <option value="All">All owners</option>
+              <option value="NESAM">NESAM-owned</option>
+              {ownersInUse.map((o) => (
+                <option key={o.id} value={o.id}>{o.name}</option>
+              ))}
+            </select>
+            <select
+              aria-label="Category"
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value)}
+              className="px-3 py-1.5 text-[12px] border border-[#E5E5E5] rounded-lg bg-white"
+            >
+              <option value="All">All categories</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+            {hasFilters && (
+              <button
+                onClick={() => {
+                  setSearch("");
+                  setAvailabilityFilter("All");
+                  setOwnerFilter("All");
+                  setCategoryFilter("All");
+                }}
+                className="text-[11px] font-semibold text-[#E21B23] hover:underline"
+              >
+                Clear filters
+              </button>
+            )}
           </div>
-
           <div className="flex items-center gap-1 overflow-x-auto">
-            {["All", "Available", "On Trip", "Maintenance"].map((st) => (
+            {AVAILABILITY_FILTERS.map((st) => (
               <button
                 key={st}
-                onClick={() => setStatusFilter(st)}
-                className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
-                  statusFilter === st
-                    ? "bg-[#111] text-white"
-                    : "bg-[#F5F5F5] text-[#666] hover:bg-[#EBEBEB]"
+                onClick={() => setAvailabilityFilter(st)}
+                className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                  availabilityFilter === st ? "bg-[#111] text-white" : "bg-[#F5F5F5] text-[#666] hover:bg-[#EBEBEB]"
                 }`}
               >
                 {st}
+                {st !== "All" && counts[st] ? ` (${counts[st]})` : ""}
               </button>
             ))}
           </div>
         </div>
 
-        {/* Table Content */}
+        {/* Table */}
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1000px]">
-            <thead>
-              <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
-                {[
-                  "Vehicle",
-                  "Number",
-                  "Category",
-                  "Seats",
-                  "Compliance Documents",
-                  "Assigned Driver",
-                  "Status",
-                  "Rate",
-                  "Actions",
-                ].map((h) => (
-                  <th
-                    key={h}
-                    className="px-4 py-3 text-left text-[11px] font-semibold text-[#888] uppercase tracking-wide whitespace-nowrap"
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filteredVehicles.map((v) => (
-                <tr
-                  key={v.id}
-                  className="table-row border-b border-[#F5F5F5] hover:bg-gray-50/60 last:border-0 transition-colors"
-                >
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-lg bg-[#FEF2F2] flex items-center justify-center shrink-0">
-                        <svg
-                          className="w-5 h-5 text-[#E21B23]"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                          strokeWidth={1.5}
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4"
-                          />
-                        </svg>
-                      </div>
-                      <div>
+          {loading ? (
+            <div className="py-14 text-center text-[13px] text-[#999]">Loading vehicles…</div>
+          ) : (
+            <>
+              <table className="w-full min-w-[1050px]">
+                <thead>
+                  <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
+                    {["Vehicle", "Number", "Category", "Seats", "Owner", "Compliance Documents", "Assigned Driver", "Status", "Actions"].map((h) => (
+                      <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-[#888] uppercase tracking-wide whitespace-nowrap">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map(({ vehicle: v, availability, docs }) => (
+                    <tr key={v.id} className="table-row border-b border-[#F5F5F5] hover:bg-gray-50/60 last:border-0 transition-colors">
+                      <td className="px-4 py-3">
                         <div className="text-[12px] font-bold text-[#111]">
-                          {v.name}
+                          {`${v.make} ${v.model}`.trim() || "—"}
                         </div>
-                        <div className="text-[10px] text-[#999] font-mono">
-                          {v.fuel ? `${v.fuel} • ` : ""}
-                          {v.id}
+                        <div className="text-[10px] text-[#999]">
+                          {[v.fuelType, v.year].filter(Boolean).join(" • ") || "—"}
                         </div>
-                      </div>
-                    </div>
-                  </td>
+                      </td>
+                      <td className="px-4 py-3 text-[12px] font-mono font-bold text-[#111] whitespace-nowrap">
+                        {v.vehicleNumber || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-[12px] text-[#444] font-medium">{v.category || "—"}</td>
+                      <td className="px-4 py-3 text-[12px] font-semibold text-[#111] text-center">
+                        {v.seatingCapacity || "—"}
+                      </td>
+                      <td className="px-4 py-3 text-[12px] text-[#444]">
+                        {v.vendorId ? vendorName(v.vendorId, v.vendorName) : <span className="font-semibold">NESAM</span>}
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex flex-wrap gap-1">
+                          {docs.map((d) => (
+                            <span
+                              key={d.key}
+                              title={`${d.label}: ${d.state}${d.expiry ? ` (till ${d.expiry})` : ""}`}
+                              className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${complianceStyle[d.state]}`}
+                            >
+                              {d.short}: {d.state}
+                            </span>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-[12px]">
+                        {driverName(v) ? (
+                          <span className="font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded text-[11px] border border-emerald-200">
+                            {driverName(v)}
+                          </span>
+                        ) : (
+                          <span className="text-[#999] italic">Unassigned</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-bold border whitespace-nowrap ${availabilityStyle[availability]}`}>
+                          {availability}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => setViewingId(v.id)}
+                            className="text-[11px] px-2.5 py-1 rounded-md border border-[#E5E5E5] hover:bg-[#FEF2F2] text-[#E21B23] font-semibold transition-colors cursor-pointer"
+                          >
+                            {v.docStatus === "Pending" ? "Review" : "View"}
+                          </button>
+                          <button
+                            onClick={() => setForm({ id: v.id, existing: v })}
+                            className="text-[11px] px-2 py-1 rounded-md border border-[#E5E5E5] hover:bg-gray-100 text-[#444] font-medium transition-colors cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => {
+                              setDeleteError(null);
+                              setDeleteTarget(v);
+                            }}
+                            aria-label={`Remove ${v.vehicleNumber}`}
+                            className="text-[11px] px-1.5 py-1 rounded-md text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
 
-                  <td className="px-4 py-3 text-[12px] font-mono font-bold text-[#111]">
-                    {v.number}
-                  </td>
-
-                  <td className="px-4 py-3 text-[12px] text-[#444] font-medium">
-                    {v.category}
-                  </td>
-
-                  <td className="px-4 py-3 text-[12px] font-semibold text-[#111] text-center">
-                    {v.seats}
-                  </td>
-
-                  <td className="px-4 py-3">
-                    <div className="flex flex-wrap gap-1">
-                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-green-50 text-green-700 border border-green-200">
-                        RC: Verified
-                      </span>
-                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">
-                        Ins: Active
-                      </span>
-                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-50 text-purple-700 border border-purple-200">
-                        FC: Valid
-                      </span>
-                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
-                        Permit: All India
-                      </span>
-                    </div>
-                  </td>
-
-                  <td className="px-4 py-3 text-[12px] text-[#333] font-medium">
-                    {v.driver && v.driver !== "Unassigned" ? (
-                      <span className="font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded text-[11px] border border-emerald-200">
-                        {v.driver}
-                      </span>
-                    ) : (
-                      <span className="text-[#999] italic">Unassigned</span>
-                    )}
-                  </td>
-
-                  <td className="px-4 py-3">
-                    <span
-                      className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-bold border ${statusStyle[v.status] || "bg-gray-100 text-gray-700 border-gray-200"}`}
+              {filtered.length === 0 && (
+                <div className="py-14 text-center">
+                  <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-2 text-gray-400">🚗</div>
+                  <p className="text-[13px] font-semibold text-gray-800">No vehicles found.</p>
+                  <p className="text-[11px] text-gray-500 mb-4">
+                    {hasFilters ? "Try adjusting your search or filters." : "Register the first vehicle to get started."}
+                  </p>
+                  {!hasFilters && (
+                    <button
+                      onClick={() => setForm({ id: newVehicleId(), existing: null })}
+                      className="px-4 py-2 bg-[#E21B23] text-white text-xs font-semibold rounded-lg hover:opacity-90 transition-opacity cursor-pointer shadow-sm"
                     >
-                      {v.status}
-                    </span>
-                  </td>
-
-                  <td
-                    className="px-4 py-3 text-[12px] font-bold"
-                    style={{ color: "#E21B23" }}
-                  >
-                    {v.rate || "₹12/km"}
-                  </td>
-
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={() => setSelectedVehicle(v)}
-                        className="text-[11px] px-2.5 py-1 rounded-md border border-[#E5E5E5] hover:bg-[#FEF2F2] text-[#E21B23] font-semibold transition-colors cursor-pointer"
-                        title="Audit compliance documents"
-                      >
-                        Audit
-                      </button>
-                      <button
-                        onClick={() => setEditVehicle({ ...v })}
-                        className="text-[11px] px-2 py-1 rounded-md border border-[#E5E5E5] hover:bg-gray-100 text-[#444] font-medium transition-colors cursor-pointer"
-                        title="Edit Vehicle"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        onClick={() => handleDeleteVehicle(v.id, v.number)}
-                        className="text-[11px] px-1.5 py-1 rounded-md text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
-                        title="Remove vehicle"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {filteredVehicles.length === 0 && (
-            <div className="py-14 text-center">
-              <div className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mx-auto mb-2 text-gray-400">
-                🚗
-              </div>
-              <p className="text-[13px] font-semibold text-gray-800">
-                No vehicles found
-              </p>
-              <p className="text-[11px] text-gray-500 mb-4">
-                {search || statusFilter !== "All"
-                  ? "Try adjusting your search query or filters"
-                  : "Register the first vehicle to get started"}
-              </p>
-              {!search && statusFilter === "All" && (
-                <button
-                  onClick={() => setShowAddModal(true)}
-                  className="px-4 py-2 bg-[#E21B23] text-white text-xs font-semibold rounded-lg hover:opacity-90 transition-opacity cursor-pointer shadow-sm"
-                >
-                  Register Vehicle
-                </button>
+                      Register Vehicle
+                    </button>
+                  )}
+                </div>
               )}
-            </div>
+            </>
           )}
         </div>
       </div>
 
-      {/* Compliance Verification Audit Modal */}
-      {selectedVehicle && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
-              <div>
-                <h3 className="text-base font-bold text-gray-900">
-                  Vehicle Compliance Audit
-                </h3>
-                <p className="text-xs text-gray-500 font-mono">
-                  {selectedVehicle.number} • {selectedVehicle.name}
-                </p>
-              </div>
-              <button
-                onClick={() => setSelectedVehicle(null)}
-                className="text-gray-400 hover:text-gray-700 text-sm font-bold cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="space-y-3 text-xs">
-              <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 flex items-center justify-between">
-                <div>
-                  <span className="font-bold text-gray-900 block">
-                    Registration Certificate (RC)
-                  </span>
-                  <span className="text-[10px] text-gray-500 font-mono">
-                    State: Tamil Nadu RTO • Reg: Valid
-                  </span>
-                </div>
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                  ✓ Verified
-                </span>
-              </div>
-
-              <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 flex items-center justify-between">
-                <div>
-                  <span className="font-bold text-gray-900 block">
-                    Commercial Vehicle Insurance
-                  </span>
-                  <span className="text-[10px] text-gray-500 font-mono">
-                    Comprehensive Policy • Active till Dec 2026
-                  </span>
-                </div>
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                  ✓ Active
-                </span>
-              </div>
-
-              <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 flex items-center justify-between">
-                <div>
-                  <span className="font-bold text-gray-900 block">
-                    Fitness Certificate (FC)
-                  </span>
-                  <span className="text-[10px] text-gray-500 font-mono">
-                    Commercial FC Valid till Oct 2027
-                  </span>
-                </div>
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                  ✓ Valid
-                </span>
-              </div>
-
-              <div className="p-3 bg-gray-50 rounded-xl border border-gray-100 flex items-center justify-between">
-                <div>
-                  <span className="font-bold text-gray-900 block">
-                    State & All India Tourist Permit
-                  </span>
-                  <span className="text-[10px] text-gray-500 font-mono">
-                    Permit No: TN-PERM-99482
-                  </span>
-                </div>
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">
-                  ✓ All India
-                </span>
-              </div>
-            </div>
-
-            <div className="flex justify-between items-center border-t border-gray-100 pt-3">
-              <span className="text-[11px] text-gray-500">
-                Status: <strong className="text-gray-800">{selectedVehicle.status}</strong>
-              </span>
-
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setSelectedVehicle(null)}
-                  className="px-4 py-2 border rounded-xl text-xs font-bold text-gray-700 hover:bg-gray-50 cursor-pointer"
-                >
-                  Close
-                </button>
-                <button
-                  onClick={async () => {
-                    await updateFirestoreDocument(
-                      COLLECTIONS.VEHICLES,
-                      selectedVehicle.id,
-                      { docStatus: "Approved", status: "Available" }
-                    );
-                    setVehicleList((prev) =>
-                      prev.map((v) =>
-                        v.id === selectedVehicle.id
-                          ? { ...v, docStatus: "Approved", status: "Available" }
-                          : v
-                      )
-                    );
-                    showToast(`Vehicle ${selectedVehicle.number} approved for road trips!`);
-                    setSelectedVehicle(null);
-                  }}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow cursor-pointer transition-colors"
-                >
-                  Approve for Road
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+      {viewing && (
+        <VehicleDetailModal
+          vehicle={viewing}
+          ownerName={viewing.vendorId ? vendorName(viewing.vendorId, viewing.vendorName) : "NESAM"}
+          driverName={driverName(viewing)}
+          activeTrip={activeTripFor(viewing, bookings)}
+          availability={availabilityOf(viewing, bookings)}
+          onClose={() => setViewingId(null)}
+          onEdit={() => {
+            setViewingId(null);
+            setForm({ id: viewing.id, existing: viewing });
+          }}
+          onDone={(msg) => show(msg)}
+        />
       )}
 
-      {/* Edit Vehicle Modal */}
-      {editVehicle && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
-              <h3 className="text-base font-bold text-gray-900">
-                Edit Vehicle: {editVehicle.number}
-              </h3>
-              <button
-                onClick={() => setEditVehicle(null)}
-                className="text-gray-400 hover:text-gray-700 cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="space-y-3">
-              <div>
-                <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                  Vehicle Name / Model
-                </label>
-                <input
-                  value={editVehicle.name}
-                  onChange={(e) =>
-                    setEditVehicle({ ...editVehicle, name: e.target.value })
-                  }
-                  className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Category
-                  </label>
-                  <select
-                    value={editVehicle.category}
-                    onChange={(e) =>
-                      setEditVehicle({
-                        ...editVehicle,
-                        category: e.target.value,
-                      })
-                    }
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                  >
-                    {activeCategories.map((c) => (
-                      <option key={c.id} value={c.name}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Status
-                  </label>
-                  <select
-                    value={editVehicle.status}
-                    onChange={(e) =>
-                      setEditVehicle({ ...editVehicle, status: e.target.value })
-                    }
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                  >
-                    <option value="Available">Available</option>
-                    <option value="On Trip">On Trip</option>
-                    <option value="Maintenance">Maintenance</option>
-                    <option value="Reserved">Reserved</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Seating Capacity
-                  </label>
-                  <input
-                    type="number"
-                    value={editVehicle.seats}
-                    onChange={(e) =>
-                      setEditVehicle({
-                        ...editVehicle,
-                        seats: Number(e.target.value),
-                      })
-                    }
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Base Rate per KM
-                  </label>
-                  <input
-                    value={editVehicle.rate}
-                    onChange={(e) =>
-                      setEditVehicle({ ...editVehicle, rate: e.target.value })
-                    }
-                    placeholder="₹14/km"
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                  Assigned Driver
-                </label>
-                <select
-                  value={editVehicle.driver || "Unassigned"}
-                  onChange={(e) =>
-                    setEditVehicle({ ...editVehicle, driver: e.target.value })
-                  }
-                  className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                >
-                  <option value="Unassigned">Unassigned (Fleet Pool)</option>
-                  {driverList.map((d) => (
-                    <option key={d.id} value={d.name}>
-                      {d.name} ({d.phone})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setEditVehicle(null)}
-                  className="px-4 py-2 border rounded-xl text-xs font-semibold text-gray-600 hover:bg-gray-50 cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSaveEdit}
-                  className="px-5 py-2 bg-[#E21B23] hover:bg-[#c4151c] text-white text-xs font-bold rounded-xl cursor-pointer shadow"
-                >
-                  Save Changes
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+      {form && (
+        <VehicleFormModal
+          vehicleId={form.id}
+          existing={form.existing}
+          vehicles={vehicles}
+          categories={categories}
+          drivers={drivers}
+          vendors={vendors}
+          bookings={bookings}
+          onClose={() => setForm(null)}
+          onSaved={(msg) => {
+            setForm(null);
+            show(msg);
+          }}
+        />
       )}
 
-      {/* Register Vehicle Modal */}
-      {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
-              <h3 className="text-base font-bold text-gray-900">
-                Register New Fleet Vehicle
-              </h3>
-              <button
-                onClick={() => setShowAddModal(false)}
-                className="text-gray-400 hover:text-gray-700 cursor-pointer"
-              >
-                ✕
+      {deleteTarget && (
+        <ConfirmDialog
+          title={`Remove ${deleteTarget.vehicleNumber}?`}
+          message="The vehicle will be deleted from the fleet. Past bookings keep their recorded vehicle number. To take a vehicle off the road temporarily, set its status to Maintenance or Inactive instead."
+          confirmLabel="Remove Vehicle"
+          danger
+          busy={deleting}
+          error={deleteError}
+          onConfirm={confirmDelete}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Detail / document review ────────────────────────────────────────────────
+
+function VehicleDetailModal({
+  vehicle: v,
+  ownerName,
+  driverName,
+  activeTrip,
+  availability,
+  onClose,
+  onEdit,
+  onDone,
+}: {
+  vehicle: FleetVehicle;
+  ownerName: string;
+  driverName: string;
+  activeTrip: Booking | null;
+  availability: Availability;
+  onClose: () => void;
+  onEdit: () => void;
+  onDone: (message: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState(v.rejectionReason);
+  const docs = vehicleDocuments(v);
+  const blockers = approvalBlockers(v);
+
+  const decide = async (decision: "Approved" | "Rejected") => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await reviewVehicleDocuments(v, decision, reason);
+      onDone(decision === "Approved" ? `${v.vehicleNumber} approved for trips.` : `${v.vehicleNumber} sent back to the owner with your reason.`);
+      onClose();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const Info = ({ label, value }: { label: string; value: string }) => (
+    <div className="p-2.5 bg-gray-50 rounded-lg border border-gray-100">
+      <div className="text-[10px] text-gray-500">{label}</div>
+      <div className="text-[12px] font-semibold text-gray-900 break-words">{value || "—"}</div>
+    </div>
+  );
+
+  return (
+    <Modal
+      title={`Vehicle ${v.vehicleNumber}`}
+      subtitle={`${`${v.make} ${v.model}`.trim()} • ${ownerName}`}
+      onClose={onClose}
+      busy={busy}
+      size="lg"
+      footer={
+        <>
+          <button onClick={onEdit} disabled={busy} className="px-4 py-2 border border-[#E5E5E5] rounded-lg text-[12px] font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50 mr-auto">
+            Edit Vehicle
+          </button>
+          {rejecting ? (
+            <>
+              <button onClick={() => setRejecting(false)} disabled={busy} className="px-4 py-2 border border-[#E5E5E5] rounded-lg text-[12px] font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50">
+                Back
               </button>
-            </div>
-
-            <div className="space-y-3">
-              <div>
-                <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                  Registration Number *
-                </label>
-                <input
-                  placeholder="e.g. TN01 AB 1234"
-                  className="w-full p-2 border border-gray-200 rounded-lg text-xs font-mono uppercase"
-                  value={newVehicle.number}
-                  onChange={(e) =>
-                    setNewVehicle({ ...newVehicle, number: e.target.value })
-                  }
-                  required
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Category
-                  </label>
-                  <select
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                    value={newVehicle.category}
-                    onChange={(e) =>
-                      setNewVehicle({
-                        ...newVehicle,
-                        category: e.target.value,
-                      })
-                    }
-                  >
-                    {activeCategories.map((c) => (
-                      <option key={c.id} value={c.name}>
-                        {c.name} ({c.seatingCapacity} Seats)
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Fuel Type
-                  </label>
-                  <select
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                    value={newVehicle.fuel}
-                    onChange={(e) =>
-                      setNewVehicle({ ...newVehicle, fuel: e.target.value })
-                    }
-                  >
-                    <option>Diesel</option>
-                    <option>Petrol</option>
-                    <option>CNG</option>
-                    <option>Electric (EV)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Make
-                  </label>
-                  <input
-                    placeholder="e.g. Toyota"
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                    value={newVehicle.make}
-                    onChange={(e) =>
-                      setNewVehicle({ ...newVehicle, make: e.target.value })
-                    }
-                  />
-                </div>
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Model
-                  </label>
-                  <input
-                    placeholder="e.g. Innova Crysta"
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                    value={newVehicle.model}
-                    onChange={(e) =>
-                      setNewVehicle({ ...newVehicle, model: e.target.value })
-                    }
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Seating Capacity
-                  </label>
-                  <input
-                    placeholder="4"
-                    type="number"
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                    value={newVehicle.seats}
-                    onChange={(e) =>
-                      setNewVehicle({ ...newVehicle, seats: e.target.value })
-                    }
-                  />
-                </div>
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Per KM Rate
-                  </label>
-                  <input
-                    placeholder="₹14/km"
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                    value={newVehicle.rate}
-                    onChange={(e) =>
-                      setNewVehicle({ ...newVehicle, rate: e.target.value })
-                    }
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                  Assign Driver (Optional)
-                </label>
-                <select
-                  className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                  value={newVehicle.driver}
-                  onChange={(e) =>
-                    setNewVehicle({ ...newVehicle, driver: e.target.value })
-                  }
-                >
-                  <option value="Unassigned">Unassigned (Assign Later)</option>
-                  {driverList.map((d) => (
-                    <option key={d.id} value={d.name}>
-                      {d.name} ({d.phone})
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="pt-2">
-                <button
-                  type="button"
-                  onClick={handleAddVehicle}
-                  className="w-full p-2.5 bg-[#E21B23] hover:bg-[#c4151c] text-white text-xs font-bold rounded-xl cursor-pointer transition-colors shadow"
-                >
-                  Register Vehicle to Fleet
+              <button onClick={() => decide("Rejected")} disabled={busy} className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-[12px] font-bold rounded-lg disabled:opacity-50">
+                {busy ? "Saving…" : "Send Back to Owner"}
+              </button>
+            </>
+          ) : (
+            <>
+              {v.docStatus !== "Rejected" && (
+                <button onClick={() => setRejecting(true)} disabled={busy} className="px-4 py-2 border border-red-200 text-red-700 rounded-lg text-[12px] font-semibold hover:bg-red-50 disabled:opacity-50">
+                  Reject Documents
                 </button>
+              )}
+              {v.docStatus !== "Approved" && (
+                <button
+                  onClick={() => decide("Approved")}
+                  disabled={busy || blockers.length > 0}
+                  title={blockers.length ? blockers.join("\n") : undefined}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-[12px] font-bold rounded-lg disabled:opacity-50"
+                >
+                  {busy ? "Saving…" : "Approve for Trips"}
+                </button>
+              )}
+            </>
+          )}
+        </>
+      }
+    >
+      <div className="space-y-4 text-xs">
+        {error && (
+          <div role="alert" className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl font-semibold">{error}</div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-bold border ${availabilityStyle[availability]}`}>{availability}</span>
+          <span className="text-[11px] text-gray-500">
+            Documents: <strong className="text-gray-800">{v.docStatus}</strong>
+          </span>
+          {activeTrip && (
+            <span className="text-[11px] text-orange-700">
+              On trip {activeTrip.bookingId || activeTrip.id} ({activeTrip.pickup} → {activeTrip.drop})
+            </span>
+          )}
+        </div>
+        {v.docStatus === "Rejected" && v.rejectionReason && (
+          <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-800">
+            <strong>Rejection reason:</strong> {v.rejectionReason}
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+          <Info label="Category" value={v.category} />
+          <Info label="Seats" value={v.seatingCapacity ? String(v.seatingCapacity) : ""} />
+          <Info label="Fuel / Year" value={[v.fuelType, v.year].filter(Boolean).join(" • ")} />
+          <Info label="Owner" value={ownerName} />
+          <Info label="Assigned driver" value={driverName || "Unassigned"} />
+          <Info label="Operational status" value={v.status} />
+        </div>
+
+        <div>
+          <h4 className="text-[12px] font-bold text-gray-900 mb-2">Compliance documents</h4>
+          <div className="space-y-2">
+            {docs.map((d) => (
+              <div key={d.key} className="p-3 bg-gray-50 rounded-xl border border-gray-100 flex flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="font-bold text-gray-900 block">
+                    {d.label}
+                    {!d.required && <span className="font-normal text-gray-500"> (if applicable)</span>}
+                  </span>
+                  <span className="text-[10px] text-gray-500">
+                    {d.number ? `No. ${d.number}` : d.expiry ? `Valid till ${d.expiry}` : d.key === "rc" ? "RC number not recorded" : "No expiry date recorded"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {d.url ? (
+                    <a href={d.url} target="_blank" rel="noopener noreferrer" className="text-[11px] font-semibold text-[#E21B23] hover:underline">
+                      Open file
+                    </a>
+                  ) : (
+                    <span className="text-[11px] text-gray-400">No file</span>
+                  )}
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${complianceStyle[d.state]}`}>{d.state}</span>
+                </div>
               </div>
-            </div>
+            ))}
           </div>
         </div>
-      )}
+
+        {v.docStatus !== "Approved" && blockers.length > 0 && !rejecting && (
+          <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800">
+            <strong>Cannot approve yet:</strong>
+            <ul className="list-disc pl-5 mt-1">
+              {blockers.map((b) => (
+                <li key={b}>{b}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {rejecting && (
+          <div>
+            <label htmlFor="reject-reason" className="block text-[11px] font-bold text-gray-800 mb-1">
+              Reason for the owner *
+            </label>
+            <textarea
+              id="reject-reason"
+              rows={3}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="e.g. Insurance copy is unreadable — please upload a clear PDF."
+              className="w-full p-2.5 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]"
+            />
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+// ── Add / edit ──────────────────────────────────────────────────────────────
+
+function VehicleFormModal({
+  vehicleId,
+  existing,
+  vehicles,
+  categories,
+  drivers,
+  vendors,
+  bookings,
+  onClose,
+  onSaved,
+}: {
+  vehicleId: string;
+  existing: FleetVehicle | null;
+  vehicles: FleetVehicle[];
+  categories: VehicleCategory[];
+  drivers: Driver[];
+  vendors: Vendor[];
+  bookings: Booking[];
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}) {
+  const [input, setInput] = useState<VehicleInput>(() => (existing ? inputFrom(existing, categories) : blankInput()));
+  const [submitted, setSubmitted] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [uploads, setUploads] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const savingRef = useRef(false);
+
+  const set = <K extends keyof VehicleInput>(key: K, value: VehicleInput[K]) =>
+    setInput((prev) => ({ ...prev, [key]: value }));
+
+  const errors: VehicleFieldErrors = useMemo(
+    () => validateVehicleInput(input, { vehicles, editingId: existing?.id ?? null }),
+    [input, vehicles, existing],
+  );
+  const err = (k: keyof VehicleInput) => (submitted ? errors[k] : undefined);
+
+  const approvedVendors = vendors.filter((v) => normalizeVendorStatus(v) === "APPROVED" || v.id === existing?.vendorId);
+  const categoryOptions = categories
+    .filter((c) => c.status === "Active" || c.id === input.categoryId)
+    .sort((a, b) => (a.displayOrder || 99) - (b.displayOrder || 99));
+  const driverOptions = eligibleDrivers(input.vendorId, drivers);
+  const currentDriver = drivers.find((d) => d.id === input.assignedDriverId);
+  const trip = existing ? activeTripFor(existing, bookings) : null;
+
+  const onOwnerChange = (vendorId: string) => {
+    const vendor = vendors.find((v) => v.id === vendorId);
+    setInput((prev) => ({
+      ...prev,
+      vendorId,
+      vendorName: vendor ? vendorDisplayName(vendor) : "",
+      // A driver belongs to one owner; changing the owner drops the pairing.
+      assignedDriverId: vendorId === prev.vendorId ? prev.assignedDriverId : "",
+    }));
+  };
+
+  const onCategoryChange = (categoryId: string) => {
+    const cat = categories.find((c) => c.id === categoryId);
+    setInput((prev) => ({
+      ...prev,
+      categoryId,
+      category: cat?.name || "",
+      seatingCapacity: prev.seatingCapacity || cat?.seatingCapacity || 0,
+    }));
+  };
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitted(true);
+    setError(null);
+    if (Object.keys(errors).length) {
+      setError("Please fix the highlighted fields.");
+      return;
+    }
+    if (uploads > 0) {
+      setError("Please wait for the document uploads to finish.");
+      return;
+    }
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await saveVehicle({ id: vehicleId, input, existing, vehicles, drivers, bookings });
+      onSaved(existing ? `Vehicle ${input.vehicleNumber.toUpperCase()} updated.` : `Vehicle ${input.vehicleNumber.toUpperCase()} registered. Review its documents to approve it for trips.`);
+    } catch (ex) {
+      setError(errorText(ex));
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
+
+  const field = "w-full p-2.5 border rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]";
+  const cls = (k: keyof VehicleInput) => `${field} ${err(k) ? "border-red-400" : "border-[#E5E5E5]"}`;
+  const FieldError = ({ k }: { k: keyof VehicleInput }) =>
+    err(k) ? <p className="text-[10px] text-red-600 mt-1">{err(k)}</p> : null;
+  const busy = saving;
+
+  return (
+    <Modal
+      title={existing ? `Edit Vehicle: ${existing.vehicleNumber}` : "Register New Fleet Vehicle"}
+      subtitle="Vehicles need approved RC, insurance and permit documents before they can take trips."
+      onClose={onClose}
+      busy={busy}
+      size="lg"
+      footer={
+        <>
+          <button type="button" onClick={onClose} disabled={busy} className="px-4 py-2 border border-[#E5E5E5] rounded-lg text-[12px] font-semibold text-gray-700 hover:bg-gray-100 disabled:opacity-50">
+            Cancel
+          </button>
+          <button
+            type="submit"
+            form="vehicle-form"
+            disabled={busy || uploads > 0}
+            className="px-6 py-2 text-[12px] font-bold text-white rounded-lg shadow-sm hover:opacity-90 disabled:opacity-50"
+            style={{ background: "#E21B23" }}
+          >
+            {saving ? "Saving…" : existing ? "Save Changes" : "Register Vehicle"}
+          </button>
+        </>
+      }
+    >
+      <form id="vehicle-form" onSubmit={save} noValidate className="space-y-4 text-xs">
+        {error && (
+          <div role="alert" className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl font-semibold">{error}</div>
+        )}
+        {trip && (
+          <div className="p-3 bg-orange-50 border border-orange-200 text-orange-800 rounded-xl">
+            On trip {trip.bookingId || trip.id}: the number, driver and status are locked until the trip ends.
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div>
+            <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-number">Registration Number *</label>
+            <input
+              id="v-number"
+              value={input.vehicleNumber}
+              onChange={(e) => set("vehicleNumber", e.target.value.toUpperCase())}
+              disabled={!!trip}
+              placeholder="TN 01 AB 1234"
+              className={`${cls("vehicleNumber")} font-mono uppercase disabled:bg-gray-50`}
+            />
+            <FieldError k="vehicleNumber" />
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-owner">Owner</label>
+            <select id="v-owner" value={input.vendorId} onChange={(e) => onOwnerChange(e.target.value)} disabled={!!trip} className={`${cls("vendorId")} bg-white disabled:bg-gray-50`}>
+              <option value="">NESAM (company-owned)</option>
+              {approvedVendors.map((v) => (
+                <option key={v.id} value={v.id}>{vendorDisplayName(v)}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-category">Category *</label>
+            <select id="v-category" value={input.categoryId} onChange={(e) => onCategoryChange(e.target.value)} className={`${cls("categoryId")} bg-white`}>
+              <option value="">{input.category && !input.categoryId ? `${input.category} (not in master list)` : "Choose category"}</option>
+              {categoryOptions.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} ({c.seatingCapacity} seats){c.status !== "Active" ? " — inactive" : ""}
+                </option>
+              ))}
+            </select>
+            {categories.length === 0 && <p className="text-[10px] text-amber-700 mt-1">Add vehicle categories first (Fleet → Vehicle Categories).</p>}
+            <FieldError k="categoryId" />
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-status">Operational Status</label>
+            <select id="v-status" value={input.status} onChange={(e) => set("status", e.target.value as VehicleInput["status"])} disabled={!!trip} className={`${cls("status")} bg-white disabled:bg-gray-50`}>
+              {VEHICLE_STATUSES.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-make">Make *</label>
+            <input id="v-make" value={input.make} onChange={(e) => set("make", e.target.value)} placeholder="Toyota" className={cls("make")} />
+            <FieldError k="make" />
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-model">Model *</label>
+            <input id="v-model" value={input.model} onChange={(e) => set("model", e.target.value)} placeholder="Innova Crysta" className={cls("model")} />
+            <FieldError k="model" />
+          </div>
+          <div>
+            <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-year">Year *</label>
+            <input id="v-year" inputMode="numeric" value={input.year} onChange={(e) => set("year", e.target.value.replace(/\D/g, "").slice(0, 4))} placeholder="2022" className={cls("year")} />
+            <FieldError k="year" />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-seats">Seats *</label>
+              <input
+                id="v-seats"
+                inputMode="numeric"
+                value={input.seatingCapacity || ""}
+                onChange={(e) => set("seatingCapacity", Number(e.target.value.replace(/\D/g, "").slice(0, 2)) || 0)}
+                className={cls("seatingCapacity")}
+              />
+              <FieldError k="seatingCapacity" />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-fuel">Fuel *</label>
+              <select id="v-fuel" value={input.fuelType} onChange={(e) => set("fuelType", e.target.value)} className={`${cls("fuelType")} bg-white`}>
+                <option value="">Choose</option>
+                {FUEL_TYPES.map((f) => (
+                  <option key={f} value={f}>{f}</option>
+                ))}
+              </select>
+              <FieldError k="fuelType" />
+            </div>
+          </div>
+          <div className="md:col-span-2">
+            <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-driver">Assigned Driver</label>
+            <select id="v-driver" value={input.assignedDriverId} onChange={(e) => set("assignedDriverId", e.target.value)} disabled={!!trip} className={`${cls("assignedDriverId")} bg-white disabled:bg-gray-50`}>
+              <option value="">Unassigned</option>
+              {currentDriver && !driverOptions.some((d) => d.id === currentDriver.id) && (
+                <option value={currentDriver.id}>{currentDriver.name} (current)</option>
+              )}
+              {driverOptions.map((d) => {
+                const other = vehicles.find((x) => x.assignedDriverId === d.id && x.id !== vehicleId);
+                return (
+                  <option key={d.id} value={d.id}>
+                    {d.name} ({d.phone}){other ? ` — moves from ${other.vehicleNumber}` : ""}
+                  </option>
+                );
+              })}
+            </select>
+            <p className="text-[10px] text-gray-500 mt-1">
+              {input.vendorId ? "Approved drivers of this vendor's fleet." : "Approved independent drivers (not attached to a vendor)."}
+            </p>
+          </div>
+        </div>
+
+        <div className="pt-2 border-t border-gray-100">
+          <h4 className="text-[12px] font-bold text-gray-900 mb-2">Documents</h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-rc">RC Number</label>
+              <input id="v-rc" value={input.rcNumber} onChange={(e) => set("rcNumber", e.target.value.toUpperCase())} className={`${cls("rcNumber")} font-mono uppercase`} />
+            </div>
+            <DocumentUpload label="Registration certificate (RC)" kind="rc" vehicleId={vehicleId} vendorId={input.vendorId} url={input.rcDocUrl} onUrl={(u) => set("rcDocUrl", u)} onBusy={(b) => setUploads((n) => Math.max(0, n + (b ? 1 : -1)))} />
+            <div>
+              <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-ins">Insurance valid till</label>
+              <input id="v-ins" type="date" value={input.insuranceExpiry} onChange={(e) => set("insuranceExpiry", e.target.value)} className={cls("insuranceExpiry")} />
+              <FieldError k="insuranceExpiry" />
+            </div>
+            <DocumentUpload label="Insurance policy" kind="insurance" vehicleId={vehicleId} vendorId={input.vendorId} url={input.insuranceDocUrl} onUrl={(u) => set("insuranceDocUrl", u)} onBusy={(b) => setUploads((n) => Math.max(0, n + (b ? 1 : -1)))} />
+            <div>
+              <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-permit">Permit valid till</label>
+              <input id="v-permit" type="date" value={input.permitExpiry} onChange={(e) => set("permitExpiry", e.target.value)} className={cls("permitExpiry")} />
+              <FieldError k="permitExpiry" />
+            </div>
+            <DocumentUpload label="Taxi / tourist permit" kind="permit" vehicleId={vehicleId} vendorId={input.vendorId} url={input.statePermitDocUrl} onUrl={(u) => set("statePermitDocUrl", u)} onBusy={(b) => setUploads((n) => Math.max(0, n + (b ? 1 : -1)))} />
+            <div>
+              <label className="block text-[11px] font-bold text-[#111] mb-1" htmlFor="v-fc">Fitness (FC) valid till — if applicable</label>
+              <input id="v-fc" type="date" value={input.fitnessExpiry} onChange={(e) => set("fitnessExpiry", e.target.value)} className={cls("fitnessExpiry")} />
+              <FieldError k="fitnessExpiry" />
+            </div>
+            <DocumentUpload label="Fitness certificate (FC)" kind="fitness" vehicleId={vehicleId} vendorId={input.vendorId} url={input.fitnessDocUrl} onUrl={(u) => set("fitnessDocUrl", u)} onBusy={(b) => setUploads((n) => Math.max(0, n + (b ? 1 : -1)))} />
+          </div>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function DocumentUpload({
+  label,
+  kind,
+  vehicleId,
+  vendorId,
+  url,
+  onUrl,
+  onBusy,
+}: {
+  label: string;
+  kind: VehicleDocKind;
+  vehicleId: string;
+  vendorId: string;
+  url: string;
+  onUrl: (url: string) => void;
+  onBusy: (busy: boolean) => void;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const onFile = async (file: File | undefined) => {
+    if (!file) return;
+    setError(null);
+    setUploading(true);
+    onBusy(true);
+    try {
+      onUrl(await uploadVehicleDocument(vehicleId, vendorId, kind, file));
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setUploading(false);
+      onBusy(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  };
+
+  return (
+    <div>
+      <span className="block text-[11px] font-bold text-[#111] mb-1">{label}</span>
+      <div className="flex items-center gap-2 p-2 border border-dashed border-[#DDD] rounded-lg min-h-[42px]">
+        {url ? (
+          <a href={url} target="_blank" rel="noopener noreferrer" className="text-[11px] font-semibold text-[#E21B23] hover:underline truncate">
+            View uploaded file
+          </a>
+        ) : (
+          <span className="text-[11px] text-gray-400">No file uploaded</span>
+        )}
+        <div className="ml-auto flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            disabled={uploading}
+            className="px-2.5 py-1 text-[11px] font-semibold rounded-md border border-[#E5E5E5] hover:bg-gray-50 disabled:opacity-50"
+          >
+            {uploading ? "Uploading…" : url ? "Replace" : "Upload"}
+          </button>
+          {url && !uploading && (
+            <button type="button" onClick={() => onUrl("")} className="px-2 py-1 text-[11px] text-red-600 hover:bg-red-50 rounded-md">
+              Remove
+            </button>
+          )}
+        </div>
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/*,application/pdf"
+          className="hidden"
+          onChange={(e) => void onFile(e.target.files?.[0])}
+        />
+      </div>
+      {error && <p className="text-[10px] text-red-600 mt-1">{error}</p>}
     </div>
   );
 }

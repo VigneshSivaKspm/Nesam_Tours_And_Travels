@@ -1,4 +1,7 @@
 import { getFunctions, httpsCallable } from 'firebase/functions';
+import { formatDateTime12 } from '../utils/time';
+import { categoryOf, severityOf, soundOf, ctaOf } from '../utils/notificationModel';
+import { tripSubStatusOf } from '../utils/tripFlow';
 import {
   collection,
   doc,
@@ -20,13 +23,16 @@ import type {
   DocumentStatus,
   DriverAccount,
   DriverNotification,
+  DriverPenalty,
+  PenaltyStatus,
   DriverProfile,
+  DriverWallet,
   DriverStatus,
   DrivingLicense,
   IdentityDetails,
+  LedgerEntry,
   MarketplaceOffer,
   PayoutRequest,
-  PreTripPhotos,
   RegistrationData,
   TollReceipt,
   TripDetails,
@@ -34,9 +40,11 @@ import type {
   VehicleCategory,
   VehicleDetails,
 } from '../types';
+import { mapLedgerEntry, mapWallet } from './driverEarnings';
 
 export const BOOKINGS_COLLECTION = 'bookings';
 export const DRIVERS_COLLECTION = 'drivers';
+export const VEHICLES_COLLECTION = 'vehicles';
 export const MARKETPLACE_COLLECTION = 'marketplace_trips';
 export const PAYOUT_REQUESTS_COLLECTION = 'payout_requests';
 export const NOTIFICATIONS_COLLECTION = 'notifications';
@@ -66,9 +74,9 @@ export function toDate(v: unknown): Date | null {
   return null;
 }
 
+/** "07 Oct 2026, 06:30 PM" — 12-hour, India time. */
 export function formatDateTime(d: Date | null): string {
-  if (!d) return '';
-  return d.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
+  return d ? formatDateTime12(d) : '';
 }
 
 /** Human-readable message for a Firestore write failure. */
@@ -151,10 +159,14 @@ function mapDriverDoc(uid: string, data: Record<string, any>): DriverAccount {
     pincode: str(data.pincode),
     emergencyContactName: str(data.emergencyContactName),
     emergencyContact: str(data.emergencyContact),
-    rating: typeof data.rating === 'number' ? data.rating : 5,
+    // Signup used to store a placeholder 5; a rating is shown only once it is
+    // backed by a count of customer ratings.
+    rating: typeof data.rating === 'number' && typeof data.ratingCount === 'number' && data.ratingCount > 0 ? data.rating : null,
     joiningDate: created
       ? created.toLocaleDateString('en-IN', { month: 'short', year: 'numeric' })
-      : str(data.joiningDate) || 'New Partner',
+      : str(data.joiningDate),
+    assignedVehicleId: str(data.assignedVehicleId),
+    assignedVehicleNumber: str(data.assignedVehicleNumber),
     vendorId: data.vendorId || undefined,
     vendorName: data.vendorName || undefined,
     approvalStatus: approval,
@@ -317,8 +329,6 @@ export async function registerDriver(data: RegistrationData): Promise<void> {
     vendorId: invite?.vendorId || '',
     vendorName: invite?.vendorName || '',
     presenceStatus: 'Offline',
-    rating: 5,
-    totalTrips: 0,
     createdAt: serverTimestamp(),
   }, true);
 }
@@ -374,20 +384,21 @@ export function subscribeToOpenMarketplace(callback: (offers: MarketplaceOffer[]
           id: d.id,
           bookingId: str(data.bookingId) || d.id,
           pickup: {
-            address: str(pickup.address || pickup.city) || 'Pickup location',
+            address: str(pickup.address || pickup.city),
             lat: typeof pickup.lat === 'number' ? pickup.lat : undefined,
             lng: typeof pickup.lng === 'number' ? pickup.lng : undefined,
           },
           drop: {
-            address: str(drop.address || drop.city) || 'Drop location',
+            address: str(drop.address || drop.city),
             lat: typeof drop.lat === 'number' ? drop.lat : undefined,
             lng: typeof drop.lng === 'number' ? drop.lng : undefined,
           },
           pickupTime: str(pickup.time),
           travelDate: str(data.travelDate),
+          pickupAt: toDate(data.pickupAt),
           vehicleCategory: str(data.vehicleCategory || data.categoryName),
           distanceKm: parseAmount(data.distanceKm),
-          offeredPayout: parseAmount(data.offeredPayout),
+          offeredPayout: typeof data.offeredPayout === 'number' && data.offeredPayout > 0 ? data.offeredPayout : null,
           _created: toDate(data.createdAt)?.getTime() ?? 0,
         };
       });
@@ -408,9 +419,22 @@ export function subscribeToOpenMarketplace(callback: (offers: MarketplaceOffer[]
  */
 export async function acceptMarketplaceTrip(
   driver: DriverProfile,
-  vehicleNumber: string,
+  registeredVehicleNumber: string,
   offer: MarketplaceOffer,
 ): Promise<void> {
+  if (offer.offeredPayout === null) throw new Error('This trip has no valid payout yet. NESAM is reviewing it.');
+  // A driver paired with a vehicle record takes the trip in that vehicle
+  // (its id and exact registration number); otherwise the vehicle from their
+  // own registration is noted by number only.
+  let vehicleId = '';
+  let vehicleNumber = registeredVehicleNumber;
+  if (driver.assignedVehicleId) {
+    const v = await getDoc(doc(db, VEHICLES_COLLECTION, driver.assignedVehicleId));
+    const number = v.exists() ? str(v.data().vehicleNumber) : '';
+    if (!number) throw new Error('Your paired vehicle record is unavailable. Contact NESAM support.');
+    vehicleId = v.id;
+    vehicleNumber = number;
+  }
   const batch = writeBatch(db);
   batch.update(doc(db, BOOKINGS_COLLECTION, offer.id), {
     status: 'Assigned',
@@ -419,6 +443,7 @@ export async function acceptMarketplaceTrip(
     assignedDriverName: driver.name,
     driver: driver.name,
     driverPhone: driver.phone,
+    assignedVehicleId: vehicleId,
     assignedVehicleNumber: vehicleNumber,
     driverPayout: offer.offeredPayout,
     assignedAt: serverTimestamp(),
@@ -441,68 +466,74 @@ const num = (v: unknown): number | undefined => (typeof v === 'number' && Number
  * Bookings store a location either as flat fields (pickup / pickupAddress /
  * pickupLat / pickupLng) or as an object ({ name, address, lat, lng }).
  */
-function readLocation(data: Record<string, any>, key: 'pickup' | 'drop', fallback: string) {
+function readLocation(data: Record<string, any>, key: 'pickup' | 'drop') {
   const v = data[key];
   if (v && typeof v === 'object') {
     return {
-      address: str(v.address || v.name || data[`${key}Address`]) || fallback,
+      address: str(v.address || v.name || data[`${key}Address`]),
       lat: num(v.lat) ?? num(data[`${key}Lat`]),
       lng: num(v.lng) ?? num(data[`${key}Lng`]),
     };
   }
   return {
-    address: str(data[`${key}Address`] || v) || fallback,
+    address: str(data[`${key}Address`] || v),
     lat: num(data[`${key}Lat`]),
     lng: num(data[`${key}Lng`]),
   };
 }
 
-const STAGES: TripStage[] =['Assigned', 'En Route Pickup', 'Reached Pickup', 'In Progress', 'Arrived Destination', 'Completed'];
+const STAGES: TripStage[] = ['Assigned', 'En Route Pickup', 'Reached Pickup', 'In Progress', 'Arrived Destination', 'Completed'];
 
 function mapBooking(id: string, data: Record<string, any>): TripDetails {
   const fare = parseAmount(data.fare);
   const status = str(data.status) as BookingStatus;
-  let stage: TripStage = STAGES.includes(data.tripStage) ? data.tripStage : 'Assigned';
-  if (status === 'Ongoing' && STAGES.indexOf(stage) < STAGES.indexOf('In Progress')) stage = 'In Progress';
-  if (status === 'Completed') stage = 'Completed';
+  const stage: TripStage = status === 'Completed' ? 'Completed' : STAGES.includes(data.tripStage) ? data.tripStage : 'Assigned';
+  const subStatus = tripSubStatusOf({ tripSubStatus: data.tripSubStatus, tripStage: data.tripStage, status });
 
-  const payout = data.driverPayout != null ? parseAmount(data.driverPayout) : Math.round(fare * 0.85);
+  // The agreed payout is recorded when the trip is claimed or assigned; a fleet
+  // trip is paid by the vendor, so the driver has no NESAM payout on it.
+  const fleetTrip = Boolean(data.assignedVendorId);
+  const payout = !fleetTrip && typeof data.driverPayout === 'number' && data.driverPayout > 0 ? data.driverPayout : null;
   const preTrip = data.preTrip && typeof data.preTrip === 'object' ? data.preTrip : undefined;
+  const summary = data.paymentSummary && typeof data.paymentSummary === 'object' ? data.paymentSummary : null;
 
   return {
     id,
     bookingId: str(data.bookingId) || id,
-    customerName: str(data.passengerName || data.customer || data.customerName) || 'Passenger',
+    customerName: str(data.passengerName || data.customer || data.customerName),
     customerPhone: str(data.passengerPhone || data.phone || data.customerPhone),
-    pickup: readLocation(data, 'pickup', 'Pickup location'),
-    drop: readLocation(data, 'drop', 'Drop location'),
+    pickup: readLocation(data, 'pickup'),
+    drop: readLocation(data, 'drop'),
     distanceKm: parseAmount(data.distanceKm),
     vehicleType: str(data.categoryName || data.vehicleCategory || data.vehicle),
     serviceType: str(data.service),
     fareAmount: fare,
     driverEarnings: payout,
+    fleetTrip,
     tollCharges: parseAmount(data.tollCharges),
+    tollsApproved: data.tollsApproved === true,
     status,
     stage,
     scheduledDate: str(data.date),
     scheduledTime: str(data.time),
-    paymentMode: str(data.paymentMethod) || 'Cash',
-    withdrawableAmount: data.status === 'Completed' && data.fareVerified === true && data.payment === 'Paid' && data.paymentMethod !== 'Cash' && !data.assignedVendorId
-      ? Math.max(0, parseAmount(data.driverPayout)) + (data.tollsApproved === true ? Math.max(0, parseAmount(data.tollCharges)) : 0) : 0,
+    paymentMode: str(data.paymentMethod),
     startOdometer: typeof data.startOdometer === 'number' ? data.startOdometer : undefined,
     endOdometer: typeof data.endOdometer === 'number' ? data.endOdometer : undefined,
-    preTrip: preTrip
-      ? {
-          selfie: str(preTrip.selfie),
-          vehicleFront: str(preTrip.vehicleFront),
-          odometer: str(preTrip.odometer),
-          rearSeat: str(preTrip.rearSeat),
-          odometerReading: parseAmount(preTrip.odometerReading),
-          capturedAt: str(preTrip.capturedAt),
-        }
-      : undefined,
+    preTrip: preTrip ? { odometerReading: parseAmount(preTrip.odometerReading), capturedAt: str(preTrip.capturedAt) } : undefined,
     tolls: Array.isArray(data.tolls) ? data.tolls as TollReceipt[] : [],
     completedAt: toDate(data.completedAt),
+    subStatus,
+    pickupAt: toDate(data.pickupAt) ?? toDate(data.scheduledAt),
+    verificationSubmitted: data.vehicleVerification?.status === 'Submitted' || Boolean(data.vehicleFrontPhoto) || (preTrip && parseAmount(preTrip.odometerReading) > 0 && Boolean(preTrip.vehicleFront)),
+    boardingVerified: Boolean(data.boardingVerifiedAt),
+    legacyFlow: Boolean(data.startedAt) && !data.tripStartedAt,
+    fareBreakup: Array.isArray(data.fareBreakup?.lines) ? data.fareBreakup.lines : null,
+    paymentSummary: summary
+      ? { amountDue: parseAmount(summary.amountDue), totalPaid: parseAmount(summary.totalPaid), balanceDue: parseAmount(summary.balanceDue), partnerCashHeld: parseAmount(summary.partnerCashHeld), status: str(summary.status) }
+      : null,
+    tripStartedAt: toDate(data.tripStartedAt),
+    reachedPickupAt: toDate(data.reachedPickupAt),
+    tripEndedAt: toDate(data.tripEndedAt),
   };
 }
 
@@ -519,48 +550,8 @@ export function subscribeToDriverBookings(driverId: string, callback: (trips: Tr
   );
 }
 
-export async function submitPreTripVerification(bookingId: string, photos: PreTripPhotos): Promise<void> {
-  await updateDoc(doc(db, BOOKINGS_COLLECTION, bookingId), {
-    preTrip: photos,
-    startOdometer: photos.odometerReading,
-    tripStage: 'En Route Pickup',
-    updatedAt: serverTimestamp(),
-  });
-}
-
-export async function markReachedPickup(
-  bookingId: string,
-  location?: { lat: number; lng: number } | null,
-): Promise<void> {
-  await updateDoc(doc(db, BOOKINGS_COLLECTION, bookingId), {
-    tripStage: 'Reached Pickup',
-    reachedPickupAt: serverTimestamp(),
-    ...(location ? { driverLocation: location } : {}),
-    updatedAt: serverTimestamp(),
-  });
-}
-
-/**
- * Starts the ride. The rules compare `otpAttempt` to booking_secrets/{id}.otp
- * (which the driver can't read), so a wrong OTP surfaces as permission-denied.
- */
-export async function startTripWithOtp(bookingId: string, otp: string): Promise<void> {
-  await updateDoc(doc(db, BOOKINGS_COLLECTION, bookingId), {
-    status: 'Ongoing',
-    tripStage: 'In Progress',
-    otpAttempt: otp,
-    startedAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-}
-
-export async function markArrivedDestination(bookingId: string): Promise<void> {
-  await updateDoc(doc(db, BOOKINGS_COLLECTION, bookingId), {
-    tripStage: 'Arrived Destination',
-    arrivedAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-}
+// Trip steps (vehicle verification, Trip Started, Reached Pickup, boarding OTP, Trip End)
+// are server functions: see services/tripService.ts and services/verificationService.ts.
 
 /** Saves toll receipts as they are added so a page reload doesn't lose them. */
 export async function saveTripTolls(bookingId: string, tolls: TollReceipt[]): Promise<void> {
@@ -571,32 +562,33 @@ export async function saveTripTolls(bookingId: string, tolls: TollReceipt[]): Pr
   });
 }
 
-export async function completeTrip(
-  bookingId: string,
-  endOdometer: number,
-  tolls: TollReceipt[],
-): Promise<void> {
-  await updateDoc(doc(db, BOOKINGS_COLLECTION, bookingId), {
-    status: 'Completed',
-    tripStage: 'Completed',
-    endOdometer,
-    tolls,
-    tollCharges: tolls.reduce((s, t) => s + t.amount, 0),
-    completedAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-}
-
 // ── Payouts ────────────────────────────────────────────────────────────────
 
-export async function requestPayout(
-  driver: DriverProfile,
-  amount: number,
-  method: 'UPI' | 'Bank Transfer',
-  details: string,
-): Promise<void> {
+/** The server checks the ledger balance and pays to the bank / UPI saved in the driver's profile. */
+export async function requestPayout(amount: number, method: 'UPI' | 'Bank Transfer'): Promise<void> {
   const payoutRef = doc(collection(db, PAYOUT_REQUESTS_COLLECTION));
   await httpsCallable(getFunctions(), 'requestPartnerPayout')({ requestId: payoutRef.id, role: 'driver', amount, method });
+}
+
+/** The server-computed wallet (wallets/driver_{uid}). */
+export function subscribeToDriverWallet(driverId: string, callback: (wallet: DriverWallet) => void, onError: (message: string) => void) {
+  return onSnapshot(
+    doc(db, 'wallets', `driver_${driverId}`),
+    (snap) => callback(mapWallet(snap.exists() ? snap.data() : undefined)),
+    (err) => onError(describeFirestoreError(err, 'Could not load your wallet.')),
+  );
+}
+
+export function subscribeToDriverLedger(driverId: string, callback: (entries: LedgerEntry[]) => void, onError: (message: string) => void) {
+  return onSnapshot(
+    query(collection(db, 'wallet_ledger'), where('driverId', '==', driverId)),
+    (snap) => {
+      const rows = snap.docs.map((d) => mapLedgerEntry(d.id, d.data())).filter((e): e is LedgerEntry => e !== null);
+      rows.sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+      callback(rows);
+    },
+    (err) => onError(describeFirestoreError(err, 'Could not load your earnings.')),
+  );
 }
 export function subscribeToPayoutRequests(driverId: string, callback: (requests: PayoutRequest[]) => void) {
   const q = query(collection(db, PAYOUT_REQUESTS_COLLECTION), where('driverId', '==', driverId));
@@ -636,6 +628,7 @@ export function subscribeToDriverNotifications(recipientId: string, callback: (n
       const rows = snap.docs.map((d) => {
         const data = d.data();
         const created = toDate(data.createdAt);
+        const base = { type: str(data.type), category: str(data.category), severity: str(data.severity), priority: str(data.priority), sound: str(data.sound), cta: data.cta, bookingId: str(data.bookingId) };
         return {
           id: d.id,
           title: str(data.title) || 'Notification',
@@ -643,7 +636,14 @@ export function subscribeToDriverNotifications(recipientId: string, callback: (n
           time: formatDateTime(created),
           read: Boolean(data.read),
           createdAtMs: created?.getTime() ?? 0,
-        };
+          category: categoryOf(base),
+          severity: severityOf(base),
+          sound: soundOf(base),
+          bookingId: str(data.bookingId),
+          bookingCode: str(data.bookingCode),
+          ...ctaOf(base),
+          popup: data.push !== false,
+        } satisfies DriverNotification;
       });
       rows.sort((a, b) => b.createdAtMs - a.createdAtMs);
       callback(rows);
@@ -652,6 +652,41 @@ export function subscribeToDriverNotifications(recipientId: string, callback: (n
       console.warn('Notifications subscription error:', err);
       callback([]);
     },
+  );
+}
+
+const PENALTY_STATUSES: PenaltyStatus[] = ['Pending', 'Acknowledged', 'Paid', 'Deducted', 'Waived', 'Disputed'];
+const LEGACY_PENALTY: Record<string, PenaltyStatus> = { Applied: 'Pending', Recovered: 'Paid', Reversed: 'Waived' };
+
+/** Penalties issued to this driver (read-only here; acknowledging and disputing are server functions). */
+export function subscribeToDriverPenalties(driverId: string, callback: (p: DriverPenalty[]) => void, onError: (message: string) => void) {
+  return onSnapshot(
+    query(collection(db, 'penalties'), where('driverId', '==', driverId)),
+    (snap) => {
+      const rows = snap.docs.map((d): DriverPenalty => {
+        const data = d.data();
+        const raw = str(data.status);
+        return {
+          id: d.id,
+          amount: parseAmount(data.amount),
+          category: str(data.category) || 'Other',
+          reason: str(data.reason),
+          description: str(data.description || data.notes),
+          bookingCode: str(data.bookingCode),
+          bookingId: str(data.bookingDocumentId),
+          incidentDate: str(data.incidentDate),
+          status: PENALTY_STATUSES.includes(raw as PenaltyStatus) ? (raw as PenaltyStatus) : LEGACY_PENALTY[raw] ?? 'Pending',
+          acknowledged: data.acknowledged === true,
+          acknowledgedAt: toDate(data.acknowledgedAt),
+          disputeNote: str(data.disputeNote),
+          issuedAt: toDate(data.issuedAt) ?? toDate(data.createdAt),
+          issuedByName: str(data.issuedByName),
+        };
+      });
+      rows.sort((a, b) => (b.issuedAt?.getTime() ?? 0) - (a.issuedAt?.getTime() ?? 0));
+      callback(rows);
+    },
+    (err) => onError(describeFirestoreError(err, 'Could not load your penalties.')),
   );
 }
 

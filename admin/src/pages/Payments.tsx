@@ -1,261 +1,186 @@
-import { useState, useEffect, useMemo } from "react";
-import { PaymentTransaction } from "../types";
+import { useEffect, useMemo, useState } from "react";
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import type { Booking, PaymentTransaction } from "../types";
+import { subscribeBookings, subscribePayments, subscribeToCollection } from "../services/adminFirestoreService";
 import {
-  subscribePayments,
-  setFirestoreDocument,
-  COLLECTIONS,
-} from "../services/adminFirestoreService";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from "recharts";
-import { parseAmount, formatINR } from "../utils/analytics";
+  bookingsAwaitingPayment,
+  expectedAmount,
+  isSuccessfulPayment,
+  mapPayment,
+  toDate,
+  type PaymentRow,
+} from "../services/paymentService";
+import { RecordPaymentModal } from "../components/booking/BookingActions";
+import { formatINR, parseAmount } from "../utils/analytics";
+import { ErrorBanner, Modal, Toast, useToast } from "../components/Feedback";
+import { formatDateTime12, formatShortDateTime12, formatHourLabel } from "../utils/time";
 
-const parseDate = (v: string | undefined | null): Date | null => {
-  if (!v) return null;
-  const d = new Date(v);
-  return Number.isNaN(d.getTime()) ? null : d;
+const statusStyle: Record<string, string> = {
+  Success: "text-green-700 bg-green-50 border-green-200",
+  Paid: "text-green-700 bg-green-50 border-green-200",
+  Pending: "text-yellow-700 bg-yellow-50 border-yellow-200",
+  Refunded: "text-gray-600 bg-gray-100 border-gray-200",
+  Failed: "text-[#E21B23] bg-red-50 border-red-200",
 };
 
-const isSuccess = (s: string) =>
-  ["success", "paid", "completed", "captured"].includes((s || "").toLowerCase());
+const rupees = (n: number) => `₹${n.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+const dateLabel = (d: Date | null) =>
+  d ? formatDateTime12(d) : "—";
+
+function downloadCsv(filename: string, headers: string[], rows: (string | number)[][]) {
+  const content = [headers.join(","), ...rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))].join("\n");
+  const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8;" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 export default function Payments() {
-  const [paymentList, setPaymentList] = useState<PaymentTransaction[]>([]);
+  const [rawPayments, setRawPayments] = useState<PaymentTransaction[]>([]);
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [admins, setAdmins] = useState<{ id: string; name?: string; email?: string }[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+
+  const [tab, setTab] = useState<"transactions" | "awaiting">("transactions");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [toastMsg, setToastMsg] = useState<string | null>(null);
-
-  const [newTxn, setNewTxn] = useState({
-    bookingId: "",
-    customer: "",
-    amount: "1500",
-    method: "UPI",
-    gateway: "Razorpay",
-    status: "Success",
-  });
-
-  const showToast = (msg: string) => {
-    setToastMsg(msg);
-    setTimeout(() => setToastMsg(null), 3500);
-  };
+  const [methodFilter, setMethodFilter] = useState("All");
+  const [fromDate, setFromDate] = useState("");
+  const [toDateStr, setToDateStr] = useState("");
+  const [viewing, setViewing] = useState<PaymentRow | null>(null);
+  const [verifying, setVerifying] = useState<Booking | null>(null);
+  const { toast, show } = useToast();
 
   useEffect(() => {
-    const unsub = subscribePayments(setPaymentList);
-    return () => unsub();
-  }, []);
-
-  const handleAddPayment = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!newTxn.customer.trim()) {
-      alert("Customer name is required.");
-      return;
-    }
-    const id = "TXN-" + Math.floor(10000 + Math.random() * 90000);
-    const amtNumber = parseFloat(newTxn.amount) || 0;
-    const gstAmt = Math.round(amtNumber * 0.05 * 10) / 10;
-    const vendorAmt = Math.round(amtNumber * 0.85 * 10) / 10;
-    const commissionAmt = Math.round(amtNumber * 0.15 * 10) / 10;
-
-    const created: PaymentTransaction = {
-      id,
-      bookingId: newTxn.bookingId,
-      customer: newTxn.customer.trim(),
-      amount: "₹" + amtNumber.toLocaleString(),
-      method: newTxn.method,
-      gateway: newTxn.gateway,
-      date: new Date().toLocaleDateString("en-GB", {
-        day: "2-digit",
-        month: "short",
-        year: "numeric",
-      }),
-      status: newTxn.status,
-      refund: newTxn.status === "Refunded" ? "₹" + amtNumber.toLocaleString() : "—",
-      gst: "₹" + gstAmt,
-      vendorShare: "₹" + vendorAmt,
-      commission: "₹" + commissionAmt,
+    setLoading(true);
+    setLoadError(null);
+    const fail = (m: string) => {
+      setLoadError(m);
+      setLoading(false);
     };
+    const unsubs = [
+      subscribePayments((data) => {
+        setRawPayments(data);
+        setLoading(false);
+      }, fail),
+      subscribeBookings(setBookings, fail),
+      subscribeToCollection<{ id: string; name?: string; email?: string }>("admins", setAdmins, () => setAdmins([])),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, [retryKey]);
 
-    setPaymentList((prev) => [created, ...prev]);
-    setShowAddModal(false);
-    setNewTxn({
-      bookingId: "",
-      customer: "",
-      amount: "1500",
-      method: "UPI",
-      gateway: "Razorpay",
-      status: "Success",
-    });
-
-    try {
-      await setFirestoreDocument(COLLECTIONS.PAYMENTS, id, created);
-      showToast(`Transaction ${id} recorded successfully!`);
-    } catch (err: any) {
-      console.warn("Error recording payment:", err);
-    }
-  };
-
-  const statusStyle: Record<string, string> = {
-    Success: "text-green-700 bg-green-50 border-green-200",
-    Paid: "text-green-700 bg-green-50 border-green-200",
-    Pending: "text-yellow-700 bg-yellow-50 border-yellow-200",
-    Refunded: "text-gray-600 bg-gray-100 border-gray-200",
-    Failed: "text-[#E21B23] bg-red-50 border-red-200",
+  const payments = useMemo(
+    () => rawPayments.map((p) => mapPayment(p as PaymentTransaction & Record<string, unknown>)).sort((a, b) => (b.date?.getTime() ?? 0) - (a.date?.getTime() ?? 0)),
+    [rawPayments],
+  );
+  const awaiting = useMemo(() => bookingsAwaitingPayment(bookings), [bookings]);
+  const adminName = (uid: string) => {
+    const a = admins.find((x) => x.id === uid);
+    return a ? a.name || a.email || uid : uid || "—";
   };
 
   const kpis = useMemo(() => {
+    const todayKey = new Date().toDateString();
     let collected = 0;
     let today = 0;
-    let pending = 0;
-    let refunds = 0;
-    let failed = 0;
-    const todayKey = new Date().toDateString();
-
-    for (const p of paymentList) {
-      const amt = parseAmount(p.amount);
-      const status = (p.status || "").toLowerCase();
-      if (isSuccess(status)) {
-        collected += amt;
-        if (parseDate(p.date)?.toDateString() === todayKey) today += amt;
-      }
-      if (status === "pending") pending += amt;
-      if (status === "refunded" || (p.refund && p.refund !== "—"))
-        refunds += parseAmount(p.refund) || amt;
-      if (status === "failed") failed += amt;
+    for (const p of payments) {
+      if (!isSuccessfulPayment(p.status)) continue;
+      collected += p.amount;
+      if (p.date?.toDateString() === todayKey) today += p.amount;
     }
+    const awaitingAmount = awaiting.reduce((s, b) => s + expectedAmount(b), 0);
+    return { collected, today, awaitingAmount, awaitingCount: awaiting.length, count: payments.filter((p) => isSuccessfulPayment(p.status)).length };
+  }, [payments, awaiting]);
 
-    return { collected, today, pending, refunds, failed };
-  }, [paymentList]);
-
-  // Successful collections for each of the last seven days.
   const weekData = useMemo(() => {
     const days: { key: string; day: string; amount: number }[] = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
-      days.push({
-        key: d.toDateString(),
-        day: d.toLocaleDateString("en-IN", { weekday: "short" }),
-        amount: 0,
-      });
+      days.push({ key: d.toDateString(), day: d.toLocaleDateString("en-IN", { weekday: "short" }), amount: 0 });
     }
-    for (const p of paymentList) {
-      if (!isSuccess(p.status)) continue;
-      const slot = days.find((d) => d.key === parseDate(p.date)?.toDateString());
-      if (slot) slot.amount += parseAmount(p.amount);
+    for (const p of payments) {
+      if (!isSuccessfulPayment(p.status)) continue;
+      const slot = days.find((d) => d.key === p.date?.toDateString());
+      if (slot) slot.amount += p.amount;
     }
     return days.map(({ day, amount }) => ({ day, amount }));
-  }, [paymentList]);
+  }, [payments]);
 
   const methodBreakdown = useMemo(() => {
     const totals = new Map<string, number>();
-    for (const p of paymentList) {
-      if (!isSuccess(p.status)) continue;
-      const method = p.method || "UPI";
-      totals.set(method, (totals.get(method) || 0) + parseAmount(p.amount));
-    }
+    for (const p of payments) if (isSuccessfulPayment(p.status)) totals.set(p.method, (totals.get(p.method) || 0) + p.amount);
     const grand = [...totals.values()].reduce((a, b) => a + b, 0);
     return [...totals.entries()]
       .sort((a, b) => b[1] - a[1])
-      .map(([method, amount]) => ({
-        method,
-        amount: formatINR(amount),
-        pct: grand > 0 ? Math.round((amount / grand) * 100) : 0,
-      }));
-  }, [paymentList]);
+      .map(([method, amount]) => ({ method, amount: formatINR(amount), pct: grand > 0 ? Math.round((amount / grand) * 100) : 0 }));
+  }, [payments]);
 
-  const filteredPayments = useMemo(() => {
-    return paymentList.filter((p) => {
-      const q = search.trim().toLowerCase();
-      const matchSearch =
-        q === "" ||
-        (p.id && p.id.toLowerCase().includes(q)) ||
-        (p.bookingId && p.bookingId.toLowerCase().includes(q)) ||
-        (p.customer && p.customer.toLowerCase().includes(q)) ||
-        (p.method && p.method.toLowerCase().includes(q));
-      const matchStatus =
-        statusFilter === "All" ||
-        (statusFilter === "Success" && isSuccess(p.status)) ||
-        p.status === statusFilter;
-      return matchSearch && matchStatus;
+  const methods = useMemo(() => [...new Set(payments.map((p) => p.method))].sort(), [payments]);
+  const statuses = useMemo(() => [...new Set(payments.map((p) => p.status))].sort(), [payments]);
+  const dateRangeError = fromDate && toDateStr && fromDate > toDateStr ? "The start date is after the end date." : "";
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const from = fromDate ? new Date(`${fromDate}T00:00:00`).getTime() : null;
+    const to = toDateStr ? new Date(`${toDateStr}T23:59:59.999`).getTime() : null;
+    return payments.filter((p) => {
+      if (statusFilter !== "All" && p.status !== statusFilter) return false;
+      if (methodFilter !== "All" && p.method !== methodFilter) return false;
+      const t = p.date?.getTime();
+      if (from !== null && (t === undefined || t < from)) return false;
+      if (to !== null && (t === undefined || t > to)) return false;
+      return (
+        !q ||
+        [p.id, p.bookingCode, p.customer, p.method, p.reference].some((v) => v.toLowerCase().includes(q))
+      );
     });
-  }, [paymentList, search, statusFilter]);
+  }, [payments, search, statusFilter, methodFilter, fromDate, toDateStr]);
+
+  const filteredTotal = filtered.filter((p) => isSuccessfulPayment(p.status)).reduce((s, p) => s + p.amount, 0);
+
+  const exportCsv = () =>
+    downloadCsv(
+      `nesam_payments_${new Date().toISOString().slice(0, 10)}.csv`,
+      ["Payment ID", "Booking", "Customer", "Amount", "Method", "Gateway", "Reference", "Date", "Status", "Verified By"],
+      filtered.map((p) => [p.id, p.bookingCode, p.customer, p.amount, p.method, p.gateway, p.reference, p.date ? p.date.toISOString() : "", p.status, adminName(p.verifiedBy)]),
+    );
 
   return (
     <div className="p-6 space-y-5">
-      {/* Toast Notification */}
-      {toastMsg && (
-        <div className="fixed top-18 right-6 z-50 bg-[#111] text-white px-4 py-2.5 rounded-xl shadow-2xl text-xs font-semibold flex items-center gap-2 border border-white/10 animate-fade-in">
-          <span className="w-2 h-2 rounded-full bg-emerald-400" />
-          <span>{toastMsg}</span>
-        </div>
-      )}
+      <Toast toast={toast} />
+      {loadError && <ErrorBanner message={loadError} onRetry={() => setRetryKey((k) => k + 1)} />}
 
-      {/* Header Bar */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-[20px] font-bold text-[#111]">
-            Payment Transactions & Collections
-          </h1>
+          <h1 className="text-[20px] font-bold text-[#111]">Payment Transactions & Collections</h1>
           <p className="text-[13px] text-[#666]">
-            Real-time gateway settlements, customer receipts, and UPI/Card collections.
+            Verified customer payments for completed trips. Customers pay by UPI (to the company) or cash (to the driver).
           </p>
         </div>
-
-        <div className="flex items-center gap-2">
-
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="flex items-center gap-1.5 px-4 py-2 text-[12px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 cursor-pointer transition-all"
-            style={{ background: "#E21B23" }}
-          >
-            + Record Transaction
-          </button>
-        </div>
+        <button
+          onClick={() => setTab("awaiting")}
+          className="flex items-center gap-1.5 px-4 py-2 text-[12px] font-semibold text-white rounded-lg shadow-sm hover:opacity-90 active:scale-95 cursor-pointer transition-all"
+          style={{ background: "#E21B23" }}
+        >
+          Record Payment ({awaiting.length} awaiting)
+        </button>
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          {
-            label: "Total Collected",
-            value: formatINR(kpis.collected),
-            color: "#E21B23",
-          },
-          {
-            label: "Today's Collection",
-            value: formatINR(kpis.today),
-            color: "#111",
-          },
-          {
-            label: "Pending",
-            value: formatINR(kpis.pending),
-            color: "#F59E0B",
-          },
-          {
-            label: "Refunds",
-            value: formatINR(kpis.refunds),
-            color: "#666",
-          },
-          {
-            label: "Failed",
-            value: formatINR(kpis.failed),
-            color: "#E21B23",
-          },
+          { label: "Total Collected", value: formatINR(kpis.collected), color: "#E21B23" },
+          { label: "Today's Collection", value: formatINR(kpis.today), color: "#111" },
+          { label: "Payments Recorded", value: kpis.count.toLocaleString("en-IN"), color: "#10B981" },
+          { label: `Awaiting Verification (${kpis.awaitingCount} trips)`, value: formatINR(kpis.awaitingAmount), color: "#F59E0B" },
         ].map((s) => (
-          <div
-            key={s.label}
-            className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4"
-          >
-            <div className="text-[20px] font-bold" style={{ color: s.color }}>
-              {s.value}
-            </div>
+          <div key={s.label} className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4">
+            <div className="text-[20px] font-bold" style={{ color: s.color }}>{loading ? "—" : s.value}</div>
             <div className="text-[11px] text-[#999] mt-0.5">{s.label}</div>
           </div>
         ))}
@@ -264,325 +189,228 @@ export default function Payments() {
       {/* Chart + Methods */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="lg:col-span-2 bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
-          <h3 className="text-[14px] font-bold text-[#111] mb-5">
-            Weekly Collection Volume (₹)
-          </h3>
+          <h3 className="text-[14px] font-bold text-[#111] mb-5">Collections — Last 7 Days (₹)</h3>
           <ResponsiveContainer width="100%" height={210}>
             <BarChart data={weekData} barSize={28}>
-              <CartesianGrid
-                strokeDasharray="3 3"
-                stroke="#F0F0F0"
-                vertical={false}
-              />
-              <XAxis
-                dataKey="day"
-                tick={{ fontSize: 11, fill: "#999" }}
-                axisLine={false}
-                tickLine={false}
-              />
-              <YAxis
-                tick={{ fontSize: 11, fill: "#999" }}
-                axisLine={false}
-                tickLine={false}
-                tickFormatter={(v) => `₹${v / 1000}K`}
-              />
+              <CartesianGrid strokeDasharray="3 3" stroke="#F0F0F0" vertical={false} />
+              <XAxis dataKey="day" tick={{ fontSize: 11, fill: "#999" }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: "#999" }} axisLine={false} tickLine={false} allowDecimals={false} tickFormatter={(v) => formatINR(Number(v))} />
               <Tooltip
-                formatter={(v: any) => [`₹${v.toLocaleString()}`, "Collection"]}
-                contentStyle={{
-                  fontSize: 12,
-                  borderRadius: 8,
-                  border: "1px solid #E5E5E5",
-                }}
+                formatter={(v) => [rupees(Number(v)), "Collected"]}
+                contentStyle={{ fontSize: 12, borderRadius: 8, border: "1px solid #E5E5E5" }}
               />
               <Bar dataKey="amount" fill="#E21B23" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
-
         <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
-          <h3 className="text-[14px] font-bold text-[#111] mb-4">
-            Payment Methods
-          </h3>
+          <h3 className="text-[14px] font-bold text-[#111] mb-4">Payment Methods</h3>
           {methodBreakdown.length > 0 ? (
             <div className="space-y-3.5">
               {methodBreakdown.map((m) => (
                 <div key={m.method}>
                   <div className="flex justify-between text-[12px] mb-1">
-                    <span className="font-semibold text-[#333]">
-                      {m.method}
-                    </span>
-                    <span className="font-bold text-[#111]">
-                      {m.amount} ({m.pct}%)
-                    </span>
+                    <span className="font-semibold text-[#333]">{m.method}</span>
+                    <span className="font-bold text-[#111]">{m.amount} ({m.pct}%)</span>
                   </div>
                   <div className="h-2 bg-[#F5F5F5] rounded-full overflow-hidden">
-                    <div
-                      className="h-full rounded-full transition-all"
-                      style={{ width: `${m.pct}%`, background: "#E21B23" }}
-                    />
+                    <div className="h-full rounded-full transition-all" style={{ width: `${m.pct}%`, background: "#E21B23" }} />
                   </div>
                 </div>
               ))}
             </div>
           ) : (
-            <div className="py-8 text-center text-[12px] text-[#999]">
-              No payment breakdown available
-            </div>
+            <div className="py-8 text-center text-[12px] text-[#999]">No payments recorded yet.</div>
           )}
         </div>
       </div>
 
-      {/* Transactions Table */}
-      <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b border-[#E5E5E5] flex flex-col md:flex-row md:items-center justify-between gap-3 bg-[#FAFAFA]">
-          <div>
-            <h3 className="text-[14px] font-bold text-[#111]">
-              Recent Payment Transactions
-            </h3>
-            <span className="text-[11px] text-[#888]">
-              {filteredPayments.length} transactions recorded
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="relative min-w-[200px]">
-              <input
-                type="text"
-                placeholder="Search transaction, booking, customer..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full pl-3 pr-3 py-1.5 text-[12px] border border-[#DDD] rounded-lg focus:outline-none focus:border-[#E21B23]"
-              />
-            </div>
-
-            <div className="flex items-center gap-1">
-              {["All", "Success", "Pending", "Refunded"].map((st) => (
-                <button
-                  key={st}
-                  onClick={() => setStatusFilter(st)}
-                  className={`px-3 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
-                    statusFilter === st
-                      ? "bg-[#111] text-white"
-                      : "bg-white border border-[#DDD] text-[#666] hover:bg-gray-50"
-                  }`}
-                >
-                  {st}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[850px]">
-            <thead>
-              <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
-                {[
-                  "Transaction ID",
-                  "Booking ID",
-                  "Customer",
-                  "Amount",
-                  "Method",
-                  "Gateway",
-                  "Date",
-                  "Status",
-                  "Refund",
-                ].map((h) => (
-                  <th
-                    key={h}
-                    className="px-4 py-3 text-left text-[11px] font-semibold text-[#888] uppercase tracking-wide whitespace-nowrap"
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filteredPayments.map((p, i) => (
-                <tr
-                  key={p.id || i}
-                  className="table-row border-b border-[#F5F5F5] hover:bg-gray-50/60 last:border-0 transition-colors"
-                >
-                  <td className="px-4 py-3 text-[11px] font-mono font-bold text-[#333]">
-                    {p.id}
-                  </td>
-                  <td
-                    className="px-4 py-3 text-[11px] font-mono font-semibold"
-                    style={{ color: "#E21B23" }}
-                  >
-                    {p.bookingId}
-                  </td>
-                  <td className="px-4 py-3 text-[12px] font-medium text-[#111]">
-                    {p.customer}
-                  </td>
-                  <td className="px-4 py-3 text-[12px] font-bold text-[#111]">
-                    {p.amount}
-                  </td>
-                  <td className="px-4 py-3 text-[12px] text-[#444] font-medium">
-                    {p.method}
-                  </td>
-                  <td className="px-4 py-3 text-[11px] text-[#666]">
-                    {p.gateway || "Direct"}
-                  </td>
-                  <td className="px-4 py-3 text-[11px] text-[#666]">
-                    {p.date}
-                  </td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${
-                        statusStyle[p.status] || "text-gray-600 bg-gray-100 border-gray-200"
-                      }`}
-                    >
-                      {p.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-[11px] text-[#666]">
-                    {p.refund || "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {filteredPayments.length === 0 && (
-            <div className="py-12 text-center text-[13px] text-[#999]">
-              No transactions match your criteria
-            </div>
-          )}
-        </div>
+      {/* Tabs */}
+      <div className="flex gap-1 bg-white rounded-xl border border-[#E5E5E5] p-1 w-fit shadow-sm">
+        {[
+          { key: "transactions" as const, label: `Transactions (${payments.length})` },
+          { key: "awaiting" as const, label: `Awaiting Verification (${awaiting.length})` },
+        ].map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`px-5 py-2 rounded-lg text-[13px] font-semibold transition-all cursor-pointer ${tab === t.key ? "text-white shadow-sm" : "text-[#666] hover:text-[#111]"}`}
+            style={tab === t.key ? { background: "#E21B23" } : {}}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
 
-      {/* Record Payment Modal */}
-      {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
-              <h3 className="text-base font-bold text-gray-900">
-                Record Payment Transaction
-              </h3>
+      {tab === "transactions" ? (
+        <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b border-[#E5E5E5] space-y-3 bg-[#FAFAFA]">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-[14px] font-bold text-[#111]">Payment Transactions</h3>
+                <span className="text-[11px] text-[#888]">
+                  {filtered.length} shown • {formatINR(filteredTotal)} collected
+                </span>
+              </div>
               <button
-                onClick={() => setShowAddModal(false)}
-                className="text-gray-400 hover:text-gray-700 cursor-pointer"
+                onClick={exportCsv}
+                disabled={filtered.length === 0}
+                className="text-[12px] font-semibold px-4 py-2 rounded-lg border border-[#E5E5E5] bg-white text-[#E21B23] hover:bg-[#FEF2F2] cursor-pointer disabled:opacity-40"
               >
-                ✕
+                📥 Export CSV
               </button>
             </div>
-
-            <div className="space-y-3">
-              <div>
-                <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                  Customer Name *
-                </label>
-                <input
-                  placeholder="e.g. Ramesh Kannan"
-                  className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                  value={newTxn.customer}
-                  onChange={(e) =>
-                    setNewTxn({ ...newTxn, customer: e.target.value })
-                  }
-                  required
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Booking ID
-                  </label>
-                  <input
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs font-mono"
-                    value={newTxn.bookingId}
-                    onChange={(e) =>
-                      setNewTxn({ ...newTxn, bookingId: e.target.value })
-                    }
-                  />
-                </div>
-
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Amount (₹) *
-                  </label>
-                  <input
-                    type="number"
-                    placeholder="1500"
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs font-bold"
-                    value={newTxn.amount}
-                    onChange={(e) =>
-                      setNewTxn({ ...newTxn, amount: e.target.value })
-                    }
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Payment Method
-                  </label>
-                  <select
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                    value={newTxn.method}
-                    onChange={(e) =>
-                      setNewTxn({ ...newTxn, method: e.target.value })
-                    }
-                  >
-                    <option>UPI</option>
-                    <option>Credit Card</option>
-                    <option>Debit Card</option>
-                    <option>Net Banking</option>
-                    <option>Cash</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                    Gateway / Provider
-                  </label>
-                  <select
-                    className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                    value={newTxn.gateway}
-                    onChange={(e) =>
-                      setNewTxn({ ...newTxn, gateway: e.target.value })
-                    }
-                  >
-                    <option>Razorpay</option>
-                    <option>PhonePe</option>
-                    <option>GPay</option>
-                    <option>Direct / Cash</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="text-[11px] font-semibold text-gray-700 block mb-1">
-                  Status
-                </label>
-                <select
-                  className="w-full p-2 border border-gray-200 rounded-lg text-xs"
-                  value={newTxn.status}
-                  onChange={(e) =>
-                    setNewTxn({ ...newTxn, status: e.target.value })
-                  }
-                >
-                  <option value="Success">Success (Paid)</option>
-                  <option value="Pending">Pending Verification</option>
-                  <option value="Refunded">Refunded</option>
-                </select>
-              </div>
-
-              <div className="pt-2">
-                <button
-                  type="button"
-                  onClick={handleAddPayment}
-                  className="w-full p-2.5 bg-[#E21B23] hover:bg-[#c4151c] text-white text-xs font-bold rounded-xl cursor-pointer transition-colors shadow"
-                >
-                  Save Payment Record
-                </button>
-              </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="search"
+                placeholder="Search payment, booking, customer, reference…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="flex-1 min-w-[200px] px-3 py-1.5 text-[12px] border border-[#DDD] rounded-lg focus:outline-none focus:border-[#E21B23]"
+              />
+              <select aria-label="Status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="px-3 py-1.5 text-[12px] border border-[#DDD] rounded-lg bg-white">
+                <option value="All">All statuses</option>
+                {statuses.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+              <select aria-label="Method" value={methodFilter} onChange={(e) => setMethodFilter(e.target.value)} className="px-3 py-1.5 text-[12px] border border-[#DDD] rounded-lg bg-white">
+                <option value="All">All methods</option>
+                {methods.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              <label className="text-[11px] text-[#666] flex items-center gap-1">
+                From
+                <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} className="px-2 py-1 text-[12px] border border-[#DDD] rounded-lg" />
+              </label>
+              <label className="text-[11px] text-[#666] flex items-center gap-1">
+                To
+                <input type="date" value={toDateStr} onChange={(e) => setToDateStr(e.target.value)} className="px-2 py-1 text-[12px] border border-[#DDD] rounded-lg" />
+              </label>
             </div>
+            {dateRangeError && <p className="text-[11px] text-red-600">{dateRangeError}</p>}
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px]">
+              <thead>
+                <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
+                  {["Date", "Booking", "Customer", "Amount", "Method", "Reference", "Status", ""].map((h) => (
+                    <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-[#888] uppercase tracking-wide whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((p) => (
+                  <tr key={p.id} className="table-row border-b border-[#F5F5F5] hover:bg-gray-50/60 last:border-0 transition-colors">
+                    <td className="px-4 py-3 text-[11px] text-[#666] whitespace-nowrap">{dateLabel(p.date)}</td>
+                    <td className="px-4 py-3 text-[11px] font-mono font-semibold" style={{ color: "#E21B23" }}>{p.bookingCode || "—"}</td>
+                    <td className="px-4 py-3 text-[12px] font-medium text-[#111]">{p.customer || "—"}</td>
+                    <td className="px-4 py-3 text-[12px] font-bold text-[#111]">{rupees(p.amount)}</td>
+                    <td className="px-4 py-3 text-[12px] text-[#444] font-medium">{p.method}</td>
+                    <td className="px-4 py-3 text-[11px] text-[#666] font-mono max-w-[180px] truncate">{p.reference || "—"}</td>
+                    <td className="px-4 py-3">
+                      <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${statusStyle[p.status] || "text-gray-600 bg-gray-100 border-gray-200"}`}>{p.status}</span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <button onClick={() => setViewing(p)} className="text-[11px] px-2.5 py-1 rounded-md border border-[#E5E5E5] hover:bg-[#FEF2F2] text-[#E21B23] font-semibold">
+                        View
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!loading && filtered.length === 0 && (
+              <div className="py-12 text-center text-[13px] text-[#999]">
+                {payments.length === 0 ? "No payments recorded yet." : "No payments match your filters."}
+              </div>
+            )}
+            {loading && <div className="py-12 text-center text-[13px] text-[#999]">Loading payments…</div>}
           </div>
         </div>
+      ) : (
+        <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
+          <div className="px-5 py-4 border-b border-[#E5E5E5] bg-[#FAFAFA]">
+            <h3 className="text-[14px] font-bold text-[#111]">Completed Trips With a Balance Due</h3>
+            <p className="text-[11px] text-[#888]">
+              Record each payment received — cash, UPI or bank transfer, in one or more parts, and who collected it. The paid amount and balance are worked out from these records.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[850px]">
+              <thead>
+                <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
+                  {["Booking", "Customer", "Route", "Method", "Balance Due", "Completed", ""].map((h) => (
+                    <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-[#888] uppercase tracking-wide whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {awaiting.map((b) => (
+                  <tr key={b.id} className="border-b border-[#F5F5F5] last:border-0 hover:bg-gray-50/60">
+                    <td className="px-4 py-3 text-[11px] font-mono font-semibold" style={{ color: "#E21B23" }}>{b.bookingId || b.id}</td>
+                    <td className="px-4 py-3 text-[12px] text-[#111]">{b.customer || b.customerName || "—"}</td>
+                    <td className="px-4 py-3 text-[11px] text-[#666] max-w-[220px] truncate">{b.pickup} → {b.drop}</td>
+                    <td className="px-4 py-3 text-[12px] text-[#444]">{b.paymentMethod || "—"}</td>
+                    <td className="px-4 py-3 text-[12px] font-bold text-[#111]">
+                      {rupees(expectedAmount(b))}
+                      {Number(b.tollCharges || 0) > 0 && <div className="text-[10px] font-normal text-[#888]">incl. tolls {rupees(Number(b.tollCharges))}</div>}
+                      {b.paymentSummary && b.paymentSummary.totalPaid > 0 && <div className="text-[10px] font-normal text-[#888]">paid {rupees(b.paymentSummary.totalPaid)}</div>}
+                    </td>
+                    <td className="px-4 py-3 text-[11px] text-[#666]">{dateLabel(toDate(b.completedAt))}</td>
+                    <td className="px-4 py-3">
+                      <button
+                        onClick={() => setVerifying(b)}
+                        className="text-[11px] px-3 py-1.5 rounded-md bg-[#E21B23] text-white font-semibold hover:opacity-90"
+                      >
+                        Record payment
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!loading && awaiting.length === 0 && (
+              <div className="py-12 text-center text-[13px] text-[#999]">No completed trips are waiting for payment verification.</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {viewing && (
+        <Modal title={`Payment ${viewing.id}`} onClose={() => setViewing(null)}>
+          <div className="grid grid-cols-2 gap-2 text-[12px]">
+            {[
+              ["Booking", viewing.bookingCode || "—"],
+              ["Customer", viewing.customer || "—"],
+              ["Amount", rupees(viewing.amount)],
+              ["Status", viewing.status],
+              ["Method", viewing.method],
+              ["Gateway / Channel", viewing.gateway || "—"],
+              ["Reference", viewing.reference || "—"],
+              ["Recorded", dateLabel(viewing.date)],
+              ["Verified by", viewing.verifiedBy ? adminName(viewing.verifiedBy) : "—"],
+            ].map(([k, v]) => (
+              <div key={k} className="p-2.5 bg-gray-50 rounded-lg border border-gray-100">
+                <div className="text-[10px] text-gray-500">{k}</div>
+                <div className="font-semibold text-gray-900 break-words">{v}</div>
+              </div>
+            ))}
+          </div>
+        </Modal>
+      )}
+
+      {verifying && (
+        <RecordPaymentModal
+          booking={verifying}
+          onClose={() => setVerifying(null)}
+          onDone={(msg) => {
+            setVerifying(null);
+            show(msg);
+          }}
+        />
       )}
     </div>
   );

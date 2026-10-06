@@ -10,6 +10,7 @@ export const FareLines: React.FC<{ fare: FareBreakdown; tolls?: number }> = ({ f
     ...(fare.nightCharge ? ([['Night charge', fare.nightCharge]] as [string, number][]) : []),
     ...(fare.driverAllowance ? ([['Driver allowance (outstation)', fare.driverAllowance]] as [string, number][]) : []),
     ...(fare.minimumFareAdjustment ? ([['Minimum fare adjustment', fare.minimumFareAdjustment]] as [string, number][]) : []),
+    ...(fare.adminAdjustment ? ([['Agreed fare adjustment', fare.adminAdjustment]] as [string, number][]) : []),
     ...(fare.discount ? ([['Promo discount', -fare.discount]] as [string, number][]) : []),
     [`GST (${Math.round(fare.gstRate * 100)}%)`, fare.gst],
     ...(tolls ? ([['Tolls & parking', tolls]] as [string, number][]) : []),

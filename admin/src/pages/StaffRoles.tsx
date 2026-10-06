@@ -1,366 +1,531 @@
-import { useState, useEffect } from "react";
-import { StaffMember } from "../types";
-import { roles as initialRoles } from "../config/constants";
-import { subscribeStaff, setFirestoreDocument, updateFirestoreDocument, COLLECTIONS } from "../services/adminFirestoreService";
+import { useEffect, useMemo, useState } from "react";
+import { auth } from "../services/firebase";
+import {
+  StaffActionError,
+  approveAdminRequest,
+  deleteStaffRole,
+  rejectAdminRequest,
+  saveStaffRole,
+  subscribeAuditLog,
+  subscribeLegacyStaff,
+  subscribeStaffAccounts,
+  subscribeStaffRoles,
+  updateAdminAccess,
+  validateRole,
+  type AuditEntry,
+  type LegacyStaffRecord,
+  type StaffAccount,
+  type StaffRole,
+} from "../services/staffService";
+import { PERMISSIONS, PERMISSION_INFO, SUPER_ADMIN_ROLE, type Permission } from "../config/permissions";
+import { ConfirmDialog, ErrorBanner, Modal, Toast, useToast } from "../components/Feedback";
+import { formatDateTime12, formatShortDateTime12, formatHourLabel } from "../utils/time";
 
-const statusStyle: Record<string, string> = {
-  Active: "text-green-700 bg-green-50 border-green-200",
-  Inactive: "text-gray-600 bg-gray-100 border-gray-200",
+type Tab = "accounts" | "requests" | "roles" | "audit";
+
+const errText = (e: unknown) => (e instanceof StaffActionError ? e.message : "Something went wrong. Please try again.");
+const pill = (active: boolean) =>
+  `px-2 py-0.5 rounded-full text-[11px] font-semibold border ${active ? "text-green-700 bg-green-50 border-green-200" : "text-gray-600 bg-gray-100 border-gray-200"}`;
+
+const AUDIT_LABELS: Record<string, string> = {
+  admin_approved: "Approved access request",
+  admin_rejected: "Declined access request",
+  admin_access_changed: "Changed staff access",
+  role_created: "Created role",
+  role_updated: "Edited role",
+  role_deleted: "Deleted role",
 };
 
-const roleColors: Record<string, string> = {
-  "Super Admin": "#E21B23",
-  "Booking Manager": "#3B82F6",
-  "Finance Manager": "#10B981",
-  "Fleet Coordinator": "#F59E0B",
-  "Support Agent": "#8B5CF6",
-};
-
-export default function Staff() {
-  const [activeTab, setActiveTab] = useState<"staff" | "roles">("staff");
-  const [search, setSearch] = useState("");
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [showAddRoleModal, setShowAddRoleModal] = useState(false);
-  const [newRoleName, setNewRoleName] = useState("");
-  const [rolesList, setRolesList] = useState(initialRoles);
-
-  const [newStaff, setNewStaff] = useState({ name: '', email: '', phone: '', role: 'Booking Manager', status: 'Active' });
-  const [staffList, setStaffList] = useState<StaffMember[]>([]);
+export default function StaffRoles() {
+  const me = auth.currentUser?.uid || "";
+  const [tab, setTab] = useState<Tab>("accounts");
+  const [accounts, setAccounts] = useState<StaffAccount[] | null>(null);
+  const [roles, setRoles] = useState<StaffRole[]>([]);
+  const [legacy, setLegacy] = useState<LegacyStaffRecord[]>([]);
+  const [audit, setAudit] = useState<AuditEntry[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+  const { toast, show: showToast } = useToast();
 
   useEffect(() => {
-    const unsub = subscribeStaff(setStaffList);
-    return () => unsub();
-  }, []);
+    setLoadError(null);
+    const unsubs = [
+      subscribeStaffAccounts(setAccounts, setLoadError),
+      subscribeStaffRoles(setRoles, setLoadError),
+      subscribeLegacyStaff(setLegacy, setLoadError),
+      subscribeAuditLog(setAudit, setLoadError),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, [retryKey]);
 
-  const displayStaff: StaffMember[] = staffList;
+  const staff = useMemo(() => (accounts ?? []).filter((a) => a.role === "admin"), [accounts]);
+  const requests = useMemo(() => (accounts ?? []).filter((a) => a.role === "pending"), [accounts]);
+  const openRequests = requests.filter((r) => r.status !== "rejected");
+  const holders = (roleId: string) => staff.filter((s) => s.staffRole === roleId).length;
+  const roleOptions = [{ id: SUPER_ADMIN_ROLE, name: "Super Admin" }, ...roles];
 
-  const handleToggleStaffStatus = async (s: StaffMember) => {
-    const newStatus = s.status === "Active" ? "Inactive" : "Active";
-    setStaffList((prev) =>
-      prev.map((item) => (item.id === s.id ? { ...item, status: newStatus } : item)),
-    );
+  // ── Account actions ──────────────────────────────────────────────────────
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [roleDraft, setRoleDraft] = useState<Record<string, string>>({});
+  const [confirm, setConfirm] = useState<{ account: StaffAccount; status: "active" | "inactive" } | null>(null);
+  const [confirmError, setConfirmError] = useState<string | null>(null);
+
+  const run = async (id: string, work: () => Promise<void>, done: string) => {
+    if (busyId) return;
+    setBusyId(id);
     try {
-      await updateFirestoreDocument(COLLECTIONS.STAFF, s.id, { status: newStatus });
-    } catch (err) {
-      console.warn("Error updating staff status:", err);
+      await work();
+      showToast(done);
+    } catch (e) {
+      showToast(errText(e), "error");
+    } finally {
+      setBusyId(null);
     }
   };
 
-  const handleAddStaff = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!newStaff.name.trim() || !newStaff.email.trim()) {
-      alert("Staff Name and Email are required.");
+  const changeStatus = async () => {
+    if (!confirm || busyId) return;
+    setBusyId(confirm.account.uid);
+    setConfirmError(null);
+    try {
+      await updateAdminAccess(confirm.account.uid, { status: confirm.status });
+      showToast(`${confirm.account.name || confirm.account.email} is now ${confirm.status === "active" ? "active" : "deactivated"}.`);
+      setConfirm(null);
+    } catch (e) {
+      setConfirmError(errText(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // ── Requests ─────────────────────────────────────────────────────────────
+  const [approveRole, setApproveRole] = useState<Record<string, string>>({});
+  const [declining, setDeclining] = useState<StaffAccount | null>(null);
+  const [declineReason, setDeclineReason] = useState("");
+  const [declineError, setDeclineError] = useState<string | null>(null);
+
+  const decline = async () => {
+    if (!declining || busyId) return;
+    if (declineReason.trim().length < 5) {
+      setDeclineError("Give a reason of at least 5 characters.");
       return;
     }
-    const id = 'STAFF-' + Date.now();
-    const createdStaff: StaffMember = {
-      id,
-      name: newStaff.name.trim(),
-      email: newStaff.email.trim(),
-      phone: newStaff.phone.trim(),
-      role: newStaff.role,
-      status: newStaff.status as "Active" | "Inactive",
-      permissions: rolesList.find(r => r.name === newStaff.role)?.permissions || [],
-      lastLogin: 'Never'
-    };
-
-    // Optimistically update staff list immediately
-    setStaffList((prev) => [createdStaff, ...prev]);
-    setShowAddModal(false);
-    setNewStaff({ name: '', email: '', phone: '', role: 'Booking Manager', status: 'Active' });
-
-    // Save to Firestore
+    setBusyId(declining.uid);
+    setDeclineError(null);
     try {
-      await setFirestoreDocument(COLLECTIONS.STAFF, id, createdStaff);
+      await rejectAdminRequest(declining.uid, declineReason);
+      showToast(`Request from ${declining.email} declined.`);
+      setDeclining(null);
+      setDeclineReason("");
+    } catch (e) {
+      setDeclineError(errText(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // ── Roles ────────────────────────────────────────────────────────────────
+  const [editing, setEditing] = useState<{ id: string | null; name: string; permissions: Permission[] } | null>(null);
+  const [roleErrors, setRoleErrors] = useState<{ name?: string; permissions?: string; form?: string }>({});
+  const [savingRole, setSavingRole] = useState(false);
+  const [deletingRole, setDeletingRole] = useState<StaffRole | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const submitRole = async () => {
+    if (!editing || savingRole) return;
+    const e = validateRole(editing.name, editing.permissions, roles, editing.id);
+    setRoleErrors(e);
+    if (Object.keys(e).length) return;
+    setSavingRole(true);
+    try {
+      await saveStaffRole(editing.name, editing.permissions, editing.id);
+      showToast(editing.id ? `Role "${editing.name.trim()}" updated for every account holding it.` : `Role "${editing.name.trim()}" created.`);
+      setEditing(null);
     } catch (err) {
-      console.warn("Error saving staff member to Firestore:", err);
+      setRoleErrors({ form: errText(err) });
+    } finally {
+      setSavingRole(false);
     }
   };
 
-  const handleCreateRole = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newRoleName.trim()) return;
-    const exists = rolesList.some((r) => r.name.toLowerCase() === newRoleName.trim().toLowerCase());
-    if (exists) {
-      alert("A role with this name already exists.");
-      return;
+  const removeRole = async () => {
+    if (!deletingRole || busyId) return;
+    setBusyId(deletingRole.id);
+    setDeleteError(null);
+    try {
+      await deleteStaffRole(deletingRole.id);
+      showToast(`Role "${deletingRole.name}" deleted.`);
+      setDeletingRole(null);
+    } catch (e) {
+      setDeleteError(errText(e));
+    } finally {
+      setBusyId(null);
     }
-    const newRole = {
-      name: newRoleName.trim(),
-      permissions: ["Dashboard", "Bookings", "Notifications"],
-      color: "#8B5CF6",
-    };
-    setRolesList([...rolesList, newRole]);
-    setNewRoleName("");
-    setShowAddRoleModal(false);
-    alert(`Role "${newRole.name}" created successfully!`);
   };
 
-  const filtered = displayStaff.filter((s) =>
-    search === "" ||
-    (s.name && s.name.toLowerCase().includes(search.toLowerCase())) ||
-    (s.email && s.email.toLowerCase().includes(search.toLowerCase())) ||
-    (s.role && s.role.toLowerCase().includes(search.toLowerCase()))
-  );
+  const tabs: { id: Tab; label: string; count?: number }[] = [
+    { id: "accounts", label: "Staff accounts", count: staff.length },
+    { id: "requests", label: "Access requests", count: openRequests.length },
+    { id: "roles", label: "Roles", count: roles.length },
+    { id: "audit", label: "Audit log" },
+  ];
+  const selectCls = "px-2 py-1.5 border border-[#E5E5E5] rounded-lg text-[12px] bg-white disabled:opacity-50";
 
   return (
     <div className="p-6 space-y-5">
-      {/* Stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {[
-          { label: "Total Staff", value: displayStaff.length, color: "#E21B23" },
-          { label: "Active", value: displayStaff.filter((s: any) => s.status === "Active").length, color: "#10B981" },
-          { label: "Roles Defined", value: rolesList.length, color: "#3B82F6" },
-          { label: "Inactive", value: displayStaff.filter((s: any) => s.status === "Inactive").length, color: "#999" },
-        ].map((s) => (
-          <div key={s.label} className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4">
-            <div className="text-[22px] font-bold" style={{ color: s.color }}>{s.value}</div>
-            <div className="text-[11px] text-[#999] mt-0.5">{s.label}</div>
-          </div>
+      <Toast toast={toast} />
+      {loadError && <ErrorBanner message={loadError} onRetry={() => setRetryKey((k) => k + 1)} />}
+
+      <div>
+        <h1 className="text-lg font-bold text-[#111]">Staff &amp; Roles</h1>
+        <p className="text-[12px] text-[#666]">
+          Staff sign up from the admin login page; a super admin approves each request with a role. Roles decide which areas a
+          staff member can open and change — enforced by the database rules, not only by this panel.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={`px-3 py-1.5 rounded-lg text-[12px] font-semibold border ${tab === t.id ? "bg-[#111] text-white border-[#111]" : "bg-white text-[#444] border-[#E5E5E5]"}`}
+          >
+            {t.label}
+            {t.count !== undefined && <span className="ml-1.5 opacity-70">{t.count}</span>}
+          </button>
         ))}
       </div>
 
-      {/* Tabs */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex gap-1 bg-white rounded-xl border border-[#E5E5E5] p-1 w-fit shadow-sm">
-          {[{ key: "staff", label: "Staff Members" }, { key: "roles", label: "Roles & Permissions" }].map((t) => (
-            <button
-              key={t.key}
-              onClick={() => setActiveTab(t.key as any)}
-              className={`px-5 py-2 rounded-lg text-[13px] font-semibold transition-all cursor-pointer ${activeTab === t.key ? "text-white shadow-sm" : "text-[#666] hover:text-[#111]"}`}
-              style={activeTab === t.key ? { background: "#E21B23" } : {}}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+      {accounts === null && !loadError && <div className="text-[12px] text-[#999]">Loading staff…</div>}
 
-
-      </div>
-
-      {/* Staff Table */}
-      {activeTab === "staff" && (
-        <div className="space-y-4">
-          <div className="flex items-center gap-3 bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-4">
-            <div className="relative flex-1 max-w-xs">
-              <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#999]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
-              <input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search staff..."
-                className="w-full pl-9 pr-4 py-2 text-[13px] bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23] placeholder-[#999]"
-              />
-            </div>
-            <button onClick={() => setShowAddModal(true)} className="ml-auto flex items-center gap-2 px-4 py-2 text-[12px] font-semibold text-white rounded-lg hover:opacity-90 transition-opacity cursor-pointer" style={{ background: "#E21B23" }}>
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-              </svg>
-              Add Staff Member
-            </button>
-          </div>
-
-          <div className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[900px]">
-                <thead>
-                  <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5]">
-                    {["Staff Member", "Role", "Phone", "Permissions", "Status", "Last Login", "Actions"].map((h) => (
-                      <th key={h} className="px-4 py-3 text-left text-[11px] font-semibold text-[#999] uppercase tracking-wide whitespace-nowrap">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="text-center py-12 text-[#999] text-xs">
-                        <div className="text-sm font-medium mb-2">
-                          {staffList.length === 0 ? "No staff members found." : "No staff members match the search criteria."}
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    filtered.map((s, i) => (
-                      <tr key={s.id || i} className="table-row border-b border-[#F5F5F5] last:border-0 hover:bg-[#FAFAFA] transition-colors">
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-3">
-                            <div
-                              className="w-9 h-9 rounded-full flex items-center justify-center text-white text-[11px] font-bold shrink-0"
-                              style={{ background: roleColors[s.role] || "#E21B23" }}
-                            >
-                              {(s.name || 'Staff').split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
-                            </div>
-                            <div>
-                              <div className="text-[12px] font-semibold text-[#111]">{s.name}</div>
-                              <div className="text-[10px] text-[#999]">{s.email}</div>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <span
-                            className="text-[11px] font-semibold px-2 py-0.5 rounded-full text-white"
-                            style={{ background: roleColors[s.role] || "#E21B23" }}
+      {accounts !== null && tab === "accounts" && (
+        <div className="bg-white rounded-xl border border-[#E5E5E5] overflow-x-auto">
+          <table className="w-full min-w-[760px] text-[12px]">
+            <thead>
+              <tr className="bg-[#F9F9F9] border-b border-[#E5E5E5] text-[11px] text-[#999] uppercase">
+                {["Name", "Email", "Role", "Status", ""].map((h) => (
+                  <th key={h} className="px-4 py-2.5 text-left font-semibold">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {staff.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="px-4 py-8 text-center text-[#999]">No staff accounts yet.</td>
+                </tr>
+              )}
+              {staff.map((s) => {
+                const self = s.uid === me;
+                const draft = roleDraft[s.uid] ?? s.staffRole;
+                const active = s.status === "active";
+                return (
+                  <tr key={s.uid} className="border-b border-[#F5F5F5] last:border-0">
+                    <td className="px-4 py-3 font-semibold text-[#111]">
+                      {s.name || "—"} {self && <span className="text-[10px] font-normal text-[#999]">(you)</span>}
+                    </td>
+                    <td className="px-4 py-3 text-[#666]">{s.email || "—"}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={draft}
+                          disabled={self || busyId !== null}
+                          onChange={(e) => setRoleDraft((d) => ({ ...d, [s.uid]: e.target.value }))}
+                          className={selectCls}
+                        >
+                          {!roleOptions.some((r) => r.id === s.staffRole) && <option value={s.staffRole}>{s.roleName} (deleted)</option>}
+                          {roleOptions.map((r) => (
+                            <option key={r.id} value={r.id}>{r.name}</option>
+                          ))}
+                        </select>
+                        {draft !== s.staffRole && (
+                          <button
+                            disabled={busyId !== null}
+                            onClick={() =>
+                              void run(s.uid, () => updateAdminAccess(s.uid, { staffRole: draft }), `${s.name || s.email} now has the ${roleOptions.find((r) => r.id === draft)?.name} role.`)
+                            }
+                            className="text-[11px] font-semibold text-[#E21B23] disabled:opacity-50"
                           >
-                            {s.role}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-[12px] text-[#666]">{s.phone}</td>
-                        <td className="px-4 py-3">
-                          <div className="flex flex-wrap gap-1 max-w-[200px]">
-                            {(s.permissions || []).slice(0, 3).map((p, pi) => (
-                              <span key={pi} className="text-[9px] font-semibold px-1.5 py-0.5 bg-[#F5F5F5] text-[#666] rounded">{p}</span>
-                            ))}
-                            {(s.permissions || []).length > 3 && (
-                              <span className="text-[9px] font-semibold px-1.5 py-0.5 bg-[#F5F5F5] text-[#999] rounded">+{(s.permissions || []).length - 3} more</span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${statusStyle[s.status]}`}>{s.status}</span>
-                        </td>
-                        <td className="px-4 py-3 text-[11px] text-[#666]">{s.lastLogin || "Active"}</td>
-                        <td className="px-4 py-3">
-                          <div className="flex gap-1.5">
-                            {s.role !== "Super Admin" && (
-                              <button
-                                onClick={() => handleToggleStaffStatus(s)}
-                                className={`text-[11px] px-2.5 py-1 rounded-md border font-medium transition-colors cursor-pointer ${
-                                  s.status === "Active"
-                                    ? "border-red-200 text-red-600 hover:bg-red-50"
-                                    : "border-green-200 text-green-700 hover:bg-green-50"
-                                }`}
-                              >
-                                {s.status === "Active" ? "Deactivate" : "Activate"}
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                            Save
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={pill(active)}>{active ? "Active" : "Deactivated"}</span>
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {!self && (
+                        <button
+                          disabled={busyId !== null}
+                          onClick={() => {
+                            setConfirmError(null);
+                            setConfirm({ account: s, status: active ? "inactive" : "active" });
+                          }}
+                          className={`text-[11px] font-semibold disabled:opacity-50 ${active ? "text-[#E21B23]" : "text-green-700"}`}
+                        >
+                          {active ? "Deactivate" : "Reactivate"}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {legacy.length > 0 && (
+            <div className="border-t border-[#E5E5E5] p-4 space-y-2">
+              <div className="text-[12px] font-bold text-[#111]">Legacy staff records ({legacy.length})</div>
+              <p className="text-[11px] text-[#666]">
+                Created by the previous Staff screen. They are not linked to any sign-in account and grant no access. Ask these people
+                to sign up from the admin login page, then approve their requests with a role.
+              </p>
+              <ul className="text-[11px] text-[#444] space-y-0.5">
+                {legacy.map((l) => (
+                  <li key={l.id}>
+                    {l.name || "—"} · {l.email || "no email"} · recorded role: {l.role || "—"}
+                  </li>
+                ))}
+              </ul>
             </div>
-          </div>
+          )}
         </div>
       )}
 
-      {/* Roles & Permissions */}
-      {activeTab === "roles" && (
-        <div className="space-y-4">
-          <div className="flex justify-between items-center">
-            <p className="text-[12px] text-[#666]">Define roles and control feature access for each staff category.</p>
+      {accounts !== null && tab === "requests" && (
+        <div className="space-y-3">
+          {requests.length === 0 && (
+            <div className="bg-white rounded-xl border border-[#E5E5E5] p-8 text-center text-[12px] text-[#999]">No access requests.</div>
+          )}
+          {requests.map((r) => {
+            const declined = r.status === "rejected";
+            const chosen = approveRole[r.uid] || "";
+            return (
+              <div key={r.uid} className="bg-white rounded-xl border border-[#E5E5E5] p-4 flex flex-wrap items-center gap-3">
+                <div className="flex-1 min-w-[200px]">
+                  <div className="text-[13px] font-semibold text-[#111]">{r.name || "—"}</div>
+                  <div className="text-[11px] text-[#666]">
+                    {r.email} {r.createdAt && `· requested ${formatDateTime12(r.createdAt)}`}
+                  </div>
+                  {declined && <div className="text-[11px] text-[#E21B23] mt-1">Declined: {r.rejectionReason || "no reason recorded"}</div>}
+                </div>
+                <select value={chosen} onChange={(e) => setApproveRole((d) => ({ ...d, [r.uid]: e.target.value }))} className={selectCls}>
+                  <option value="">Choose a role…</option>
+                  {roleOptions.map((o) => (
+                    <option key={o.id} value={o.id}>{o.name}</option>
+                  ))}
+                </select>
+                <button
+                  disabled={!chosen || busyId !== null}
+                  onClick={() => void run(r.uid, () => approveAdminRequest(r.uid, chosen), `${r.email} approved.`)}
+                  className="px-3 py-1.5 bg-[#E21B23] text-white rounded-lg text-[12px] font-semibold disabled:opacity-50"
+                >
+                  Approve
+                </button>
+                {!declined && (
+                  <button
+                    disabled={busyId !== null}
+                    onClick={() => {
+                      setDeclineError(null);
+                      setDeclineReason("");
+                      setDeclining(r);
+                    }}
+                    className="px-3 py-1.5 border border-[#E5E5E5] rounded-lg text-[12px] font-semibold text-[#444] disabled:opacity-50"
+                  >
+                    Decline
+                  </button>
+                )}
+              </div>
+            );
+          })}
+          {roles.length === 0 && openRequests.length > 0 && (
+            <p className="text-[11px] text-[#666]">Tip: create roles first (Roles tab) to give staff less than full access.</p>
+          )}
+        </div>
+      )}
+
+      {accounts !== null && tab === "roles" && (
+        <div className="space-y-3">
+          <div className="flex justify-end">
             <button
-              onClick={() => setShowAddRoleModal(true)}
-              className="flex items-center gap-2 px-4 py-2 text-[12px] font-semibold text-white rounded-lg hover:opacity-90 cursor-pointer"
-              style={{ background: "#E21B23" }}
+              onClick={() => {
+                setRoleErrors({});
+                setEditing({ id: null, name: "", permissions: [] });
+              }}
+              className="px-3 py-1.5 bg-[#E21B23] text-white rounded-lg text-[12px] font-semibold"
             >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-              </svg>
-              Add Role
+              New role
             </button>
           </div>
-          <div className="grid grid-cols-1 gap-4">
-            {rolesList.map((role, i) => (
-              <div key={i} className="bg-white rounded-xl border border-[#E5E5E5] shadow-sm p-5">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-3">
-                    <div className="w-3 h-10 rounded-full" style={{ background: role.color }} />
-                    <div>
-                      <div className="text-[14px] font-bold text-[#111]">{role.name}</div>
-                      <div className="text-[11px] text-[#999] mt-0.5">{displayStaff.filter((s: any) => s.role === role.name).length} staff member{displayStaff.filter((s: any) => s.role === role.name).length !== 1 ? "s" : ""}</div>
-                    </div>
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {role.permissions.map((p, pi) => (
-                    <span
-                      key={pi}
-                      className="text-[11px] font-semibold px-2.5 py-1 rounded-lg"
-                      style={{ background: `${role.color}15`, color: role.color }}
-                    >
-                      {p}
-                    </span>
+          <div className="bg-white rounded-xl border border-[#E5E5E5] p-4">
+            <div className="text-[13px] font-semibold text-[#111]">Super Admin <span className="text-[10px] font-normal text-[#999]">built-in</span></div>
+            <div className="text-[11px] text-[#666]">Every area, plus staff accounts and roles. {holders(SUPER_ADMIN_ROLE)} account(s).</div>
+          </div>
+          {roles.length === 0 && (
+            <div className="bg-white rounded-xl border border-[#E5E5E5] p-8 text-center text-[12px] text-[#999]">
+              No custom roles yet. Create one to give staff access to only the areas they need.
+            </div>
+          )}
+          {roles.map((r) => (
+            <div key={r.id} className="bg-white rounded-xl border border-[#E5E5E5] p-4 flex flex-wrap items-start gap-3">
+              <div className="flex-1 min-w-[220px]">
+                <div className="text-[13px] font-semibold text-[#111]">{r.name}</div>
+                <div className="flex flex-wrap gap-1 mt-1.5">
+                  {r.permissions.map((p) => (
+                    <span key={p} className="px-2 py-0.5 rounded-md bg-[#F5F5F5] text-[10px] font-semibold text-[#444]">{PERMISSION_INFO[p].label}</span>
                   ))}
                 </div>
+                <div className="text-[11px] text-[#999] mt-1.5">{holders(r.id)} account(s)</div>
               </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {showAddRoleModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-base font-bold text-gray-900">Define New Role</h3>
-              <button onClick={() => setShowAddRoleModal(false)} className="text-gray-400 hover:text-gray-700 cursor-pointer">✕</button>
-            </div>
-            <form onSubmit={handleCreateRole} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">Role Title *</label>
-                <input
-                  required
-                  placeholder="e.g. Operations Coordinator"
-                  value={newRoleName}
-                  onChange={(e) => setNewRoleName(e.target.value)}
-                  className="w-full px-3 py-2 border rounded-lg text-xs focus:ring-2 focus:ring-red-500 focus:outline-none"
-                />
-              </div>
-              <p className="text-[11px] text-gray-500">
-                New roles will be assigned foundational Dashboard and Bookings access by default.
-              </p>
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowAddRoleModal(false)}
-                  className="px-3 py-1.5 text-xs text-gray-600 border rounded-lg hover:bg-gray-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-1.5 text-xs font-semibold text-white rounded-lg shadow"
-                  style={{ background: "#E21B23" }}
-                >
-                  Create Role
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between border-b pb-3">
-              <h3 className="text-base font-bold text-gray-900">Add Staff Member</h3>
-              <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-gray-700 cursor-pointer">✕</button>
-            </div>
-            <div className="space-y-3">
-              <input placeholder="Name *" className="w-full p-2 border rounded text-xs" required onChange={(e) => setNewStaff({...newStaff, name: e.target.value})} />
-              <input placeholder="Email *" type="email" className="w-full p-2 border rounded text-xs" required onChange={(e) => setNewStaff({...newStaff, email: e.target.value})} />
-              <input placeholder="Phone" type="tel" className="w-full p-2 border rounded text-xs" onChange={(e) => setNewStaff({...newStaff, phone: e.target.value})} />
-              <select className="w-full p-2 border rounded text-xs" onChange={(e) => setNewStaff({...newStaff, role: e.target.value})}>
-                {rolesList.map(r => <option key={r.name}>{r.name}</option>)}
-              </select>
-              <select className="w-full p-2 border rounded text-xs" onChange={(e) => setNewStaff({...newStaff, status: e.target.value})}>
-                <option>Active</option><option>Inactive</option>
-              </select>
-
               <button
-                type="button"
-                onClick={handleAddStaff}
-                className="w-full p-2.5 bg-[#E21B23] hover:bg-[#c4151c] text-white text-xs font-bold rounded-lg mt-2 cursor-pointer transition-colors shadow"
+                onClick={() => {
+                  setRoleErrors({});
+                  setEditing({ id: r.id, name: r.name, permissions: r.permissions });
+                }}
+                className="text-[11px] font-semibold text-[#111]"
               >
-                Create Staff Member
+                Edit
+              </button>
+              <button
+                onClick={() => {
+                  setDeleteError(null);
+                  setDeletingRole(r);
+                }}
+                className="text-[11px] font-semibold text-[#E21B23]"
+              >
+                Delete
               </button>
             </div>
-          </div>
+          ))}
         </div>
+      )}
+
+      {accounts !== null && tab === "audit" && (
+        <div className="bg-white rounded-xl border border-[#E5E5E5] divide-y divide-[#F5F5F5]">
+          {audit.length === 0 && <div className="p-8 text-center text-[12px] text-[#999]">No staff changes recorded yet.</div>}
+          {audit.map((a) => (
+            <div key={a.id} className="px-4 py-3 text-[12px]">
+              <div className="font-semibold text-[#111]">{AUDIT_LABELS[a.action] || a.action}</div>
+              <div className="text-[11px] text-[#666]">
+                by {a.actorName || "—"} {a.at && `· ${formatDateTime12(a.at)}`}
+                {typeof a.details.email === "string" && a.details.email ? ` · ${a.details.email}` : ""}
+                {typeof a.details.name === "string" && a.details.name ? ` · ${a.details.name}` : ""}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {editing && (
+        <Modal
+          title={editing.id ? "Edit role" : "New role"}
+          subtitle="Choose the areas this role can open and change."
+          onClose={() => setEditing(null)}
+          busy={savingRole}
+          footer={
+            <>
+              <button onClick={() => setEditing(null)} disabled={savingRole} className="px-4 py-2 border border-[#E5E5E5] rounded-lg text-xs font-semibold text-[#666] disabled:opacity-50">
+                Cancel
+              </button>
+              <button onClick={() => void submitRole()} disabled={savingRole} className="px-4 py-2 bg-[#E21B23] text-white rounded-lg text-xs font-semibold disabled:opacity-60">
+                {savingRole ? "Saving…" : "Save role"}
+              </button>
+            </>
+          }
+        >
+          <div className="space-y-3 text-xs">
+            {roleErrors.form && <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-700">{roleErrors.form}</div>}
+            <label className="block">
+              <span className="block text-[11px] font-semibold text-[#666] mb-1">Role name *</span>
+              <input
+                value={editing.name}
+                onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+                maxLength={40}
+                className="w-full p-2 border border-[#E5E5E5] rounded-lg text-xs"
+              />
+              {roleErrors.name && <p className="text-[10px] text-red-600 mt-1">{roleErrors.name}</p>}
+            </label>
+            <div className="space-y-1.5">
+              <span className="block text-[11px] font-semibold text-[#666]">Areas *</span>
+              {PERMISSIONS.map((p) => (
+                <label key={p} className="flex items-start gap-2 p-2 rounded-lg border border-[#F0F0F0] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 accent-[#E21B23]"
+                    checked={editing.permissions.includes(p)}
+                    onChange={(e) =>
+                      setEditing({
+                        ...editing,
+                        permissions: e.target.checked ? [...editing.permissions, p] : editing.permissions.filter((x) => x !== p),
+                      })
+                    }
+                  />
+                  <span>
+                    <span className="font-semibold text-[#111]">{PERMISSION_INFO[p].label}</span>
+                    <span className="block text-[11px] text-[#666]">{PERMISSION_INFO[p].description}</span>
+                  </span>
+                </label>
+              ))}
+              {roleErrors.permissions && <p className="text-[10px] text-red-600">{roleErrors.permissions}</p>}
+            </div>
+            {editing.id && <p className="text-[11px] text-[#666]">Saving updates the access of all {holders(editing.id)} account(s) with this role immediately.</p>}
+          </div>
+        </Modal>
+      )}
+
+      {confirm && (
+        <ConfirmDialog
+          title={confirm.status === "active" ? "Reactivate staff account" : "Deactivate staff account"}
+          message={
+            confirm.status === "active"
+              ? `${confirm.account.name || confirm.account.email} will regain the access of the ${confirm.account.roleName} role.`
+              : `${confirm.account.name || confirm.account.email} will immediately lose all admin access.`
+          }
+          confirmLabel={confirm.status === "active" ? "Reactivate" : "Deactivate"}
+          danger={confirm.status === "inactive"}
+          busy={busyId !== null}
+          error={confirmError}
+          onConfirm={() => void changeStatus()}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
+
+      {declining && (
+        <Modal
+          title="Decline access request"
+          subtitle={declining.email}
+          onClose={() => setDeclining(null)}
+          busy={busyId !== null}
+          footer={
+            <>
+              <button onClick={() => setDeclining(null)} disabled={busyId !== null} className="px-4 py-2 border border-[#E5E5E5] rounded-lg text-xs font-semibold text-[#666] disabled:opacity-50">
+                Cancel
+              </button>
+              <button onClick={() => void decline()} disabled={busyId !== null} className="px-4 py-2 bg-[#E21B23] text-white rounded-lg text-xs font-semibold disabled:opacity-60">
+                Decline
+              </button>
+            </>
+          }
+        >
+          <label className="block text-xs">
+            <span className="block text-[11px] font-semibold text-[#666] mb-1">Reason (shown to the requester) *</span>
+            <input value={declineReason} onChange={(e) => setDeclineReason(e.target.value)} maxLength={300} className="w-full p-2 border border-[#E5E5E5] rounded-lg text-xs" />
+            {declineError && <p className="text-[10px] text-red-600 mt-1">{declineError}</p>}
+          </label>
+        </Modal>
+      )}
+
+      {deletingRole && (
+        <ConfirmDialog
+          title="Delete role"
+          message={`Delete the role "${deletingRole.name}"? Roles still assigned to accounts cannot be deleted.`}
+          confirmLabel="Delete"
+          danger
+          busy={busyId !== null}
+          error={deleteError}
+          onConfirm={() => void removeRole()}
+          onCancel={() => setDeletingRole(null)}
+        />
       )}
     </div>
   );

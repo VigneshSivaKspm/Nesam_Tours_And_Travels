@@ -10,6 +10,7 @@ import {
   ShieldCheck,
   ChevronLeft,
   ChevronRight,
+  Bell,
 } from "lucide-react";
 
 interface SidebarProps {
@@ -95,6 +96,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       label: "Finance & Compliance",
       items: [
         { id: "wallet", label: "Wallet & Payouts", icon: Wallet },
+        { id: "notifications", label: "Notifications", icon: Bell },
         {
           id: "documents",
           label: "Business Verification",
@@ -232,7 +234,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className="shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shadow"
             style={{ background: "#E21B23" }}
           >
-            {profile.companyName.substring(0, 2).toUpperCase()}
+            {(profile.companyName || "?").substring(0, 2).toUpperCase()}
           </div>
           {!collapsed && (
             <div className="overflow-hidden">
@@ -240,7 +242,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 {profile.companyName}
               </div>
               <div className="text-white/40 text-[10px] font-mono truncate">
-                GST: {profile.gstin}
+                {profile.gstin ? `GST: ${profile.gstin}` : "GSTIN not provided"}
               </div>
             </div>
           )}

@@ -1,7 +1,9 @@
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import {
   runTransaction,
+  addDoc,
   collection,
+  collectionGroup,
   doc,
   setDoc,
   updateDoc,
@@ -9,17 +11,30 @@ import {
   query,
   where,
   serverTimestamp,
-  getDocs,
+  writeBatch,
 } from "firebase/firestore";
 import { db } from "./firebase";
-import {
-  FleetVehicle,
-  FleetDriver,
-  OpenTrip,
+import { describeDataError } from "../utils/retry";
+import type {
   BidProposal,
-  VendorTrip,
+  FleetDriver,
+  FleetVehicle,
+  OpenTrip,
   PayoutRequest,
+  TransactionRecord,
+  VendorTrip,
+  WalletDetails,
 } from "../types";
+import {
+  mapBid,
+  mapDriver,
+  mapLedgerEntry,
+  mapOpenTrip,
+  mapPayout,
+  mapVehicle,
+  mapVendorTrip,
+  mapWallet,
+} from "./vendorMappers";
 
 export const VEHICLES_COLLECTION = "vehicles";
 export const DRIVERS_COLLECTION = "drivers";
@@ -27,399 +42,197 @@ export const MARKETPLACE_COLLECTION = "marketplace_trips";
 export const BOOKINGS_COLLECTION = "bookings";
 export const PAYOUTS_COLLECTION = "payout_requests";
 
-/**
- * Real-time listener for Fleet Vehicles
- */
-export function subscribeToFleetVehicles(
-  vendorId: string,
-  callback: (vehicles: FleetVehicle[]) => void,
-) {
-  try {
-    const q = query(
-      collection(db, VEHICLES_COLLECTION),
-      where("vendorId", "==", vendorId),
-    );
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        if (!snapshot.empty) {
-          const vehicles: FleetVehicle[] = snapshot.docs.map((docSnap) => {
-            const data = docSnap.data();
-            return {
-              id: data.id || docSnap.id,
-              vehicleNumber:
-                data.vehicleNumber || data.number || "TN 01 AB 1234",
-              category: data.category || "Sedan",
-              make: data.make || "Toyota",
-              model: data.model || data.name || "Innova",
-              year: data.year || "2023",
-              seatingCapacity: data.seatingCapacity || data.seats || 4,
-              status: data.status || "Active",
-              assignedDriverId: data.assignedDriverId || undefined,
-              assignedDriverName:
-                data.assignedDriverName || data.driver || undefined,
-              docStatus:
-                data.docStatus || (data.verified ? "Approved" : "Pending"),
-              rcDocUrl: data.rcDocUrl || undefined,
-              insuranceDocUrl: data.insuranceDocUrl || undefined,
-              fitnessDocUrl: data.fitnessDocUrl || undefined,
-              statePermitDocUrl: data.statePermitDocUrl || undefined,
-            };
-          });
-          callback(vehicles);
-        } else {
-          callback([]);
-        }
-      },
-      () => callback([]),
-    );
-    return unsubscribe;
-  } catch {
-    callback([]);
-    return () => {};
-  }
+type OnError = (message: string) => void;
+
+/** Live list; a listener failure is reported (never shown as an empty list). */
+function listen<T>(q: ReturnType<typeof query>, map: (id: string, d: Record<string, unknown>) => T | null, cb: (items: T[]) => void, onError: OnError) {
+  return onSnapshot(
+    q,
+    (snap) => cb(snap.docs.map((d) => map(d.id, d.data() as Record<string, unknown>)).filter((x): x is T => x !== null)),
+    (err) => onError(describeDataError(err)),
+  );
+}
+
+export function subscribeToFleetVehicles(vendorId: string, cb: (vehicles: FleetVehicle[]) => void, onError: OnError) {
+  return listen(query(collection(db, VEHICLES_COLLECTION), where("vendorId", "==", vendorId)), mapVehicle, cb, onError);
+}
+
+export function subscribeToFleetDrivers(vendorId: string, cb: (drivers: FleetDriver[]) => void, onError: OnError) {
+  return listen(query(collection(db, DRIVERS_COLLECTION), where("vendorId", "==", vendorId)), mapDriver, cb, onError);
+}
+
+export interface VehicleCategoryOption {
+  id: string;
+  name: string;
+  seatingCapacity: number | null;
+}
+
+/** Vehicle categories configured by NESAM (the only categories a vehicle can be registered under). */
+export function subscribeToVehicleCategories(cb: (categories: VehicleCategoryOption[]) => void, onError: OnError) {
+  return listen(
+    query(collection(db, "vehicle_categories"), where("status", "==", "Active")),
+    (id, d) => {
+      const name = typeof d.name === "string" ? d.name.trim() : "";
+      const seats = typeof d.seatingCapacity === "number" && d.seatingCapacity > 0 ? d.seatingCapacity : null;
+      return name ? { id, name, seatingCapacity: seats } : null;
+    },
+    (cats) => cb(cats.sort((a, b) => a.name.localeCompare(b.name))),
+    onError,
+  );
+}
+
+export interface NewVehicle {
+  vehicleNumber: string;
+  categoryId: string;
+  category: string;
+  make: string;
+  model: string;
+  year: string;
+  seatingCapacity: number;
+}
+
+/** Registers a vehicle for NESAM document review (firestore.rules: docStatus "Pending"). */
+export async function createVehicle(vendorId: string, v: NewVehicle): Promise<string> {
+  const ref = await addDoc(collection(db, VEHICLES_COLLECTION), {
+    ...v,
+    vehicleNumber: v.vehicleNumber.trim().toUpperCase().replace(/\s+/g, " "),
+    vendorId,
+    status: "Active",
+    docStatus: "Pending",
+    assignedDriverId: "",
+    assignedDriverName: "",
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
+  return ref.id;
+}
+
+export async function setVehicleStatus(vehicleId: string, status: FleetVehicle["status"]) {
+  await updateDoc(doc(db, VEHICLES_COLLECTION, vehicleId), { status, updatedAt: serverTimestamp() });
 }
 
 /**
- * Real-time listener for Fleet Drivers
+ * Pairs a fleet driver with a vehicle (null unpairs). Both records are kept in
+ * step in one batch: the vehicle names its driver and the driver its vehicle
+ * (by id), and any previous pairing on either side is released.
  */
-export function subscribeToFleetDrivers(
-  vendorId: string,
-  callback: (drivers: FleetDriver[]) => void,
-) {
-  try {
-    const q = query(
-      collection(db, DRIVERS_COLLECTION),
-      where("vendorId", "==", vendorId),
-    );
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        if (!snapshot.empty) {
-          const drivers: FleetDriver[] = snapshot.docs.map((docSnap) => {
-            const data = docSnap.data();
-            return {
-              id: data.id || docSnap.id,
-              name: data.name || "Driver Partner",
-              phone: data.phone || "+91 94432 12345",
-              email: data.email || "driver@nesam.in",
-              photoUrl:
-                data.photoUrl ||
-                "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80",
-              licenseNumber: data.licenseNumber || "TN43 20180004521",
-              licenseExpiry: data.licenseExpiry || "2028-12-31",
-              status:
-                data.status === "On Trip"
-                  ? "On Trip"
-                  : data.status === "Suspended"
-                    ? "Suspended"
-                    : "Available",
-              assignedVehicleNumber:
-                data.assignedVehicleNumber || data.vehicle || undefined,
-              rating: data.rating || 4.8,
-              totalTrips: data.totalTrips || data.trips || 120,
-              docStatus:
-                data.docStatus || (data.verified ? "Approved" : "Pending"),
-            };
-          });
-          callback(drivers);
-        } else {
-          callback([]);
-        }
-      },
-      () => callback([]),
-    );
-    return unsubscribe;
-  } catch {
-    callback([]);
-    return () => {};
+export async function pairVehicleDriver(vehicle: FleetVehicle, driver: FleetDriver | null, vehicles: FleetVehicle[]) {
+  const batch = writeBatch(db);
+  const stamp = serverTimestamp();
+  batch.update(doc(db, VEHICLES_COLLECTION, vehicle.id), {
+    assignedDriverId: driver?.id ?? "",
+    assignedDriverName: driver?.name ?? "",
+    updatedAt: stamp,
+  });
+  if (vehicle.assignedDriverId && vehicle.assignedDriverId !== driver?.id) {
+    batch.update(doc(db, DRIVERS_COLLECTION, vehicle.assignedDriverId), { assignedVehicleId: "", assignedVehicleNumber: "", updatedAt: stamp });
   }
+  if (driver) {
+    const previous = vehicles.find((v) => v.id !== vehicle.id && v.assignedDriverId === driver.id);
+    if (previous) batch.update(doc(db, VEHICLES_COLLECTION, previous.id), { assignedDriverId: "", assignedDriverName: "", updatedAt: stamp });
+    batch.update(doc(db, DRIVERS_COLLECTION, driver.id), { assignedVehicleId: vehicle.id, assignedVehicleNumber: vehicle.vehicleNumber, updatedAt: stamp });
+  }
+  await batch.commit();
+}
+
+/** Fleet-side suspension; a suspended driver can't be dispatched or go on duty for the fleet. */
+export async function setDriverSuspended(driverId: string, suspended: boolean) {
+  await updateDoc(doc(db, DRIVERS_COLLECTION, driverId), { fleetStatus: suspended ? "Suspended" : "Active", updatedAt: serverTimestamp() });
+}
+
+export async function inviteDriverByVendor(phone: string, vendorId: string, vendorName: string, vehicleNumber: string) {
+  const digits = phone.replace(/\D/g, "").slice(-10);
+  const normalizedPhone = "+91" + digits;
+  await setDoc(
+    doc(db, "driver_invites", normalizedPhone),
+    {
+      phone: normalizedPhone,
+      vendorId,
+      vendorName,
+      vehicleAssignment: vehicleNumber || null,
+      preApproved: false,
+      createdAt: serverTimestamp(),
+    },
+    { merge: true },
+  );
+}
+
+export function subscribeToOpenMarketplaceTrips(cb: (trips: OpenTrip[]) => void, onError: OnError) {
+  // Vendors may read only offers still open to them (firestore.rules).
+  return listen(query(collection(db, MARKETPLACE_COLLECTION), where("status", "in", ["Open", "Bidding"])), mapOpenTrip, cb, onError);
+}
+
+export function subscribeToVendorBids(vendorId: string, cb: (bids: BidProposal[]) => void, onError: OnError) {
+  return listen(query(collectionGroup(db, "bids"), where("vendorId", "==", vendorId)), mapBid, (bids) =>
+    cb(bids.sort((a, b) => (b.submittedAt?.getTime() ?? 0) - (a.submittedAt?.getTime() ?? 0))), onError);
+}
+
+export async function submitBidToFirestore(trip: OpenTrip, counterRate: number, note: string, vendorId: string, vendorName: string) {
+  await addDoc(collection(db, MARKETPLACE_COLLECTION, trip.id, "bids"), {
+    tripId: trip.id,
+    bookingId: trip.bookingId,
+    vendorId,
+    vendorName,
+    vendorCounterRate: counterRate,
+    offeredPayout: trip.offeredPayout,
+    biddingNote: note.trim(),
+    status: "Pending Review",
+    submittedAt: serverTimestamp(),
+  });
+  await updateDoc(doc(db, MARKETPLACE_COLLECTION, trip.id), {
+    status: "Bidding",
+    lastBidAt: serverTimestamp(),
+  });
 }
 
 /**
- * Add / Update Fleet Vehicle in Firestore
+ * Dispatches one of the vendor's drivers in one of its vehicles, referenced by
+ * the vehicle's document id (firestore.rules vendorDispatchOk checks both).
  */
-export async function saveVehicleToFirestore(
-  vehicle: FleetVehicle,
-  vendorId: string,
-) {
-  try {
-    const vehicleRef = doc(db, VEHICLES_COLLECTION, vehicle.id);
-    await setDoc(
-      vehicleRef,
-      { ...vehicle, vendorId, updatedAt: serverTimestamp() },
-      { merge: true },
-    );
-  } catch (error) {
-    console.warn("Save vehicle error:", error);
-  }
+export async function assignTripInFirestore(tripId: string, driver: FleetDriver, vehicle: FleetVehicle) {
+  await updateDoc(doc(db, BOOKINGS_COLLECTION, tripId), {
+    status: "Assigned",
+    tripStage: "Assigned",
+    assignedDriverId: driver.id,
+    assignedDriverName: driver.name,
+    driver: driver.name,
+    driverPhone: driver.phone,
+    assignedVehicleId: vehicle.id,
+    assignedVehicleNumber: vehicle.vehicleNumber,
+    assignedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  });
 }
 
-export async function inviteDriverByVendor(
-  phone: string,
-  vendorId: string,
-  vendorName: string,
-  vehicleAssignment?: string,
-) {
-  try {
-    // Normalize phone to +91XXXXXXXXXX format
-    const normalizedPhone = phone.startsWith("+")
-      ? phone
-      : "+91" + phone.replace(/\D/g, "").slice(-10);
-    const inviteRef = doc(db, "driver_invites", normalizedPhone);
-    await setDoc(
-      inviteRef,
-      {
-        phone: normalizedPhone,
-        vendorId: vendorId,
-        vendorName: vendorName,
-        vehicleAssignment: vehicleAssignment || null,
-        preApproved: false,
-        createdAt: serverTimestamp(),
-      },
-      { merge: true },
-    );
-    return true;
-  } catch (error) {
-    console.warn("Invite driver error:", error);
-    return false;
-  }
+export function subscribeToVendorActiveTrips(vendorId: string, cb: (trips: VendorTrip[]) => void, onError: OnError) {
+  return listen(query(collection(db, BOOKINGS_COLLECTION), where("assignedVendorId", "==", vendorId)), mapVendorTrip, (trips) =>
+    cb(trips.filter((t) => t.status !== "Completed" && t.status !== "Cancelled")), onError);
 }
 
-/**
- * Real-time listener for open marketplace trips
- */
-export function subscribeToOpenMarketplaceTrips(
-  callback: (trips: OpenTrip[]) => void,
-) {
-  try {
-    const q = query(collection(db, MARKETPLACE_COLLECTION));
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        if (!snapshot.empty) {
-          const trips: OpenTrip[] = snapshot.docs.map((docSnap) => {
-            const data = docSnap.data();
-            return {
-              id: data.id || docSnap.id,
-              bookingId:
-                data.bookingId || "NESAM-BK-" + docSnap.id.substring(0, 4),
-              route:
-                data.route || "Chennai Airport Gate 4 ➔ Puducherry White Town",
-              pickup: data.pickup || {
-                address: "Chennai Airport Gate 4",
-                city: "Chennai",
-                time: "02:30 PM",
-              },
-              drop: data.drop || {
-                address: "Puducherry White Town",
-                city: "Puducherry",
-              },
-              travelDate: data.travelDate || "Today, 26 Aug",
-              vehicleCategory: data.vehicleCategory || "Sedan",
-              distanceKm: data.distanceKm || 165,
-              offeredPayout: data.offeredPayout || 4200,
-              status: data.status || "Open",
-            };
-          });
-          callback(trips);
-        } else {
-          callback([]);
-        }
-      },
-      (err) => {
-        console.warn("Marketplace trips listener error:", err);
-        callback([]);
-      },
-    );
-
-    return unsubscribe;
-  } catch (err) {
-    console.warn("Marketplace listener initialization error:", err);
-    callback([]);
-    return () => {};
-  }
+export function subscribeToVendorPayouts(vendorId: string, cb: (payouts: PayoutRequest[]) => void, onError: OnError) {
+  return listen(query(collection(db, PAYOUTS_COLLECTION), where("vendorId", "==", vendorId)), mapPayout, (payouts) =>
+    cb(payouts.sort((a, b) => (b.requestedAt?.getTime() ?? 0) - (a.requestedAt?.getTime() ?? 0))), onError);
 }
 
-export async function submitBidToFirestore(
-  bid: BidProposal,
-  vendorId: string,
-  vendorName: string,
-) {
-  try {
-    if (!bid.tripId) throw new Error("tripId is required for bid submission");
-
-    const bidRef = doc(
-      db,
-      "marketplace_trips",
-      bid.tripId,
-      "bids",
-      "BID-" + Date.now(),
-    );
-    await setDoc(bidRef, {
-      tripId: bid.tripId,
-      vendorId: vendorId,
-      vendorName: vendorName,
-      vendorCounterRate: bid.vendorCounterRate,
-      offeredPayout: bid.offeredPayout,
-      biddingNote: bid.biddingNote || "",
-      status: "Pending Review",
-      submittedAt: serverTimestamp(),
-    });
-    await updateDoc(doc(db, "marketplace_trips", bid.tripId), {
-      status: "Bidding",
-      lastBidAt: serverTimestamp(),
-    });
-    return true;
-  } catch (error) {
-    console.warn("Submit bid error:", error);
-    return false;
-  }
+/** The server-computed wallet (functions/src/ledger.ts). The portal never computes a balance. */
+export function subscribeToVendorWallet(vendorId: string, cb: (wallet: WalletDetails) => void, onError: OnError) {
+  return onSnapshot(
+    doc(db, "wallets", `vendor_${vendorId}`),
+    (snap) => cb(mapWallet(snap.exists() ? (snap.data() as Record<string, unknown>) : undefined)),
+    (err) => onError(describeDataError(err)),
+  );
 }
 
-export async function assignTripInFirestore(
-  tripId: string,
-  driverId: string,
-  driverName: string,
-  vehicleNumber: string,
-  vendorId: string,
-) {
-  try {
-    // The vendorDispatchOk rule requires: only update assignedDriverId, assignedDriverName,
-    // assignedVehicleNumber, tripStage, status. NO id field.
-    await updateDoc(doc(db, "bookings", tripId), {
-      assignedDriverId: driverId,
-      assignedDriverName: driverName,
-      assignedVehicleNumber: vehicleNumber,
-      status: "Assigned",
-      // DO NOT include: id, assignedVendorId (already set by admin when accepting bid)
-    });
-    // Update marketplace
-    await setDoc(
-      doc(db, "marketplace_trips", tripId),
-      {
-        status: "Assigned",
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true },
-    );
-    return true;
-  } catch (error) {
-    console.warn("Assign trip error:", error);
-    return false;
-  }
+export function subscribeToVendorLedger(vendorId: string, cb: (entries: TransactionRecord[]) => void, onError: OnError) {
+  return listen(query(collection(db, "wallet_ledger"), where("vendorId", "==", vendorId)), mapLedgerEntry, (entries) =>
+    cb(entries.sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0))), onError);
 }
 
-/**
- * Save Payout Request to Firestore
- */
-export async function submitPayoutRequestToFirestore(request: PayoutRequest, _vendorId: string) {
-  await httpsCallable(getFunctions(), 'requestPartnerPayout')({ requestId: request.id, role: 'vendor', amount: request.amount, method: request.payoutMethod });
-}
-export function subscribeToVendorActiveTrips(
-  vendorId: string,
-  callback: (trips: VendorTrip[]) => void,
-) {
-  try {
-    const q = query(
-      collection(db, BOOKINGS_COLLECTION),
-      where("assignedVendorId", "==", vendorId),
-    );
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const trips: VendorTrip[] = snap.docs
-          .map((d) => ({
-            id: d.id,
-            bookingId: d.data().bookingId || d.id,
-            customerName: d.data().customer || "Passenger",
-            customerPhone: d.data().phone || "+91 98400 00000",
-            pickupAddress:
-              d.data().pickupAddress || d.data().pickup || "Pickup",
-            dropAddress: d.data().dropAddress || d.data().drop || "Destination",
-            scheduledTime: `${d.data().date || "Today"}, ${d.data().time || "10:00 AM"}`,
-            vehicleNumber: d.data().assignedVehicleNumber || "TN 01 AB 1234",
-            driverId: d.data().assignedDriverId || "",
-            driverName: d.data().assignedDriverName || "Driver",
-            driverPhone: "+91 94400 00000",
-            grossFare:
-              typeof d.data().fare === "number"
-                ? d.data().fare
-                : parseInt(
-                    String(d.data().fare || "2000").replace(/[^0-9]/g, ""),
-                  ) || 2000,
-            platformFee: Math.round(
-              (typeof d.data().fare === "number"
-                ? d.data().fare
-                : parseInt(
-                    String(d.data().fare || "2000").replace(/[^0-9]/g, ""),
-                  ) || 2000) * 0.1,
-            ),
-            vendorPayout: Math.round(
-              (typeof d.data().fare === "number"
-                ? d.data().fare
-                : parseInt(
-                    String(d.data().fare || "2000").replace(/[^0-9]/g, ""),
-                  ) || 2000) * 0.9,
-            ),
-            status: d.data().status || "Assigned",
-          }))
-          .filter((t) => t.status !== "Completed" && t.status !== "Cancelled");
-        callback(trips);
-      },
-      () => callback([]),
-    );
-    return unsub;
-  } catch {
-    callback([]);
-    return () => {};
-  }
+/** The server checks the ledger balance and pays to the saved payout account. */
+export async function requestVendorPayout(requestId: string, amount: number, method: "UPI" | "Bank Transfer") {
+  await httpsCallable(getFunctions(), 'requestPartnerPayout')({ requestId, role: 'vendor', amount, method });
 }
 
-export function subscribeToVendorPayouts(
-  vendorId: string,
-  callback: (payouts: PayoutRequest[]) => void,
-) {
-  try {
-    const q = query(
-      collection(db, PAYOUTS_COLLECTION),
-      where("vendorId", "==", vendorId),
-    );
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const payouts = snap.docs.map((d) => ({
-          id: d.id,
-          ...d.data(),
-          payoutMethod: d.data().method || d.data().payoutMethod,
-          targetDetails: d.data().details || d.data().targetDetails,
-        })) as PayoutRequest[];
-        callback(payouts);
-      },
-      () => callback([]),
-    );
-    return unsub;
-  } catch {
-    callback([]);
-    return () => {};
-  }
-}
-
-export function subscribeToVendorWalletBalance(vendorId: string, callback: (balance: number) => void) {
-  let earned = 0, reserved = 0;
-  const emit = () => callback(Math.max(0, Math.floor(earned - reserved)));
-  const a = onSnapshot(query(collection(db, 'bookings'), where('assignedVendorId', '==', vendorId)), snap => {
-    earned = snap.docs.reduce((sum, doc) => {
-      const b = doc.data();
-      if (b.status !== 'Completed' || b.fareVerified !== true || b.payment !== 'Paid' || b.paymentMethod === 'Cash') return sum;
-      return sum + Math.max(0, Number(b.vendorPayout || 0)) + (b.tollsApproved === true ? Math.max(0, Number(b.tollCharges || 0)) : 0);
-    }, 0); emit();
-  }, () => { earned = 0; emit(); });
-  const b = onSnapshot(query(collection(db, 'payout_requests'), where('vendorId', '==', vendorId)), snap => {
-    reserved = snap.docs.reduce((sum, d) => ['Rejected', 'Cancelled'].includes(d.data().status) ? sum : sum + Number(d.data().amount || 0), 0); emit();
-  }, () => callback(0));
-  return () => { a(); b(); };
-}
 export async function acceptOfferedRate(tripId: string, vendorId: string, vendorName: string): Promise<void> {
   await runTransaction(db, async tx => {
     const ref = doc(db, 'marketplace_trips', tripId);
@@ -431,4 +244,14 @@ export async function acceptOfferedRate(tripId: string, vendorId: string, vendor
       vendorPayout: payout, confirmedAt: serverTimestamp(), updatedAt: serverTimestamp() });
     tx.update(ref, { status: 'Assigned', assignedVendorId: vendorId, assignedVendorName: vendorName, updatedAt: serverTimestamp() });
   });
+}
+
+/** Human message for a failed write or callable. */
+export function describeActionError(err: unknown, fallback: string): string {
+  const code = (err as { code?: string }).code || "";
+  const message = (err as { message?: string }).message || "";
+  if (code === "permission-denied") return "This change isn't allowed for your account or the record changed. Refresh and try again.";
+  if (/^functions\/(invalid-argument|failed-precondition|permission-denied|unauthenticated)$/.test(code) && message) return message;
+  if (!code && message) return message;
+  return fallback;
 }

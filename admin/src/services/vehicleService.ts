@@ -228,14 +228,17 @@ export function approvalBlockers(v: FleetVehicle, now = new Date()): string[] {
 
 // ── Availability (derived from bookings) ────────────────────────────────────
 
+/**
+ * The live trip this vehicle is on. Dispatch records the vehicle's document id
+ * (assignedVehicleId); bookings dispatched before that only carry the number.
+ */
 export function activeTripFor(v: FleetVehicle, bookings: Booking[]): Booking | null {
   const key = regKey(v.vehicleNumber);
-  if (!key) return null;
   return (
     bookings.find(
       (b) =>
         ACTIVE_TRIP_STATUSES.includes(b.status) &&
-        regKey(b.assignedVehicleNumber) === key,
+        (b.assignedVehicleId ? b.assignedVehicleId === v.id : !!key && regKey(b.assignedVehicleNumber) === key),
     ) ?? null
   );
 }

@@ -82,6 +82,11 @@ export interface FareBreakdown {
   nightCharge: number;
   driverAllowance: number;
   minimumFareAdjustment: number;
+  /** Pre-GST difference when NESAM agreed a different fare (set only by the booking server). */
+  adminAdjustment?: number;
+  /** Name and signed amount of the global % adjustment applied to the package, when one was. */
+  adjustmentName?: string;
+  adjustmentAmount?: number;
   subtotal: number;
   discount: number;
   taxableAmount: number;
@@ -97,7 +102,7 @@ export interface FareBreakdown {
 export type PaymentMethod = 'Cash' | 'UPI' | 'Wallet' | 'Card';
 export type TripType = 'One Way' | 'Round Trip';
 
-export type BookingStatus = 'Pending' | 'Confirmed' | 'Assigned' | 'Ongoing' | 'Completed' | 'Cancelled';
+export type BookingStatus = 'Pending' | 'Approved' | 'Confirmed' | 'Assigned' | 'Ongoing' | 'Completed' | 'Cancelled' | 'Rejected';
 export type TripStage =
   | 'Assigned'
   | 'En Route Pickup'
@@ -156,6 +161,10 @@ export interface TripRecord {
   phase: RidePhase;
   fare: number;
   fareBreakdown: FareBreakdown | null;
+  /** Charges outside the package that the customer pays separately (toll, parking, waiting…). */
+  fareExtras: { label: string; amount: number | null; detail: string }[];
+  /** Server-derived payment picture; null on bookings from before payments were recorded one by one. */
+  paid: { totalPaid: number; balanceDue: number; status: string } | null;
   tollCharges: number;
   couponCode: string;
   paymentMethod: PaymentMethod | string;

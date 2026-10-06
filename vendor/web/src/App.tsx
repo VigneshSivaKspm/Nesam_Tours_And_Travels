@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import {
+import type {
   VendorProfile,
   VendorRecord,
   FleetVehicle,
@@ -11,7 +11,6 @@ import {
   PayoutRequest,
   TransactionRecord,
 } from "./types";
-import { DEFAULT_WALLET } from "./config/constants";
 
 import { Header } from "./components/Header";
 import { Sidebar } from "./components/Sidebar";
@@ -23,6 +22,12 @@ import { MarketplaceBiddingScreen } from "./screens/MarketplaceBiddingScreen";
 import { TripAssignmentScreen } from "./screens/TripAssignmentScreen";
 import { WalletPayoutScreen } from "./screens/WalletPayoutScreen";
 import { DocumentsVerificationScreen } from "./screens/DocumentsVerificationScreen";
+import { NotificationsScreen } from "./screens/NotificationsScreen";
+import { NotificationPopups } from "./components/NotificationPopups";
+import { PenaltyAckModal } from "./components/PenaltyAckModal";
+import { LegalGate } from "./components/LegalGate";
+import type { PartnerNotification, PartnerPenalty } from "./notificationTypes";
+import { markNotificationRead, subscribeToVendorNotifications, subscribeToVendorPenalties } from "./services/partnerNotifications";
 
 const pageMeta: Record<string, { title: string; breadcrumb: string[] }> = {
   dashboard: {
@@ -50,21 +55,36 @@ const pageMeta: Record<string, { title: string; breadcrumb: string[] }> = {
     title: "Business Verification & Documents",
     breadcrumb: ["Compliance", "KYC Verification"],
   },
+  notifications: {
+    title: "Notifications & Penalties",
+    breadcrumb: ["Overview", "Notifications"],
+  },
 };
 
 import {
   acceptOfferedRate,
-  saveVehicleToFirestore,
-  inviteDriverByVendor,
-  subscribeToOpenMarketplaceTrips,
-  subscribeToFleetVehicles,
-  subscribeToFleetDrivers,
-  submitBidToFirestore,
   assignTripInFirestore,
-  submitPayoutRequestToFirestore,
+  createVehicle,
+  describeActionError,
+  inviteDriverByVendor,
+  pairVehicleDriver,
+  requestVendorPayout,
+  setDriverSuspended,
+  setVehicleStatus,
+  submitBidToFirestore,
+  subscribeToFleetDrivers,
+  subscribeToFleetVehicles,
+  subscribeToOpenMarketplaceTrips,
+  subscribeToVehicleCategories,
   subscribeToVendorActiveTrips,
+  subscribeToVendorBids,
+  subscribeToVendorLedger,
   subscribeToVendorPayouts,
+  subscribeToVendorWallet,
+  type NewVehicle,
+  type VehicleCategoryOption,
 } from "./services/vendorFirestoreService";
+import { EMPTY_WALLET } from "./services/vendorMappers";
 import type { User } from "firebase/auth";
 import {
   subscribeToAuthUser,
@@ -202,7 +222,11 @@ export function App() {
     );
   }
 
-  return <VendorDashboard profile={vendor.profile} record={vendor.record} />;
+  return (
+    <LegalGate role="vendor">
+      <VendorDashboard profile={vendor.profile} record={vendor.record} />
+    </LegalGate>
+  );
 }
 
 function VendorDashboard({
@@ -216,227 +240,101 @@ function VendorDashboard({
   const [collapsed, setCollapsed] = useState<boolean>(false);
   const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
 
-  // State Stores
+  // Live Firestore data only — nothing here is simulated or kept locally.
   const [vehicles, setVehicles] = useState<FleetVehicle[]>([]);
   const [drivers, setDrivers] = useState<FleetDriver[]>([]);
+  const [categories, setCategories] = useState<VehicleCategoryOption[]>([]);
   const [openTrips, setOpenTrips] = useState<OpenTrip[]>([]);
-  const [bidProposals, setBidProposals] = useState<BidProposal[]>([]);
+  const [bids, setBids] = useState<BidProposal[]>([]);
   const [activeTrips, setActiveTrips] = useState<VendorTrip[]>([]);
-  const [wallet, setWallet] = useState<WalletDetails>(DEFAULT_WALLET);
+  const [wallet, setWallet] = useState<WalletDetails>(EMPTY_WALLET);
   const [payoutRequests, setPayoutRequests] = useState<PayoutRequest[]>([]);
   const [transactions, setTransactions] = useState<TransactionRecord[]>([]);
+  const [loadError, setLoadError] = useState("");
+  const [retryKey, setRetryKey] = useState(0);
+  const [notifications, setNotifications] = useState<PartnerNotification[]>([]);
+  const [penalties, setPenalties] = useState<PartnerPenalty[]>([]);
+  const [penaltiesError, setPenaltiesError] = useState("");
+  const [ackPenaltyId, setAckPenaltyId] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
 
   // Firestore Subscriptions — mounted only for APPROVED vendors.
   useEffect(() => {
     const vendorId = profile.id;
-
-    const unsubMarketplace = subscribeToOpenMarketplaceTrips((liveTrips) => {
-      setOpenTrips(liveTrips);
-    });
-
-    const unsubVehicles = subscribeToFleetVehicles(vendorId, (liveVehicles) => {
-      setVehicles(liveVehicles);
-    });
-
-    const unsubDrivers = subscribeToFleetDrivers(vendorId, (liveDrivers) => {
-      setDrivers(liveDrivers);
-    });
-
-    const unsubActiveTrips = subscribeToVendorActiveTrips(
-      vendorId,
-      (liveActiveTrips) => {
-        setActiveTrips(liveActiveTrips);
-      },
-    );
-
-    const unsubPayouts = subscribeToVendorPayouts(vendorId, (livePayouts) => {
-      setPayoutRequests(livePayouts);
-    });
-
-    return () => {
-      unsubMarketplace();
-      unsubVehicles();
-      unsubDrivers();
-      unsubActiveTrips();
-      unsubPayouts();
-    };
-  }, [profile.id]);
+    setLoadError("");
+    const unsubs = [
+      subscribeToOpenMarketplaceTrips(setOpenTrips, setLoadError),
+      subscribeToVendorBids(vendorId, setBids, setLoadError),
+      subscribeToFleetVehicles(vendorId, setVehicles, setLoadError),
+      subscribeToFleetDrivers(vendorId, setDrivers, setLoadError),
+      subscribeToVehicleCategories(setCategories, setLoadError),
+      subscribeToVendorActiveTrips(vendorId, setActiveTrips, setLoadError),
+      subscribeToVendorPayouts(vendorId, setPayoutRequests, setLoadError),
+      subscribeToVendorWallet(vendorId, setWallet, setLoadError),
+      subscribeToVendorLedger(vendorId, setTransactions, setLoadError),
+      subscribeToVendorNotifications(vendorId, setNotifications),
+      subscribeToVendorPenalties(vendorId, (p) => { setPenalties(p); setPenaltiesError(""); }, setPenaltiesError),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, [profile.id, retryKey]);
 
   const navigate = (tab: string) => {
     setActiveTab(tab);
     setMobileNavOpen(false);
   };
 
+  // A penalty must be acknowledged (or disputed) before the vendor carries on.
+  const mustAcknowledge = penalties.find((p) => p.status === "Pending" && !p.acknowledged) ?? null;
+  const penaltyToShow = penalties.find((p) => p.id === ackPenaltyId && (p.status === "Pending" || p.status === "Acknowledged")) ?? mustAcknowledge;
+  const unreadNotifications = notifications.filter((n) => !n.read).length;
+
   const meta = pageMeta[activeTab] || pageMeta["dashboard"];
+  const vendorName = profile.companyName;
 
-  // Fleet Handlers
-  const handleAddVehicle = (newVehicle: FleetVehicle) => {
-    setVehicles([newVehicle, ...vehicles]);
-    saveVehicleToFirestore(newVehicle, profile.id);
-  };
-
-  const handleUpdateVehicleStatus = (
-    vehicleId: string,
-    status: FleetVehicle["status"],
-  ) => {
-    setVehicles((prev) =>
-      prev.map((v) => {
-        if (v.id === vehicleId) {
-          const updated = { ...v, status };
-          saveVehicleToFirestore(updated, profile.id);
-          return updated;
-        }
-        return v;
-      }),
-    );
-  };
-
-  const handleAssignDriver = (vehicleId: string, driverId: string) => {
-    const driver = drivers.find((d) => d.id === driverId);
-    setVehicles((prev) =>
-      prev.map((v) => {
-        if (v.id === vehicleId) {
-          const updated = {
-            ...v,
-            assignedDriverId: driverId || undefined,
-            assignedDriverName: driver?.name || undefined,
-          };
-          saveVehicleToFirestore(updated, profile.id);
-          return updated;
-        }
-        return v;
-      }),
-    );
-
-    if (driver) {
-      setDrivers((prev) =>
-        prev.map((d) => {
-          if (d.id === driverId) {
-            const updated = {
-              ...d,
-              assignedVehicleNumber: vehicles.find((v) => v.id === vehicleId)
-                ?.vehicleNumber,
-            };
-            return updated;
-          }
-          return d;
-        }),
-      );
+  // Every action awaits Firestore / the server and reports a real failure.
+  const run = async (work: () => Promise<unknown>, fallback: string) => {
+    try {
+      await work();
+    } catch (e) {
+      throw new Error(describeActionError(e, fallback));
     }
   };
 
-  const handleAddDriver = (newDriver: FleetDriver) => {
-    setDrivers([newDriver, ...drivers]);
-    inviteDriverByVendor(
-      newDriver.phone,
-      profile.id,
-      profile.companyName,
-      newDriver.assignedVehicleNumber,
-    );
+  // Fleet Handlers
+  const handleAddVehicle = (v: NewVehicle) =>
+    run(() => createVehicle(profile.id, v), "The vehicle was not saved. Please retry.");
+  const handleUpdateVehicleStatus = (vehicleId: string, status: FleetVehicle["status"]) =>
+    run(() => setVehicleStatus(vehicleId, status), "The vehicle status was not changed. Please retry.");
+  const handlePairDriver = (vehicleId: string, driverId: string) => {
+    const vehicle = vehicles.find((v) => v.id === vehicleId);
+    if (!vehicle) return Promise.reject(new Error("This vehicle is no longer in your fleet."));
+    const driver = driverId ? drivers.find((d) => d.id === driverId) ?? null : null;
+    return run(() => pairVehicleDriver(vehicle, driver, vehicles), "The driver was not paired. Please retry.");
   };
-
-  const handleUpdateDriverStatus = (
-    driverId: string,
-    status: FleetDriver["status"],
-  ) => {
-    setDrivers((prev) =>
-      prev.map((d) => {
-        if (d.id === driverId) {
-          const updated = { ...d, status };
-          // We cannot update driver docs. Let's just simulate locally or remove this
-          // saveDriverToFirestore(updated, profile.id);
-          return updated;
-        }
-        return d;
-      }),
-    );
-  };
+  const handleInviteDriver = (phone: string, vehicleNumber: string) =>
+    run(() => inviteDriverByVendor(phone, profile.id, vendorName, vehicleNumber), "The invitation was not saved. Please retry.");
+  const handleSetDriverSuspended = (driverId: string, suspended: boolean) =>
+    run(() => setDriverSuspended(driverId, suspended), "The driver status was not changed. Please retry.");
 
   // Marketplace & Bidding Handlers
   const handleAcceptOfferedRate = async (trip: OpenTrip) => {
-    try {
-      await acceptOfferedRate(trip.id, profile.id, profile.companyName || 'Vendor');
-      setActiveTab('trips');
-    } catch (e) {
-      window.alert(e instanceof Error ? e.message : 'Could not accept this trip. Please retry.');
-    }
+    await run(() => acceptOfferedRate(trip.id, profile.id, vendorName), "Could not accept this trip. Please retry.");
+    setActiveTab("trips");
   };
-  const handleSubmitCounterBid = (
-    trip: OpenTrip,
-    counterRate: number,
-    note: string,
-  ) => {
-    const newBid: BidProposal = {
-      id: `BID-${Math.floor(100 + Math.random() * 900)}`,
-      tripId: trip.id,
-      bookingId: trip.bookingId,
-      offeredPayout: trip.offeredPayout,
-      vendorCounterRate: counterRate,
-      biddingNote: note,
-      submittedAt: new Date().toLocaleTimeString("en-IN", {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-      status: "Pending Review",
-    };
-
-    setBidProposals([newBid, ...bidProposals]);
-    submitBidToFirestore(
-      newBid,
-      profile.id,
-      profile.companyName || "Vendor Partner",
-    );
-  };
+  const handleSubmitCounterBid = (trip: OpenTrip, counterRate: number, note: string) =>
+    run(() => submitBidToFirestore(trip, counterRate, note, profile.id, vendorName), "The bid was not submitted. Please retry.");
 
   // Dispatch Assignment
-  const handleAssignDriverAndVehicle = (
-    tripId: string,
-    driverId: string,
-    vehicleNumber: string,
-  ) => {
+  const handleAssignDriverAndVehicle = (tripId: string, driverId: string, vehicleId: string) => {
     const driver = drivers.find((d) => d.id === driverId);
-    setActiveTrips((prev) =>
-      prev.map((t) =>
-        t.id === tripId
-          ? {
-              ...t,
-              driverId: driverId,
-              driverName: driver?.name || t.driverName,
-              driverPhone: driver?.phone || t.driverPhone,
-              vehicleNumber: vehicleNumber,
-            }
-          : t,
-      ),
-    );
-    assignTripInFirestore(
-      tripId,
-      driverId,
-      driver?.name || "",
-      vehicleNumber,
-      profile.id,
-    );
+    const vehicle = vehicles.find((v) => v.id === vehicleId);
+    if (!driver || !vehicle) return Promise.reject(new Error("Choose a driver and a vehicle from your fleet."));
+    return run(() => assignTripInFirestore(tripId, driver, vehicle), "The trip was not dispatched. Please retry.");
   };
 
   // Wallet Payout Request
-  const handleRequestPayout = async (
-    amount: number,
-    method: "UPI" | "Bank Transfer",
-    details: string,
-  ) => {
-    const newRequest: PayoutRequest = {
-      id: `VPO-${crypto.randomUUID()}`,
-      amount: amount,
-      requestedAt: new Date().toLocaleString("en-IN", {
-        dateStyle: "medium",
-        timeStyle: "short",
-      }),
-      payoutMethod: method,
-      targetDetails: details,
-      status: "Pending",
-    };
-
-    await submitPayoutRequestToFirestore(newRequest, profile.id);
-  };
+  const handleRequestPayout = (amount: number, method: "UPI" | "Bank Transfer") =>
+    run(() => requestVendorPayout(`VPO-${crypto.randomUUID()}`, amount, method), "Payout request failed. Please retry.");
 
   return (
     <div
@@ -506,13 +404,21 @@ function VendorDashboard({
           onNavigate={navigate}
           wallet={wallet}
           profile={profile}
-          pendingBidsCount={
-            bidProposals.filter((b) => b.status === "Pending Review").length
-          }
+          pendingBidsCount={bids.filter((b) => b.status === "Pending Review").length}
+          unreadNotifications={unreadNotifications}
         />
 
         {/* Scrollable View Content */}
         <main className="flex-1 overflow-y-auto min-h-0 p-4 sm:p-6 lg:p-8">
+          {loadError && (
+            <div role="alert" className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-semibold flex items-center justify-between gap-3">
+              <span>{loadError}</span>
+              <button type="button" className="underline shrink-0" onClick={() => setRetryKey((k) => k + 1)}>
+                Retry
+              </button>
+            </div>
+          )}
+
           {activeTab === "dashboard" && (
             <DashboardScreen
               profile={profile}
@@ -529,9 +435,10 @@ function VendorDashboard({
             <FleetScreen
               vehicles={vehicles}
               drivers={drivers}
+              categories={categories}
               onAddVehicle={handleAddVehicle}
               onUpdateVehicleStatus={handleUpdateVehicleStatus}
-              onAssignDriver={handleAssignDriver}
+              onPairDriver={handlePairDriver}
             />
           )}
 
@@ -539,15 +446,15 @@ function VendorDashboard({
             <DriverManagementScreen
               drivers={drivers}
               vehicles={vehicles}
-              onAddDriver={handleAddDriver}
-              onUpdateDriverStatus={handleUpdateDriverStatus}
+              onInviteDriver={handleInviteDriver}
+              onSetSuspended={handleSetDriverSuspended}
             />
           )}
 
           {activeTab === "marketplace" && (
             <MarketplaceBiddingScreen
               openTrips={openTrips}
-              bidProposals={bidProposals}
+              bidProposals={bids}
               onAcceptOfferedRate={handleAcceptOfferedRate}
               onSubmitCounterBid={handleSubmitCounterBid}
             />
@@ -564,7 +471,7 @@ function VendorDashboard({
 
           {activeTab === "wallet" && (
             <WalletPayoutScreen
-              vendorId={profile.id}
+              profile={profile}
               wallet={wallet}
               payoutRequests={payoutRequests}
               transactions={transactions}
@@ -575,8 +482,43 @@ function VendorDashboard({
           {activeTab === "documents" && (
             <DocumentsVerificationScreen record={record} />
           )}
+
+          {activeTab === "notifications" && (
+            <NotificationsScreen
+              notifications={notifications}
+              penalties={penalties}
+              penaltiesError={penaltiesError}
+              onMarkRead={(id) => markNotificationRead(id).catch(() => undefined)}
+              onOpenPenalty={(p) => setAckPenaltyId(p.id)}
+            />
+          )}
         </main>
       </div>
+
+      {notice && (
+        <div role="status" className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 bg-emerald-600 text-white text-sm font-semibold px-4 py-2.5 rounded-xl shadow-xl" onAnimationEnd={() => setNotice("")}>
+          {notice}
+        </div>
+      )}
+      <NotificationPopups
+        notifications={notifications}
+        onOpen={(n) => {
+          markNotificationRead(n.id).catch(() => undefined);
+          const page = n.category === "penalties" ? "notifications" : ["marketplace", "trips", "wallet", "documents", "dashboard"].includes(n.ctaPage) ? n.ctaPage : n.category === "bookings" ? "marketplace" : "notifications";
+          navigate(page);
+        }}
+      />
+      {penaltyToShow && (
+        <PenaltyAckModal
+          key={penaltyToShow.id}
+          penalty={penaltyToShow}
+          onDone={(m) => {
+            setAckPenaltyId(null);
+            setNotice(m);
+            setTimeout(() => setNotice(""), 4000);
+          }}
+        />
+      )}
     </div>
   );
 }

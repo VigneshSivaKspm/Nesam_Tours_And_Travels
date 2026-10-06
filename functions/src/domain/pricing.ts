@@ -1,5 +1,5 @@
 // Authoritative fare policy. Client calculations are previews only.
-import { AppliedCoupon, Coupon, FareBreakdown, GeoPlace, RideCategory, RouteInfo, TripType } from './types';
+import { AppliedCoupon, Coupon, DiscountDetail, FareBreakdown, GeoPlace, RideCategory, RouteInfo, TripType } from './types';
 const GST_RATE = 0.05, NIGHT_END_HOUR = 6, NIGHT_START_HOUR = 22, OUTSTATION_THRESHOLD_KM = 40;
 const str = (v: unknown): string => typeof v === 'string' ? v : '';
 const num = (v: unknown, fallback = 0): number => typeof v === 'number' && Number.isFinite(v) ? v : fallback;
@@ -42,6 +42,15 @@ export function mapCategory(id: string, d: Record<string, any>): RideCategory | 
       nightCharge: num(f.nightAllowance),
       driverAllowance: num(f.outstationDriverBattaPerDay) || num(f.driverAllowance),
       outstationPerKmRate: num(f.outstationPerKmRate) || undefined,
+      extras: {
+        waitingPerHour: waitingPerHour,
+        extraKmRate: num(f.extraKmCharge) || perKmRate,
+        // Absent flags mean "not included": the customer pays at actuals.
+        tollIncluded: f.tollIncluded === true,
+        parkingIncluded: f.parkingIncluded === true,
+        permitCharge: num(f.permitCharge),
+        carrierCharge: num(f.carrierCharge),
+      },
     },
     displayOrder: num(d.displayOrder, 99),
   };
@@ -73,15 +82,37 @@ export function isNightTime(d: Date): boolean {
 
 // ── Fare engine ─────────────────────────────────────────────────────────────
 
+/** business_config/fare_adjustment, as the engine consumes it. */
+export interface FareAdjustmentInput {
+  id: string;
+  name: string;
+  direction: 'increase' | 'decrease';
+  /** 0–100. */
+  percent: number;
+}
+
+/** A discount an admin gives on a booking: one mode at a time, never stacked with a coupon. */
+export interface AdminDiscountInput {
+  type: 'percentage' | 'fixed';
+  value: number;
+  reason?: string;
+}
+
 export interface FareInput {
   category: RideCategory;
   route: RouteInfo;
   tripType: TripType;
   pickupTime: Date;
+  /** Coupon discount in rupees (customer bookings). */
   discount?: number;
+  /** Global percentage adjustment, applied once to the package total. */
+  adjustment?: FareAdjustmentInput | null;
+  /** Admin percentage / fixed discount (admin bookings). */
+  adminDiscount?: AdminDiscountInput | null;
 }
 
-export function calculateFare({ category, route, tripType, pickupTime, discount = 0 }: FareInput): FareBreakdown {
+export function calculateFare({ category, route, tripType, pickupTime, discount = 0, adjustment = null, adminDiscount = null }: FareInput): FareBreakdown {
+  if (adminDiscount && discount > 0) throw new Error('A booking takes either a coupon or an admin discount, not both.');
   const f = category.fare;
   const legs = tripType === 'Round Trip' ? 2 : 1;
   const km = route.distanceKm * legs;
@@ -101,12 +132,35 @@ export function calculateFare({ category, route, tripType, pickupTime, discount 
 
   const raw = baseFare + distanceFare + timeFare + nightCharge + driverAllowance;
   const minimumFareAdjustment = Math.max(0, Math.round(f.minimumFare) - raw);
-  const subtotal = raw + minimumFareAdjustment;
-  const appliedDiscount = Math.min(Math.max(0, Math.round(discount)), subtotal);
+  const subtotalBeforeAdjustment = raw + minimumFareAdjustment;
+  // One percentage of the pre-adjustment total. Never applied to an already
+  // adjusted figure, so a later change cannot compound.
+  const percent = adjustment ? Math.min(100, Math.max(0, adjustment.percent)) : 0;
+  const adjustmentAmount = adjustment && percent > 0
+    ? (adjustment.direction === 'decrease' ? -1 : 1) * Math.round((subtotalBeforeAdjustment * percent) / 100)
+    : 0;
+  const subtotal = Math.max(0, subtotalBeforeAdjustment + adjustmentAmount);
+  const globalAdjustment = adjustment && percent > 0
+    ? { id: adjustment.id, name: adjustment.name, direction: adjustment.direction, percent, amount: adjustmentAmount }
+    : null;
+
+  let requested = Math.max(0, Math.round(discount));
+  let discountDetail: DiscountDetail | null = requested > 0 ? { type: 'coupon', value: requested, amount: 0, source: 'coupon', reason: '' } : null;
+  if (adminDiscount) {
+    const v = Math.max(0, adminDiscount.value);
+    requested = adminDiscount.type === 'percentage' ? Math.round((subtotal * Math.min(100, v)) / 100) : Math.round(v);
+    discountDetail = requested > 0 ? { type: adminDiscount.type, value: v, amount: 0, source: 'admin', reason: adminDiscount.reason ?? '' } : null;
+  }
+  // The payable amount can never go below zero.
+  const appliedDiscount = Math.min(requested, subtotal);
+  if (discountDetail) discountDetail.amount = appliedDiscount;
   const taxableAmount = subtotal - appliedDiscount;
   const gst = Math.round(taxableAmount * GST_RATE);
 
   return {
+    subtotalBeforeAdjustment,
+    globalAdjustment,
+    discountDetail,
     baseFare,
     distanceFare,
     timeFare,
@@ -124,6 +178,26 @@ export function calculateFare({ category, route, tripType, pickupTime, discount 
     perKmRate,
     perMinuteRate,
   };
+}
+
+/** Splits a GST-inclusive total the way calculateFare rounds GST. */
+export function splitGstInclusive(total: number): { taxableAmount: number; gst: number } {
+  let taxable = Math.floor(total / (1 + GST_RATE));
+  while (taxable + 1 + Math.round((taxable + 1) * GST_RATE) <= total) taxable++;
+  while (taxable > 0 && taxable + Math.round(taxable * GST_RATE) > total) taxable--;
+  return { taxableAmount: taxable, gst: total - taxable };
+}
+
+/**
+ * An admin-authorised fare: the calculated components are kept and the
+ * difference is recorded as `adminAdjustment` (pre-GST), so the breakdown
+ * still adds up to the charged total.
+ */
+export function applyFareOverride(calculated: FareBreakdown, total: number): FareBreakdown {
+  const { taxableAmount, gst } = splitGstInclusive(total);
+  const subtotal = taxableAmount + calculated.discount;
+  const computedSubtotal = calculated.subtotal - (calculated.adminAdjustment ?? 0);
+  return { ...calculated, adminAdjustment: subtotal - computedSubtotal, subtotal, taxableAmount, gst, total };
 }
 
 // ── Coupons ─────────────────────────────────────────────────────────────────

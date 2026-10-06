@@ -1,11 +1,19 @@
-import React, { useState, useEffect } from "react";
-import { Customer } from "../types";
+import React, { useState, useEffect, useMemo } from "react";
+import type { Booking, Customer } from "../types";
 import {
+  subscribeBookings,
   subscribeCustomers,
   addFirestoreDocument,
   updateFirestoreDocument,
   COLLECTIONS,
 } from "../services/adminFirestoreService";
+import { buildCustomerStats, EMPTY_STATS } from "../services/customerStats";
+import { ErrorBanner } from "../components/Feedback";
+
+const rupees = (n: number) => `₹${Math.round(n).toLocaleString("en-IN")}`;
+const dateLabel = (d: Date | null) => (d ? d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "—");
+/** Older records stored N/A as the email when none was given. */
+const emailOf = (c: Customer) => (c.email && c.email !== "N/A" ? c.email : "");
 
 // Phone normalization utilities
 export function getCanonicalPhoneDigits(input: string): string {
@@ -27,8 +35,19 @@ export function formatIndianPhone(input: string): string {
   return input.trim();
 }
 
+// Stored customer statuses: "Approved" (shown as Active) or "Blocked".
+// Legacy "Active" still counts as active; any other value (or none) blocks
+// the account, exactly as firestore.rules and the booking server do.
+export const CUSTOMER_ACTIVE = "Approved";
+export const CUSTOMER_BLOCKED = "Blocked";
+export const isCustomerActive = (status?: string) => status === CUSTOMER_ACTIVE || status === "Active";
+const statusLabel = (status?: string) => (isCustomerActive(status) ? "Active" : "Blocked");
+
 export default function Customers() {
   const [customerList, setCustomerList] = useState<Customer[]>([]);
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
   // Modals & Drawers State
@@ -40,8 +59,8 @@ export default function Customers() {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
-  const [status, setStatus] = useState<"Active" | "Blocked" | "Inactive">("Active");
-  const [gender, setGender] = useState<string>("Male");
+  const [status, setStatus] = useState<string>(CUSTOMER_ACTIVE);
+  const [gender, setGender] = useState<string>("");
   const [city, setCity] = useState("");
   const [notes, setNotes] = useState("");
 
@@ -54,14 +73,17 @@ export default function Customers() {
   // Edit Form State
   const [editName, setEditName] = useState("");
   const [editEmail, setEditEmail] = useState("");
-  const [editStatus, setEditStatus] = useState<string>("Active");
+  const [editStatus, setEditStatus] = useState<string>(CUSTOMER_ACTIVE);
   const [editCity, setEditCity] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
 
   useEffect(() => {
-    const unsub = subscribeCustomers(setCustomerList);
-    return () => unsub();
+    const unsubs = [subscribeCustomers(setCustomerList, setLoadError), subscribeBookings(setBookings, setLoadError)];
+    return () => unsubs.forEach((u) => u());
   }, []);
+
+  const stats = useMemo(() => buildCustomerStats(customerList, bookings), [customerList, bookings]);
+  const statsOf = (c: Customer) => stats.get(c.id) ?? EMPTY_STATS;
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -72,8 +94,8 @@ export default function Customers() {
     setName("");
     setPhone("");
     setEmail("");
-    setStatus("Active");
-    setGender("Male");
+    setStatus(CUSTOMER_ACTIVE);
+    setGender("");
     setCity("");
     setNotes("");
     setFormError(null);
@@ -141,21 +163,19 @@ export default function Customers() {
 
     try {
       const normalizedPhone = formatIndianPhone(phone);
-      const customId = `CUS-${Math.floor(1000 + Math.random() * 9000)}`;
 
-      const customerPayload: any = {
-        id: customId,
+      // Only what the admin entered. Booking counts and spend are derived
+      // from bookings, never stored here.
+      const customerPayload = {
         name: name.trim(),
         phone: normalizedPhone,
-        email: email.trim() || "N/A",
-        bookings: 0,
-        spent: "₹0",
-        wallet: "₹0",
+        email: email.trim(),
         status: status,
-        lastBooking: "—",
+        role: "customer",
+        source: "admin",
         gender: gender,
-        city: city.trim() || "Chennai",
-        notes: notes.trim() || "",
+        city: city.trim(),
+        notes: notes.trim(),
       };
 
       // 5. Database Save
@@ -165,7 +185,6 @@ export default function Customers() {
       );
 
       if (docId) {
-        setCustomerList((prev) => [{ id: docId, ...customerPayload } as Customer, ...prev]);
         showToast(`Customer ${name.trim()} added successfully!`);
         setShowAddModal(false);
         resetAddForm();
@@ -185,8 +204,13 @@ export default function Customers() {
     e.preventDefault();
     if (!selectedEditCustomer) return;
 
+    setEditError(null);
     if (!editName.trim()) {
-      alert("Name cannot be empty.");
+      setEditError("Name cannot be empty.");
+      return;
+    }
+    if (editEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(editEmail.trim())) {
+      setEditError("Please enter a valid email address.");
       return;
     }
 
@@ -196,48 +220,40 @@ export default function Customers() {
       selectedEditCustomer.id,
       {
         name: editName.trim(),
-        email: editEmail.trim() || "N/A",
+        email: editEmail.trim(),
         status: editStatus,
-        city: editCity.trim() || "Chennai",
+        city: editCity.trim(),
       }
     );
 
     setSavingEdit(false);
     if (ok) {
-      setCustomerList((prev) => prev.map((c) => c.id === selectedEditCustomer.id ? {
-        ...c,
-        name: editName.trim(),
-        email: editEmail.trim() || "N/A",
-        status: editStatus,
-        city: editCity.trim() || "Chennai",
-      } : c));
       showToast("Customer profile updated successfully!");
       setSelectedEditCustomer(null);
     } else {
-      alert("Failed to update customer.");
+      setEditError("The profile was not updated. Check your connection and permissions, then try again.");
     }
   };
 
   // Block / Unblock Toggle Action
   const handleToggleBlock = async (c: Customer) => {
-    const newStatus = c.status === "Blocked" ? "Active" : "Blocked";
+    const newStatus = isCustomerActive(c.status) ? CUSTOMER_BLOCKED : CUSTOMER_ACTIVE;
     const ok = await updateFirestoreDocument(
       COLLECTIONS.CUSTOMERS,
       c.id,
       { status: newStatus }
     );
-    if (ok) {
-      showToast(`Customer ${c.name} is now ${newStatus}`);
-    }
+    showToast(ok ? `Customer ${c.name} is now ${statusLabel(newStatus).toLowerCase()}` : `Could not change ${c.name}'s status. Check your connection and permissions.`);
   };
 
   // Open Edit Modal
   const handleOpenEdit = (c: Customer) => {
     setSelectedEditCustomer(c);
+    setEditError(null);
     setEditName(c.name);
-    setEditEmail(c.email === "N/A" ? "" : c.email || "");
-    setEditStatus(c.status);
-    setEditCity((c as any).city || "Chennai");
+    setEditEmail(emailOf(c));
+    setEditStatus(isCustomerActive(c.status) ? CUSTOMER_ACTIVE : CUSTOMER_BLOCKED);
+    setEditCity(c.city || "");
   };
 
   const filtered = customerList.filter(
@@ -251,7 +267,6 @@ export default function Customers() {
 
   const statusColor: Record<string, string> = {
     Active: "text-green-700 bg-green-50 border-green-200",
-    Inactive: "text-gray-600 bg-gray-100 border-gray-200",
     Blocked: "text-[#E21B23] bg-red-50 border-red-200",
   };
 
@@ -265,6 +280,8 @@ export default function Customers() {
         </div>
       )}
 
+      {loadError && <ErrorBanner message={loadError} />}
+
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
@@ -276,7 +293,7 @@ export default function Customers() {
           {
             label: "Active",
             value: customerList
-              .filter((c) => c.status === "Active")
+              .filter((c) => isCustomerActive(c.status))
               .length.toString(),
             color: "#10B981",
           },
@@ -301,7 +318,7 @@ export default function Customers() {
           {
             label: "Blocked",
             value: customerList
-              .filter((c) => c.status === "Blocked")
+              .filter((c) => !isCustomerActive(c.status))
               .length.toString(),
             color: "#F59E0B",
           },
@@ -374,8 +391,8 @@ export default function Customers() {
                   "Customer",
                   "Phone",
                   "Email",
-                  "Total Bookings",
-                  "Total Spent",
+                  "Bookings",
+                  "Paid",
                   "Last Booking",
                   "Status",
                   "Actions",
@@ -426,27 +443,27 @@ export default function Customers() {
                       {c.phone}
                     </td>
                     <td className="px-4 py-3 text-[12px] text-[#666]">
-                      {c.email}
+                      {emailOf(c) || "—"}
                     </td>
                     <td className="px-4 py-3 text-[12px] font-semibold text-[#111] text-center">
-                      {c.bookings || 0}
+                      {statsOf(c).total}
                     </td>
                     <td
                       className="px-4 py-3 text-[12px] font-semibold"
                       style={{ color: "#E21B23" }}
                     >
-                      {c.spent || "₹0"}
+                      {rupees(statsOf(c).paid)}
                     </td>
                     <td className="px-4 py-3 text-[11px] text-[#666]">
-                      {c.lastBooking || "—"}
+                      {dateLabel(statsOf(c).lastBookingAt)}
                     </td>
                     <td className="px-4 py-3">
                       <span
                         className={`inline-flex px-2 py-0.5 rounded-full text-[11px] font-semibold border ${
-                          statusColor[c.status] || statusColor["Active"]
+                          statusColor[statusLabel(c.status)]
                         }`}
                       >
-                        {c.status || "Active"}
+                        {statusLabel(c.status)}
                       </span>
                     </td>
                     <td className="px-4 py-3">
@@ -466,12 +483,12 @@ export default function Customers() {
                         <button
                           onClick={() => handleToggleBlock(c)}
                           className={`text-[11px] px-2 py-1 rounded-md border border-[#E5E5E5] font-medium transition-colors ${
-                            c.status === "Blocked"
+                            !isCustomerActive(c.status)
                               ? "text-green-700 hover:bg-green-50"
                               : "text-amber-700 hover:bg-amber-50"
                           }`}
                         >
-                          {c.status === "Blocked" ? "Unblock" : "Block"}
+                          {!isCustomerActive(c.status) ? "Unblock" : "Block"}
                         </button>
                       </div>
                     </td>
@@ -616,12 +633,11 @@ export default function Customers() {
                   </label>
                   <select
                     value={status}
-                    onChange={(e) => setStatus(e.target.value as any)}
+                    onChange={(e) => setStatus(e.target.value)}
                     className="w-full p-2.5 bg-gray-50 border border-gray-300 rounded-lg text-xs font-medium focus:ring-2 focus:ring-red-500 focus:bg-white"
                   >
-                    <option value="Active">Active</option>
-                    <option value="Inactive">Inactive</option>
-                    <option value="Blocked">Blocked</option>
+                    <option value={CUSTOMER_ACTIVE}>Active</option>
+                    <option value={CUSTOMER_BLOCKED}>Blocked</option>
                   </select>
                 </div>
 
@@ -632,7 +648,7 @@ export default function Customers() {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. Chennai"
+                    placeholder="City"
                     value={city}
                     onChange={(e) => setCity(e.target.value)}
                     className="w-full p-2.5 bg-gray-50 border border-gray-300 rounded-lg text-xs focus:ring-2 focus:ring-red-500 focus:bg-white"
@@ -649,6 +665,7 @@ export default function Customers() {
                     onChange={(e) => setGender(e.target.value)}
                     className="w-full p-2.5 bg-gray-50 border border-gray-300 rounded-lg text-xs font-medium focus:ring-2 focus:ring-red-500 focus:bg-white"
                   >
+                    <option value="">Not specified</option>
                     <option value="Male">Male</option>
                     <option value="Female">Female</option>
                     <option value="Other">Other</option>
@@ -743,31 +760,42 @@ export default function Customers() {
               </div>
               <div className="flex justify-between py-1 border-b border-gray-200">
                 <span className="font-semibold text-gray-500">Email:</span>
-                <span>{selectedViewCustomer.email}</span>
+                <span>{emailOf(selectedViewCustomer) || "—"}</span>
               </div>
               <div className="flex justify-between py-1 border-b border-gray-200">
                 <span className="font-semibold text-gray-500">Status:</span>
-                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${statusColor[selectedViewCustomer.status] || ""}`}>
-                  {selectedViewCustomer.status}
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${statusColor[statusLabel(selectedViewCustomer.status)]}`}>
+                  {statusLabel(selectedViewCustomer.status)}
                 </span>
               </div>
-              <div className="flex justify-between py-1 border-b border-gray-200">
-                <span className="font-semibold text-gray-500">Total Bookings:</span>
-                <span className="font-bold">{selectedViewCustomer.bookings || 0}</span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-gray-200">
-                <span className="font-semibold text-gray-500">Total Spent:</span>
-                <span className="font-bold text-red-600">
-                  {selectedViewCustomer.spent || "₹0"}
-                </span>
-              </div>
-              <div className="flex justify-between py-1 border-b border-gray-200">
-                <span className="font-semibold text-gray-500">Last Booking:</span>
-                <span>{selectedViewCustomer.lastBooking || "—"}</span>
-              </div>
+              {(() => {
+                const st = statsOf(selectedViewCustomer);
+                return (
+                  <>
+                    <div className="flex justify-between py-1 border-b border-gray-200">
+                      <span className="font-semibold text-gray-500">Bookings:</span>
+                      <span className="font-bold">
+                        {st.total} total • {st.completed} completed • {st.cancelled} cancelled
+                      </span>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-gray-200">
+                      <span className="font-semibold text-gray-500">Paid:</span>
+                      <span className="font-bold text-red-600">{rupees(st.paid)}</span>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-gray-200">
+                      <span className="font-semibold text-gray-500">Unpaid completed trips:</span>
+                      <span className="font-bold">{st.outstanding > 0 ? rupees(st.outstanding) : "—"}</span>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-gray-200">
+                      <span className="font-semibold text-gray-500">Last Booking:</span>
+                      <span>{dateLabel(st.lastBookingAt)}</span>
+                    </div>
+                  </>
+                );
+              })()}
               <div className="flex justify-between py-1">
                 <span className="font-semibold text-gray-500">City / Location:</span>
-                <span>{(selectedViewCustomer as any).city || "Chennai"}</span>
+                <span>{selectedViewCustomer.city || "—"}</span>
               </div>
             </div>
 
@@ -800,6 +828,11 @@ export default function Customers() {
             </div>
 
             <form onSubmit={handleSaveEdit} className="space-y-3 text-xs">
+              {editError && (
+                <div role="alert" className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-lg font-semibold">
+                  {editError}
+                </div>
+              )}
               <div>
                 <label className="block font-semibold text-gray-700 mb-1">
                   Full Name
@@ -846,9 +879,8 @@ export default function Customers() {
                   onChange={(e) => setEditStatus(e.target.value)}
                   className="w-full p-2.5 bg-gray-50 border border-gray-300 rounded-lg text-xs font-medium"
                 >
-                  <option value="Active">Active</option>
-                  <option value="Inactive">Inactive</option>
-                  <option value="Blocked">Blocked</option>
+                  <option value={CUSTOMER_ACTIVE}>Active</option>
+                  <option value={CUSTOMER_BLOCKED}>Blocked</option>
                 </select>
               </div>
 

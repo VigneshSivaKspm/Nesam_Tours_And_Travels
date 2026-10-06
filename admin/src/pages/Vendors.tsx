@@ -1,3 +1,4 @@
+import { formatDateTime12, formatShortDateTime12, formatHourLabel } from "../utils/time";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { subscribeToCollection, COLLECTIONS } from "../services/adminFirestoreService";
 import {
@@ -89,7 +90,7 @@ const toDate = (ts: any): Date | null => {
   return null;
 };
 const fmtDate = (ts: any) =>
-  toDate(ts)?.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) ?? "—";
+  formatDateTime12(toDate(ts)) || "—";
 
 const displayName = (v: VendorDoc) => v.business?.businessName || v.companyName || v.name || "Unnamed vendor";
 const ownerName = (v: VendorDoc) => v.business?.vendorName || v.contactPerson || v.owner || "—";

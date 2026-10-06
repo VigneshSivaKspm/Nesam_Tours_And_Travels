@@ -1,7 +1,10 @@
+import { formatDateTime12, formatShortDateTime12, formatHourLabel } from "../utils/time";
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { useEffect, useMemo, useState } from "react";
+import type { Booking } from "../types";
 import {
+  subscribeBookings,
   subscribeToCollection,
   updateFirestoreDocument,
   setFirestoreDocument,
@@ -29,7 +32,6 @@ interface DriverDoc {
   rejectionReason?: string;
   vendorName?: string;
   rating?: number;
-  totalTrips?: number;
   vehicleNumber?: string;
   vehicleType?: string;
   licenseNumber?: string;
@@ -54,7 +56,7 @@ const toDate = (v: any): Date | null => {
   return Number.isNaN(d.getTime()) ? null : d;
 };
 const fmtDate = (v: any) =>
-  toDate(v)?.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) ?? "—";
+  formatDateTime12(toDate(v)) || "—";
 
 const statusPill: Record<string, string> = {
   Pending: "bg-yellow-50 text-yellow-700 border-yellow-200",
@@ -101,6 +103,11 @@ async function notifyDriver(driverId: string, title: string, message: string) {
     recipientId: driverId,
     recipientType: "driver",
     type: "driver",
+    // Approval / rejection decisions use the approval tab and tone in the driver app.
+    category: "approvals",
+    severity: /reject|declin|correction/i.test(title) ? "warning" : "success",
+    sound: "approval",
+    push: true,
     channel: "In-App",
     title,
     message,
@@ -122,6 +129,14 @@ export default function Drivers() {
   const [inviteMsg, setInviteMsg] = useState("");
 
   useEffect(() => subscribeToCollection<DriverDoc>(COLLECTIONS.DRIVERS, setDrivers), []);
+  // Completed trips are counted from bookings, not from a stored counter.
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  useEffect(() => subscribeBookings(setBookings), []);
+  const completedTrips = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const b of bookings) if (b.status === "Completed" && b.assignedDriverId) m.set(b.assignedDriverId, (m.get(b.assignedDriverId) ?? 0) + 1);
+    return m;
+  }, [bookings]);
 
   // Keep the open review modal in sync with live data.
   const [privateData, setPrivateData] = useState<{ id: string; fields: Partial<DriverDoc> } | null>(null);
@@ -396,7 +411,7 @@ export default function Drivers() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-[11px] text-[#666]">{r.presenceStatus || "Offline"}</td>
-                  <td className="px-4 py-3 text-[12px] font-semibold text-center">{r.totalTrips ?? 0}</td>
+                  <td className="px-4 py-3 text-[12px] font-semibold text-center">{completedTrips.get(r.id) ?? 0}</td>
                   <td className="px-4 py-3">
                     <button
                       onClick={() => openReview(r)}

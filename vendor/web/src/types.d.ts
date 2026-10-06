@@ -20,24 +20,25 @@ export interface VendorProfile {
   upiId: string;
 }
 
+/** vehicles/{id} owned by this vendor, as stored (no display defaults). */
 export interface FleetVehicle {
   id: string;
   vehicleNumber: string;
-  category: 'Sedan' | 'SUV' | 'Mini' | 'Luxury' | 'Tempo Traveller';
+  category: string;
+  categoryId: string;
   make: string;
   model: string;
   year: string;
-  seatingCapacity: number;
-  status: 'Active' | 'On Trip' | 'Maintenance' | 'Inactive';
-  assignedDriverId?: string;
-  assignedDriverName?: string;
-  rcDocUrl?: string;
-  insuranceDocUrl?: string;
-  fitnessDocUrl?: string;
-  statePermitDocUrl?: string;
+  /** null when not recorded. */
+  seatingCapacity: number | null;
+  status: 'Active' | 'Maintenance' | 'Inactive';
+  assignedDriverId: string;
+  assignedDriverName: string;
   docStatus: VerificationStatus;
+  rejectionReason: string;
 }
 
+/** drivers/{uid} in this vendor's fleet, as stored. */
 export interface FleetDriver {
   id: string;
   name: string;
@@ -46,13 +47,16 @@ export interface FleetDriver {
   photoUrl: string;
   licenseNumber: string;
   licenseExpiry: string;
-  licenseFrontUrl?: string;
-  licenseBackUrl?: string;
-  status: 'Available' | 'On Trip' | 'Offline' | 'Suspended';
-  assignedVehicleNumber?: string;
-  rating: number;
-  totalTrips: number;
-  docStatus: VerificationStatus;
+  /** Account review by NESAM. */
+  accountStatus: VerificationStatus;
+  /** Suspended by the fleet (vendor). */
+  suspended: boolean;
+  /** Duty status reported by the driver app. */
+  online: boolean;
+  assignedVehicleId: string;
+  assignedVehicleNumber: string;
+  /** null until the driver has ratings. */
+  rating: number | null;
 }
 
 export interface OpenTrip {
@@ -69,21 +73,23 @@ export interface OpenTrip {
     city: string;
   };
   travelDate: string;
-  vehicleCategory: 'Sedan' | 'SUV' | 'Mini' | 'Luxury' | 'Tempo Traveller';
-  distanceKm: number;
-  offeredPayout: number; // Customer/Platform offered payout
-  status: 'Open' | 'Bidding' | 'Assigned' | 'Cancelled';
+  vehicleCategory: string;
+  distanceKm: number | null;
+  /** Partner payout offered by the platform; null = not valid (cannot be accepted). */
+  offeredPayout: number | null;
+  status: 'Open' | 'Bidding';
 }
 
+/** marketplace_trips/{tripId}/bids/{id} submitted by this vendor. */
 export interface BidProposal {
   id: string;
   tripId: string;
   bookingId: string;
-  offeredPayout: number;
-  vendorCounterRate: number; // Proposed payout
-  biddingNote?: string;
-  submittedAt: string;
-  status: 'Pending Review' | 'Accepted' | 'Rejected' | 'Outbid';
+  offeredPayout: number | null;
+  vendorCounterRate: number;
+  biddingNote: string;
+  submittedAt: Date | null;
+  status: string;
 }
 
 export interface VendorTrip {
@@ -94,45 +100,66 @@ export interface VendorTrip {
   pickupAddress: string;
   dropAddress: string;
   scheduledTime: string;
+  vehicleId: string;
   vehicleNumber: string;
   driverId: string;
   driverName: string;
   driverPhone: string;
-  grossFare: number;
-  platformFee: number; // 10%
-  vendorPayout: number;
-  status: 'Assigned' | 'En Route Pickup' | 'Reached Pickup' | 'In Progress' | 'Completed' | 'Cancelled';
+  /** Customer fare incl. GST; null when not recorded. */
+  grossFare: number | null;
+  /** Agreed payout for this trip (accepted offer or awarded bid); null when not recorded. */
+  vendorPayout: number | null;
+  status: string;
+  tripStage: string;
+  /** Not Started / Trip Started / Reached Pickup / Trip Ended (blank on older trips). */
+  tripSubStatus: string;
+  /** The driver has submitted the three vehicle photos for this trip. */
+  verificationSubmitted: boolean;
+  verificationRisk: string;
+  /** Derived by the server from the recorded payments; blank on older trips. */
+  paymentStatus: string;
+  totalPaid: number | null;
+  balanceDue: number | null;
+  fareLines: { key: string; label: string; amount: number | null; treatment: string; detail: string }[];
 }
 
+/** wallets/vendor_{uid} — computed by the server from the partner ledger. */
 export interface WalletDetails {
-  availableBalance: number;
-  pendingBalance: number;
-  lifetimeEarnings: number;
-  upiId: string;
-  bankAccountName: string;
-  bankAccountNumber: string;
-  ifscCode: string;
+  /** Withdrawable now; negative when cash collected exceeds earnings. */
+  available: number;
+  /** Earnings on trips whose customer payment is not verified yet. */
+  pending: number;
+  /** Held for open payout requests. */
+  reserved: number;
+  paidOut: number;
+  cashCollected: number;
+  tripEarnings: number;
+  tollReimbursements: number;
+  updatedAt: Date | null;
 }
 
 export interface PayoutRequest {
   id: string;
   amount: number;
-  requestedAt: string;
-  processedAt?: string;
-  payoutMethod: 'UPI' | 'Bank Transfer';
+  requestedAt: Date | null;
+  processedAt: string;
+  payoutMethod: string;
   targetDetails: string;
-  status: 'Pending' | 'Approved' | 'Completed' | 'Rejected';
+  status: string;
+  utr: string;
+  adminNote: string;
 }
 
+/** wallet_ledger entry (schema 2) for this vendor. */
 export interface TransactionRecord {
   id: string;
-  tripId?: string;
-  type: 'Trip Revenue' | 'Platform Fee' | 'Payout Withdrawal';
+  type: string;
+  direction: 'credit' | 'debit';
   amount: number;
-  isCredit: boolean;
-  timestamp: string;
-  description: string;
-  status: 'Success' | 'Processing' | 'Failed';
+  status: string;
+  bookingCode: string;
+  payoutRequestId: string;
+  createdAt: Date | null;
 }
 
 // ─── Vendor onboarding / approval pipeline ──────────────────────────────────

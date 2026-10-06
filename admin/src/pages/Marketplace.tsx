@@ -4,8 +4,10 @@ import { db } from '../services/firebase';
 import { subscribeMarketplace, subscribeDrivers } from '../services/adminFirestoreService';
 import { awardBid, rejectBid, postBooking, assignIndependentDriver } from '../services/marketplaceService';
 import type { MarketplaceTrip, Driver } from '../types';
+import { useCan } from '../components/AccessContext';
 
 export default function Marketplace() {
+  const canFinance = useCan('finance');
   const [trips, setTrips] = useState<MarketplaceTrip[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [expanded, setExpanded] = useState('');
@@ -32,10 +34,11 @@ export default function Marketplace() {
   return <div className="p-6 space-y-5">
     <h1 className="text-xl font-bold">Marketplace &amp; Bidding</h1>
     {error && <div role="alert" className="p-3 bg-red-50 text-red-700 rounded-lg">{error}</div>}
-    <form className="bg-white border rounded-xl p-4 flex flex-wrap gap-3" onSubmit={e => { e.preventDefault(); void act(async () => { await postBooking(bookingCode, Number(payout)); setBookingCode(''); setPayout(''); }); }}>
-      <label className="text-sm">Reviewed booking code / ID<input required value={bookingCode} onChange={e => setBookingCode(e.target.value)} className="block border p-2 rounded" /></label>
-      <label className="text-sm">Partner payout (₹)<input required type="number" min="1" step="1" value={payout} onChange={e => setPayout(e.target.value)} className="block border p-2 rounded" /></label>
-      <button disabled={busy} className="bg-red-600 text-white px-4 rounded disabled:opacity-50">Post reviewed booking</button>
+    <form className="bg-white border rounded-xl p-4 flex flex-wrap items-end gap-3" onSubmit={e => { e.preventDefault(); void act(async () => { await postBooking(bookingCode, payout.trim() ? Number(payout) : null); setBookingCode(''); setPayout(''); }); }}>
+      <label className="text-sm">Booking code / ID (fare verified)<input required value={bookingCode} onChange={e => setBookingCode(e.target.value)} className="block border p-2 rounded" /></label>
+      {canFinance && <label className="text-sm">Partner payout (₹, optional)<input type="number" min="1" step="1" value={payout} onChange={e => setPayout(e.target.value)} placeholder="From commission policy" className="block border p-2 rounded" /></label>}
+      <button disabled={busy} className="bg-red-600 text-white px-4 py-2 rounded disabled:opacity-50">Post to marketplace</button>
+      <p className="basis-full text-xs text-gray-500">The partner offer comes from the commission policy{canFinance ? ' unless you enter a payout (recorded as a manual payout)' : ''}.</p>
     </form>
     <label className="text-sm">Status <select value={filter} onChange={e => setFilter(e.target.value)} className="border p-2 rounded">{['All','Open','Bidding','Assigned','Closed'].map(s => <option key={s}>{s}</option>)}</select></label>
     {trips.filter(t => filter === 'All' || t.status === filter).map(t => <article key={t.id} className="bg-white border rounded-xl p-4 space-y-3">

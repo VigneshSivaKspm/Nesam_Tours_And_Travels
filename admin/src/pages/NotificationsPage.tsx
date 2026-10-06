@@ -1,4 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
+import { CATEGORIES, CATEGORY_LABEL, categoryOf } from "../services/notificationModel";
+import DeliveryLog from "../components/DeliveryLog";
 import { NotificationRecord } from "../types";
 import {
   subscribeAdminNotifications,
@@ -65,7 +67,7 @@ const TEMPLATES = [
 ];
 
 export default function NotificationsPage({ onNavigate }: NotificationsPageProps) {
-  const [activeTab, setActiveTab] = useState<"inbox" | "outbox" | "send">("inbox");
+  const [activeTab, setActiveTab] = useState<"inbox" | "outbox" | "send" | "delivery">("inbox");
   const [filterType, setFilterType] = useState("All");
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -146,7 +148,7 @@ export default function NotificationsPage({ onNavigate }: NotificationsPageProps
   // Filtered Admin Inbox Alerts
   const filteredAdminNotifs = useMemo(() => {
     return displayAdminNotifs
-      .filter((n) => filterType === "All" || n.type === filterType)
+      .filter((n) => filterType === "All" || categoryOf(n) === filterType)
       .filter((n) => (!unreadOnly ? true : !n.read))
       .filter((n) => {
         if (!searchQuery.trim()) return true;
@@ -205,32 +207,33 @@ export default function NotificationsPage({ onNavigate }: NotificationsPageProps
     setIsSending(true);
     const selectedUser = users.find((u) => u.id === selectedUserId);
 
-    const res = await sendAdminNotification(
-      {
-        target: sendTarget,
-        recipientId: selectedUserId,
-        recipientName: selectedUser?.name,
-        recipientType: selectedUser?.type,
-        channel: sendChannel,
-        type: sendCategory,
-        title: sendTitle.trim(),
-        message: sendMessage.trim(),
-      },
-      users,
-    );
+    const res = await sendAdminNotification({
+      target: sendTarget,
+      recipientId: selectedUserId,
+      recipientName: selectedUser?.name,
+      recipientType: selectedUser?.type,
+      channel: sendChannel,
+      type: sendCategory,
+      title: sendTitle.trim(),
+      message: sendMessage.trim(),
+    });
 
     setIsSending(false);
     if (res.success) {
+      const detail = Object.entries(res.channels ?? {})
+        .filter(([c]) => c !== "in_app")
+        .map(([c, t]) => `${c}: ${t.sent} sent${t.failed ? `, ${t.failed} failed` : ""}${t.notConfigured ? `, ${t.notConfigured} not set up on the server` : ""}`)
+        .join(" · ");
       setSendSuccessMessage(
         sendTarget === "admin"
-          ? "Alert successfully posted to Super Admin Console!"
-          : `Notification dispatched successfully (${res.count} recipient${res.count > 1 ? "s" : ""})!`,
+          ? "Alert posted to the admin inbox."
+          : `Sent to ${res.count} recipient${res.count === 1 ? "" : "s"}.${detail ? ` ${detail}.` : ""}`,
       );
       setSendTitle("");
       setSendMessage("");
       setTimeout(() => setSendSuccessMessage(""), 4000);
     } else {
-      alert("Failed to dispatch notification. Please check connection and permissions.");
+      alert(res.error || "Failed to dispatch the notification. Please check your connection and permissions.");
     }
   };
 
@@ -242,16 +245,7 @@ export default function NotificationsPage({ onNavigate }: NotificationsPageProps
     setSendMessage(t.message);
   };
 
-  const typesList = [
-    "All",
-    "driver",
-    "booking",
-    "vendor",
-    "alert",
-    "payment",
-    "penalty",
-    "system",
-  ];
+  const typesList: string[] = ["All", ...CATEGORIES];
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
@@ -306,6 +300,17 @@ export default function NotificationsPage({ onNavigate }: NotificationsPageProps
             </button>
 
             <button
+              onClick={() => { setActiveTab("delivery"); setSearchQuery(""); }}
+              className={`px-4 py-2 text-[12px] font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
+                activeTab === "delivery"
+                  ? "bg-white text-[#111] shadow-sm"
+                  : "text-[#666] hover:text-[#111]"
+              }`}
+            >
+              <span>Delivery log</span>
+            </button>
+
+            <button
               onClick={() => { setActiveTab("send"); setSearchQuery(""); }}
               className={`px-4 py-2 text-[12px] font-bold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
                 activeTab === "send"
@@ -318,6 +323,8 @@ export default function NotificationsPage({ onNavigate }: NotificationsPageProps
           </div>
         </div>
       </div>
+
+      {activeTab === "delivery" && <DeliveryLog />}
 
       {/* TAB 1: ADMIN ALERTS INBOX */}
       {activeTab === "inbox" && (
@@ -335,15 +342,15 @@ export default function NotificationsPage({ onNavigate }: NotificationsPageProps
               </div>
             </div>
             <div className="bg-white rounded-xl border border-[#E5E5E5] p-4 shadow-xs">
-              <div className="text-[11px] font-semibold text-[#888] uppercase tracking-wider">Driver KYC Applications</div>
+              <div className="text-[11px] font-semibold text-[#888] uppercase tracking-wider">Approvals</div>
               <div className="text-[24px] font-extrabold text-blue-600 mt-1">
-                {displayAdminNotifs.filter((n) => n.type === "driver").length}
+                {displayAdminNotifs.filter((n) => categoryOf(n) === "approvals").length}
               </div>
             </div>
             <div className="bg-white rounded-xl border border-[#E5E5E5] p-4 shadow-xs">
-              <div className="text-[11px] font-semibold text-[#888] uppercase tracking-wider">Bookings &amp; SOS</div>
+              <div className="text-[11px] font-semibold text-[#888] uppercase tracking-wider">Bookings &amp; trips</div>
               <div className="text-[24px] font-extrabold text-emerald-600 mt-1">
-                {displayAdminNotifs.filter((n) => n.type === "booking" || n.type === "alert").length}
+                {displayAdminNotifs.filter((n) => ["bookings", "trips"].includes(categoryOf(n))).length}
               </div>
             </div>
           </div>
@@ -353,7 +360,7 @@ export default function NotificationsPage({ onNavigate }: NotificationsPageProps
             <div className="flex flex-wrap items-center gap-1.5">
               {typesList.map((t) => {
                 const isSelected = filterType === t;
-                const badge = typeIcon[t] || { label: t, color: "#111", bg: "#F5F5F5" };
+                const count = t === "All" ? displayAdminNotifs.length : displayAdminNotifs.filter((n) => categoryOf(n) === t).length;
                 return (
                   <button
                     key={t}
@@ -365,7 +372,7 @@ export default function NotificationsPage({ onNavigate }: NotificationsPageProps
                     }`}
                     style={isSelected ? { background: "#E21B23" } : {}}
                   >
-                    {t === "All" ? "All Categories" : badge.label}
+                    {t === "All" ? "All" : CATEGORY_LABEL[t as keyof typeof CATEGORY_LABEL]} <span className="opacity-70">({count})</span>
                   </button>
                 );
               })}

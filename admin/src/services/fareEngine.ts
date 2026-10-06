@@ -31,17 +31,34 @@ export function isNightTime(pickupTime?: string, startTime = "22:00", endTime = 
   }
 }
 
+/** YYYY-MM-DD of the given date in local time. */
+const isoDay = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+/** Active and within its effective-from / effective-until window on `onDate`. */
+export function isRuleEffective(r: FareRule, onDate = new Date()): boolean {
+  if (r.status !== "Active") return false;
+  const day = isoDay(onDate);
+  if (r.effectiveFrom && day < r.effectiveFrom) return false;
+  if (r.effectiveUntil && day > r.effectiveUntil) return false;
+  return true;
+}
+
 /**
- * Find the best matching FareRule from active rules using deterministic precedence:
+ * Find the best matching FareRule using deterministic precedence:
  * 1. Origin + Destination + Vehicle Category (Fixed Route)
  * 2. Service + Vehicle Category
  * 3. Vehicle Category
+ * Within a level, the lowest `priority` number wins (1 = highest).
  */
 export function findMatchingFareRule(
   rules: FareRule[],
-  input: FareCalculationInput
+  input: FareCalculationInput,
+  onDate = new Date(),
 ): FareRule | null {
-  const activeRules = rules.filter((r) => r.status === "Active");
+  const activeRules = rules
+    .filter((r) => isRuleEffective(r, onDate))
+    .sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
 
   // 1. Exact Route Match
   if (input.originLocationId && input.destinationLocationId) {
@@ -75,32 +92,44 @@ export function findMatchingFareRule(
 }
 
 /**
- * CENTRAL FARE CALCULATION ENGINE
- * Pure, deterministic fare calculation used by New Booking, Fare Preview, and Invoices.
+ * QUOTATION RATE-CARD ENGINE (admin / phone bookings)
+ * Pure, deterministic fare calculation from fare rules, falling back to the
+ * vehicle category's own fare. Returns null when neither is configured —
+ * a price is never invented. App bookings are priced by bookingFareEngine.
  */
 export function calculateCentralFare(
   input: FareCalculationInput,
   fareRules: FareRule[],
-  vehicleCategories: VehicleCategory[] = []
-): FareCalculationResult {
-  const matchedRule = findMatchingFareRule(fareRules, input);
+  vehicleCategories: VehicleCategory[] = [],
+  onDate = new Date(),
+): FareCalculationResult | null {
+  const matchedRule = findMatchingFareRule(fareRules, input, onDate);
 
-  // Fallback to vehicle category default fare parameters if no rule matched
+  // Fallback to the vehicle category's configured fare if no rule matched.
   const fallbackCat = vehicleCategories.find((c) => c.id === input.vehicleCategoryId);
   let ruleToUse: Partial<FareRule> | null = matchedRule;
 
   let fallbackUsed = false;
-  if (!ruleToUse && fallbackCat && fallbackCat.fare) {
+  if (!ruleToUse && fallbackCat?.fare && Number(fallbackCat.fare.perKmRate) > 0) {
     fallbackUsed = true;
     const f = fallbackCat.fare;
+    // Same policy as the booking server: driver allowance only on outstation
+    // trips (over 40 km one way) and the night allowance from 22:00 to 06:00.
+    const outstation = (input.distanceKm || 0) > 40;
     ruleToUse = {
-      name: `${fallbackCat.name} Category Base`,
+      name: `${fallbackCat.name} category fare`,
       pricingType: "BASE_PLUS_PER_KM",
-      baseFare: f.baseFare || 350,
-      baseKm: f.baseKm || 10,
-      perKmRate: f.perKmRate || 12,
-      driverBatta: f.driverAllowance || f.outstationDriverBattaPerDay || 250,
-      waitingChargePerHour: f.waitingChargePerHour || 80,
+      baseFare: f.baseFare || 0,
+      baseKm: f.baseKm || 0,
+      perKmRate: outstation && f.outstationPerKmRate ? f.outstationPerKmRate : f.perKmRate,
+      minimumFare: f.minimumFare || 0,
+      driverBatta: outstation ? f.outstationDriverBattaPerDay || f.driverAllowance || 0 : 0,
+      nightChargeEnabled: (f.nightAllowance || 0) > 0,
+      nightChargeType: "Fixed",
+      nightChargeValue: f.nightAllowance || 0,
+      nightStartTime: "22:00",
+      nightEndTime: "05:59",
+      waitingChargePerHour: f.waitingChargePerHour || 0,
       tollMode: f.tollIncluded ? "Included" : "Excluded",
       parkingMode: f.parkingIncluded ? "Included" : "Excluded",
       permitCharge: f.permitCharge || 0,
@@ -108,19 +137,7 @@ export function calculateCentralFare(
     };
   }
 
-  // Default baseline if completely unconfigured
-  if (!ruleToUse) {
-    ruleToUse = {
-      name: "Default Taxi Rates",
-      pricingType: "BASE_PLUS_PER_KM",
-      baseFare: 350,
-      baseKm: 10,
-      perKmRate: 13,
-      driverBatta: 250,
-      waitingChargePerHour: 80,
-      status: "Active",
-    };
-  }
+  if (!ruleToUse) return null;
 
   const breakdown: FareBreakdownItem[] = [];
   const days = Math.max(1, input.tripDays || 1);
@@ -166,8 +183,8 @@ export function calculateCentralFare(
 
     case "HOURLY_RENTAL": {
       baseFare = Math.round(ruleToUse.baseFare || 0);
-      const incKm = ruleToUse.baseKm || 40;
-      const incHrs = ruleToUse.includedHours || 4;
+      const incKm = ruleToUse.baseKm || 0;
+      const incHrs = ruleToUse.includedHours || 0;
 
       breakdown.push({
         label: `Package Base (${incHrs} hrs / ${incKm} km)`,
@@ -177,20 +194,20 @@ export function calculateCentralFare(
       // Extra KM
       if (distance > incKm) {
         const extraKm = distance - incKm;
-        extraKmCharge = Math.round(extraKm * (ruleToUse.extraKmRate || ruleToUse.perKmRate || 12));
+        extraKmCharge = Math.round(extraKm * (ruleToUse.extraKmRate || ruleToUse.perKmRate || 0));
         breakdown.push({
-          label: `Extra KM Charge (${extraKm} km @ ₹${ruleToUse.extraKmRate || ruleToUse.perKmRate}/km)`,
+          label: `Extra KM Charge (${extraKm} km @ ₹${ruleToUse.extraKmRate || ruleToUse.perKmRate || 0}/km)`,
           amount: extraKmCharge,
         });
       }
 
       // Extra Hours
-      const hrs = input.tripHours || incHrs;
+      const hrs = input.tripHours ?? incHrs;
       if (hrs > incHrs) {
         const extraHrs = hrs - incHrs;
-        extraHourCharge = Math.round(extraHrs * (ruleToUse.extraHourRate || ruleToUse.waitingChargePerHour || 100));
+        extraHourCharge = Math.round(extraHrs * (ruleToUse.extraHourRate || ruleToUse.waitingChargePerHour || 0));
         breakdown.push({
-          label: `Extra Hours Charge (${extraHrs} hrs @ ₹${ruleToUse.extraHourRate || 100}/hr)`,
+          label: `Extra Hours Charge (${extraHrs} hrs @ ₹${ruleToUse.extraHourRate || ruleToUse.waitingChargePerHour || 0}/hr)`,
           amount: extraHourCharge,
         });
       }
@@ -198,10 +215,10 @@ export function calculateCentralFare(
     }
 
     case "PER_DAY": {
-      const minKmDaily = ruleToUse.minimumKmPerDay || 250;
+      const minKmDaily = ruleToUse.minimumKmPerDay || 0;
       const minKmTotal = minKmDaily * days;
       billableDistanceKm = Math.max(distance, minKmTotal);
-      distanceFare = Math.round(billableDistanceKm * (ruleToUse.perKmRate || 14));
+      distanceFare = Math.round(billableDistanceKm * (ruleToUse.perKmRate || 0));
 
       breakdown.push({
         label: `Outstation Distance Fare (${billableDistanceKm} km @ ₹${ruleToUse.perKmRate}/km)`,
@@ -248,14 +265,14 @@ export function calculateCentralFare(
     isNightTime(input.pickupTime, ruleToUse.nightStartTime || "22:00", ruleToUse.nightEndTime || "05:00")
   ) {
     if (ruleToUse.nightChargeType === "Percentage") {
-      const pct = (ruleToUse.nightChargeValue || 15) / 100;
+      const pct = (ruleToUse.nightChargeValue || 0) / 100;
       nightCharge = Math.round((baseFare + distanceFare) * pct);
       breakdown.push({
         label: `Night Surcharge (${ruleToUse.nightChargeValue}% for pickup between ${ruleToUse.nightStartTime || "22:00"}-${ruleToUse.nightEndTime || "05:00"})`,
         amount: nightCharge,
       });
     } else {
-      nightCharge = Math.round(ruleToUse.nightChargeValue || 250);
+      nightCharge = Math.round(ruleToUse.nightChargeValue || 0);
       breakdown.push({
         label: `Night Allowance (Fixed ₹${nightCharge})`,
         amount: nightCharge,
@@ -268,15 +285,16 @@ export function calculateCentralFare(
   if (input.waitingMinutes && input.waitingMinutes > (ruleToUse.freeWaitingMinutes || 0)) {
     const billableMins = input.waitingMinutes - (ruleToUse.freeWaitingMinutes || 0);
     const billableHrs = Math.ceil(billableMins / 60);
-    waitingCharge = Math.round(billableHrs * (ruleToUse.waitingChargePerHour || 80));
+    waitingCharge = Math.round(billableHrs * (ruleToUse.waitingChargePerHour || 0));
     breakdown.push({
-      label: `Waiting Charge (${billableHrs} hrs @ ₹${ruleToUse.waitingChargePerHour || 80}/hr)`,
+      label: `Waiting Charge (${billableHrs} hrs @ ₹${ruleToUse.waitingChargePerHour || 0}/hr)`,
       amount: waitingCharge,
     });
   }
 
   // Toll, Parking, Permit
-  let tollAmount = input.tollAmount || 0;
+  // "Included" means the rate already covers it, so nothing is added on top.
+  let tollAmount = ruleToUse.tollMode === "Included" ? 0 : input.tollAmount || 0;
   if (ruleToUse.tollMode === "Fixed" && ruleToUse.fixedTollAmount) {
     tollAmount = ruleToUse.fixedTollAmount;
   }
@@ -284,7 +302,7 @@ export function calculateCentralFare(
     breakdown.push({ label: "Toll Charges", amount: tollAmount });
   }
 
-  let parkingAmount = input.parkingAmount || 0;
+  let parkingAmount = ruleToUse.parkingMode === "Included" ? 0 : input.parkingAmount || 0;
   if (ruleToUse.parkingMode === "Fixed" && ruleToUse.fixedParkingAmount) {
     parkingAmount = ruleToUse.fixedParkingAmount;
   }
@@ -295,6 +313,13 @@ export function calculateCentralFare(
   let permitAmount = input.permitAmount || ruleToUse.permitCharge || 0;
   if (permitAmount > 0) {
     breakdown.push({ label: "Interstate Permit Charge", amount: permitAmount });
+  }
+
+  // Minimum fare (on the fare itself, before pass-through charges and discount)
+  const fareBeforeExtras = baseFare + distanceFare + extraKmCharge + extraHourCharge + driverBatta + nightCharge + waitingCharge;
+  const minimumFareAdjustment = Math.max(0, Math.round(ruleToUse.minimumFare || 0) - fareBeforeExtras);
+  if (minimumFareAdjustment > 0) {
+    breakdown.push({ label: `Minimum fare adjustment (minimum ₹${ruleToUse.minimumFare})`, amount: minimumFareAdjustment });
   }
 
   // Discount
@@ -313,6 +338,7 @@ export function calculateCentralFare(
       driverBatta +
       nightCharge +
       waitingCharge +
+      minimumFareAdjustment +
       tollAmount +
       parkingAmount +
       permitAmount -
@@ -325,7 +351,7 @@ export function calculateCentralFare(
   breakdown.push({ label: "GST (5%)", amount: gstAmount });
 
   return {
-    matchedRule: (ruleToUse as FareRule) || null,
+    matchedRule: fallbackUsed ? null : matchedRule,
     baseFare,
     distanceFare,
     driverBatta,

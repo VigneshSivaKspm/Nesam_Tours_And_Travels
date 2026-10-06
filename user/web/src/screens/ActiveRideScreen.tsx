@@ -176,7 +176,7 @@ export const ActiveRideScreen: React.FC<ActiveRideScreenProps> = ({ bookingId, p
   }
 
   const phase = trip.phase;
-  const canCancel = ['Pending', 'Confirmed', 'Assigned'].includes(trip.status);
+  const canCancel = ['Pending', 'Approved', 'Confirmed', 'Assigned'].includes(trip.status);
   const minutesAway = eta ? Math.max(1, Math.round(eta.durationMin)) : null;
   const straightKm = driverPos && isValidLatLng(trip.pickup) ? haversineKm(driverPos, trip.pickup) : null;
   const sharePoint = phase === 'in_trip' && driverPos ? driverPos : position;
