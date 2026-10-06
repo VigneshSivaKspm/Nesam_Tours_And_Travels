@@ -433,7 +433,7 @@ test('cancellation and refund: cancelled-by, charge, eligibility, status flow, a
   assert.equal((await booking('canc_book_0003')).refund.status, 'Pending');
 });
 
-test('penalties: issue, popup data, acknowledgement (stored), dispute, deduction through the ledger, permissions', async () => {
+test('penalties: issuing needs compliance access and valid details', async () => {
   const id = 'flow_book_0001';
   const issue = (extra = {}) => call(penalties.issuePenalty, 'compOnly', { party: 'Driver', partyId: 'drvA', category: 'Late Arrival', reason: 'Arrived 40 minutes late', description: 'Customer complained', amount: 300, incidentDate: new Date().toISOString().slice(0, 10), bookingId: id, ...extra });
   await assert.rejects(call(penalties.issuePenalty, 'finOnly', { party: 'Driver', partyId: 'drvA' }), /compliance/);
@@ -441,7 +441,6 @@ test('penalties: issue, popup data, acknowledgement (stored), dispute, deduction
   await assert.rejects(issue({ amount: 999999 }), /cannot exceed/);
   await assert.rejects(issue({ category: 'Nonsense' }), /category/);
   await assert.rejects(issue({ reason: 'bad' }), /10 characters/);
-  await assert.rejects(issue({ partyId: 'drvB' }), /was not handled/); // drvB never worked flow_book_0001's assignment before? (drvB did — see below)
 });
 
 test('penalties: lifecycle', async () => {
@@ -491,7 +490,7 @@ test('penalties: lifecycle', async () => {
   assert.equal(led.netAmount, 300);
   assert.equal(led.driverId, 'drvA');
   assert.equal((await db.doc('wallets/driver_drvA').get()).data().available, -300);
-  await assert.rejects(call(penalties.transitionPenalty, 'finOnly', { penaltyId: p1, status: 'Waived', note: 'too late now' }), /cannot become/);
+  await assert.rejects(call(penalties.transitionPenalty, 'ops', { penaltyId: p1, status: 'Waived', note: 'too late now' }), /cannot become/);
   // Waive and pay paths, and replay protection on issue.
   const p2 = await mk();
   await call(penalties.transitionPenalty, 'compOnly', { penaltyId: p2, status: 'Waived', note: 'First offence' });
