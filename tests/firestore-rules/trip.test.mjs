@@ -1,6 +1,7 @@
 // Driver trip workflow, vehicle photo verification, customer OTP delivery and
 // security events — through the real compiled functions on the Firestore
 // emulator, with Storage and the message providers replaced by fakes.
+import { createRequire } from 'node:module';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
@@ -13,6 +14,8 @@ const { advanceTrip, verifyBoarding } = await import('../../functions/lib/trips.
 const vv = await import('../../functions/lib/vehicleVerification.js');
 const cv = await import('../../functions/lib/customerVerification.js');
 const sec = await import('../../functions/lib/security.js');
+
+const { FieldValue } = createRequire(new URL('../../functions/package.json', import.meta.url))('firebase-admin/firestore');
 
 let env;
 before(async () => {
@@ -170,8 +173,8 @@ test('vehicle photos: an exact copy of an earlier photo is refused and raises a 
 test('trip: Trip Started needs the photo verification; steps run strictly in order and a skip is refused and logged', async () => {
   const id = await assigned();
   await assert.rejects(advance(id, 'Trip Started'), (e) => /vehicle photo verification/.test(e.message) && e.details?.verificationRequired === true);
-  await assert.rejects(advance(id, 'Reached Pickup'), /Start the trip first|Trip Started first|order/i);
-  await assert.rejects(advance(id, 'Trip Ended'), /Trip Started|order|Reached Pickup/i);
+  await assert.rejects(advance(id, 'Reached Pickup'), /cannot be recorded yet. The next step is "Trip Started"/);
+  await assert.rejects(advance(id, 'Trip Ended'), /cannot be recorded yet. The next step is "Trip Started"/);
   await assert.rejects(advance(id, 'Not Started'), /Choose Trip Started/);
   await assert.rejects(advance(id, 'Bogus'), /Choose Trip Started/);
   const skips = (await secEvents('trip_state_violation')).filter((e) => e.bookingId === id);
@@ -261,7 +264,8 @@ test('trip: five wrong boarding OTPs lock the check for ten minutes and raise a 
 
 test('trips begun in the older flow can still finish without the new boarding step', async () => {
   const id = await assigned();
-  await db.doc(`bookings/${id}`).update({ status: 'Ongoing', tripStage: 'In Progress', startedAt: new Date(), startOdometer: 500 });
+  // Older bookings carry only the legacy stage fields, no tripSubStatus.
+  await db.doc(`bookings/${id}`).update({ status: 'Ongoing', tripStage: 'In Progress', startedAt: new Date(), startOdometer: 500, tripSubStatus: FieldValue.delete() });
   assert.equal((await booking(id)).tripSubStatus, undefined);
   const r = await advance(id, 'Trip Ended', { endOdometer: 600 });
   assert.equal(r.ok, true);
@@ -351,7 +355,7 @@ test('customer OTP: sent over WhatsApp, SMS and email; stored only as a salted h
   assert.match(code, /^\d{6}$/);
   assert.ok(sent.whatsapp.at(-1).template.name === 'nesam_otp');
   assert.ok(JSON.stringify(sent.whatsapp.at(-1)).includes(code));
-  assert.ok(sent.whatsapp.at(-1).to === '919876543210');
+  assert.equal(sent.whatsapp.at(-1).to, (await booking(id)).phone.replace(/\D/g, ''));
   assert.ok(JSON.stringify(sent.email.at(-1)).includes(code));
   // Only a hash is stored — never the code, and the destinations are masked.
   const [doc] = await hashed(id);
