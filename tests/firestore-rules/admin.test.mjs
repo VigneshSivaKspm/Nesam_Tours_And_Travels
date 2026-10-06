@@ -9,6 +9,22 @@ import { readFileSync } from 'node:fs';
 import { assertFails, assertSucceeds, initializeTestEnvironment } from '@firebase/rules-unit-testing';
 import * as firestore from 'firebase/firestore';
 
+// Booking-server callables run in-process against the same emulator project, as the signed-in admin.
+process.env.TEST_PROJECT = 'nesam-rules-admin';
+const { call: callHandler, installFakeNetwork } = await import('./harness.mjs');
+const serverFns = await import('../../functions/lib/index.js');
+let callerUid = 'admin1';
+const callablesShim = {
+  ActionError: class ActionError extends Error { constructor(message, details) { super(message); this.details = details; } },
+  callFunction: async (name, data) => {
+    const handler = serverFns[name];
+    if (!handler) throw new Error(`No such function ${name}`);
+    try { return await callHandler(handler, callerUid, data); } catch (e) { throw new callablesShim.ActionError(e.message, e.details); }
+  },
+  describeCallError: (e) => e.message,
+  newId: (p) => `${p}_${Math.random().toString(36).slice(2, 14)}`,
+};
+
 const requireAdmin = createRequire(new URL('../../admin/package.json', import.meta.url));
 const ts = requireAdmin('typescript');
 
@@ -55,10 +71,9 @@ function servicesFor(db) {
     './adminFirestoreService': adminFirestoreService,
   });
   const analytics = loadAdminModule('utils/analytics.ts', {});
+  const bookingFlow = loadAdminModule('domain/bookingFlow.ts', {});
   const paymentService = loadAdminModule('services/paymentService.ts', {
-    './firebase': firebaseShim,
-    './adminFirestoreService': adminFirestoreService,
-    './paymentReconciliation': loadAdminModule('services/paymentReconciliation.ts', {}),
+    '../domain/bookingFlow': bookingFlow,
     '../utils/analytics': analytics,
   });
   const invoiceService = loadAdminModule('services/invoiceService.ts', {
@@ -72,11 +87,13 @@ function servicesFor(db) {
     './paymentService': paymentService,
     '../utils/analytics': analytics,
   });
+  const bookingOpsService = loadAdminModule('services/bookingOpsService.ts', { './callables': callablesShim });
   const penaltyService = loadAdminModule('services/penaltyService.ts', {
-    './firebase': firebaseShim,
-    './adminFirestoreService': adminFirestoreService,
+    './callables': callablesShim,
+    './bookingOpsService': bookingOpsService,
     './paymentService': paymentService,
     '../utils/analytics': analytics,
+    '../domain/bookingFlow': bookingFlow,
   });
   const serviceMasterService = loadAdminModule('services/serviceMasterService.ts', {
     './firebase': firebaseShim,
@@ -94,7 +111,7 @@ function servicesFor(db) {
     './firebase': firebaseShim,
     './adminFirestoreService': adminFirestoreService,
   });
-  return { adminFirestoreService, vehicleService, categoryService, analytics, paymentService, invoiceService, earningsService, penaltyService, serviceMasterService, tourPackageService, locationService, fareRuleService };
+  return { adminFirestoreService, bookingFlow, bookingOpsService, vehicleService, categoryService, analytics, paymentService, invoiceService, earningsService, penaltyService, serviceMasterService, tourPackageService, locationService, fareRuleService };
 }
 
 /** Loads the Cloud Functions fare policy (functions/src/domain/pricing.ts) the same way. */
@@ -437,57 +454,31 @@ async function seedBooking(id, data) {
 }
 const readDoc = async (p) => (await firestore.getDoc(firestore.doc(as.admin, p))).data();
 
-test('payments: cash collection is confirmed once, with fare + tolls, and audited', async () => {
-  const { paymentService: ps } = services.admin;
-  const b = await seedBooking('cash1', { paymentMethod: 'Cash', tollCharges: 150 });
-  await ps.confirmCashCollection(b, '', 'admin1');
-  const pay = await readDoc('payments/booking_cash1');
-  assert.equal(pay.amount, 1350);
-  assert.equal(pay.method, 'Cash');
-  assert.equal(pay.bookingId, 'NT-cash1');
-  assert.equal(pay.verifiedBy, 'admin1');
-  assert.equal((await readDoc('bookings/cash1')).payment, 'Paid');
-  assert.equal((await readDoc('bookings/cash1/events/payment_cash1')).type, 'cash_collection_confirmed');
-  await assert.rejects(ps.confirmCashCollection(b, '', 'admin1'), /already recorded/);
-});
-
-test('payments: cash confirmation refuses UPI, unfinished and missing bookings', async () => {
-  const { paymentService: ps } = services.admin;
-  const upi = await seedBooking('upi1', { paymentMethod: 'UPI' });
-  await assert.rejects(ps.confirmCashCollection(upi, '', 'admin1'), /not a cash booking/);
-  const ongoing = await seedBooking('cash2', { paymentMethod: 'Cash', status: 'Ongoing' });
-  await assert.rejects(ps.confirmCashCollection(ongoing, '', 'admin1'), /Only completed trips/);
-  await assert.rejects(ps.confirmCashCollection({ id: 'nope' }, '', 'admin1'), /no longer exists/);
-  await assert.rejects(ps.confirmCashCollection(ongoing, '', ''), /session/);
-});
-
-test('payments: UPI verification reuses reconciliation and blocks double recording', async () => {
-  const { paymentService: ps } = services.admin;
-  const b = await seedBooking('upi2', { paymentMethod: 'UPI' });
-  await assert.rejects(ps.verifyOnlinePayment(b, '1000', 'UTR1', false, 'admin1'), /Expected received amount: ₹1200/);
-  await ps.verifyOnlinePayment(b, '1200', 'UTR123456', false, 'admin1');
-  assert.equal((await readDoc('payments/booking_upi2')).reference, 'UTR123456');
-  await assert.rejects(ps.verifyOnlinePayment(b, '1200', 'UTR123456', false, 'admin1'), /already reconciled/);
-  const cash = await seedBooking('cash3', { paymentMethod: 'Cash' });
-  await assert.rejects(ps.verifyOnlinePayment(cash, '1200', 'X', false, 'admin1'), /Cash collected/);
-});
-
-test('payments: awaiting queue, legacy records and non-admin writes', async () => {
-  const { paymentService: ps } = services.admin;
+test('payments: the admin panel reads derived payment status; recording goes through the server only', async () => {
+  const { paymentService: ps, bookingFlow: bf } = services.admin;
   const bookings = [
     { id: 'a', status: 'Completed', payment: 'Pending', fare: 500 },
     { id: 'b', status: 'Completed', payment: 'Paid', fare: 500 },
     { id: 'c', status: 'Ongoing', payment: 'Pending', fare: 500 },
+    { id: 'd', status: 'Completed', fare: 1000, paymentSummary: { amountDue: 1000, totalPaid: 400, balanceDue: 600, status: 'Partially Paid' } },
+    { id: 'e', status: 'Completed', fare: 1000, paymentSummary: { amountDue: 1000, totalPaid: 1000, balanceDue: 0, status: 'Paid' } },
   ];
-  assert.deepEqual(ps.bookingsAwaitingPayment(bookings).map((x) => x.id), ['a']);
-  assert.equal(ps.expectedAmount({ fare: '₹1,250', tollCharges: 50 }), 1300);
+  // Completed trips with a balance, whether legacy (flag) or new (transactions).
+  assert.deepEqual(ps.bookingsAwaitingPayment(bookings).map((x) => x.id).sort(), ['a', 'd']);
+  assert.equal(ps.expectedAmount({ fare: '₹1,250', status: 'Completed', payment: 'Pending' }) >= 1250, true);
+  assert.equal(bf.paymentOf({ status: 'Completed', fare: 1000, paymentSummary: { totalPaid: 400, balanceDue: 600, status: 'Partially Paid', amountDue: 1000 } }).status, 'Partially Paid');
   const legacy = ps.mapPayment({ id: 'TXN-1', bookingId: 'NTT-1', customer: 'X', amount: '₹1,500', method: 'UPI', date: '24 Aug 2024', status: 'Success' });
   assert.equal(legacy.amount, 1500);
   assert.equal(legacy.date.getFullYear(), 2024);
   assert.equal(ps.isSuccessfulPayment('Success'), true);
+  // Nobody — vendor, former admin or the current admin — can write a payment record or a booking's payment fields from a client.
   await assertFails(firestore.setDoc(firestore.doc(as.vendor, 'payments/booking_x'), { amount: 1 }));
   await assertFails(firestore.setDoc(firestore.doc(as.former, 'payments/booking_x'), { amount: 1 }));
+  await seedBooking('paylock', { paymentMethod: 'Cash' });
+  await assertFails(firestore.updateDoc(firestore.doc(as.admin, 'bookings/paylock'), { payment: 'Paid', paidAt: firestore.serverTimestamp() }));
+  await assertFails(firestore.updateDoc(firestore.doc(as.admin, 'bookings/paylock'), { paymentSummary: { totalPaid: 1200, balanceDue: 0, status: 'Paid' } }));
 });
+
 // ── Invoices ────────────────────────────────────────────────────────────────
 
 const COMPANY = { name: 'NESAM Tours & Travels', gstin: '33ABCDE1234F1Z5', address: 'Theni, Tamil Nadu', phone: '', email: '', sacCode: '9964' };
@@ -658,7 +649,7 @@ test('payouts: paid needs a UTR and only open requests change; the driver sees t
 
 const penaltyInput = (over = {}) => ({
   party: 'Driver', partyId: 'fd1', partyName: 'Kumar', category: 'No Show at Pickup', reason: 'Driver did not reach the pickup point.',
-  amount: '500', customerCompensation: '', bookingId: '', incidentDate: '2026-09-01', notes: '', applyNow: false, ...over,
+  amount: '500', description: '', customerCompensation: '', bookingId: '', incidentDate: '2026-09-01', ...over,
 });
 
 test('penalties: validation and booking ownership', async () => {
@@ -672,51 +663,58 @@ test('penalties: validation and booking ownership', async () => {
   assert.equal(Object.keys(ps.validatePenalty(penaltyInput({ party: 'Vendor', partyId: 'v1', bookingId: 'pb1' }), bookings)).length, 0);
 });
 
-test('penalties: partners see their own penalties; lifecycle transitions are enforced', async () => {
+test('penalties: issued and changed only by the server; partners read their own; lifecycle is enforced', async () => {
   const { penaltyService: ps } = services.admin;
-  const vid = await ps.createPenalty(penaltyInput({ party: 'Vendor', partyId: 'v1', partyName: 'Sri Balaji Travels', applyNow: true }), [], 'admin1');
-  const did = await ps.createPenalty(penaltyInput(), [], 'admin1');
+  const vid = await ps.createPenalty(penaltyInput({ party: 'Vendor', partyId: 'v1', partyName: 'Sri Balaji Travels' }), []);
+  const did = await ps.createPenalty(penaltyInput(), []);
   const vdoc = await readDoc(`penalties/${vid}`);
   assert.equal(vdoc.vendorId, 'v1');
-  assert.equal(vdoc.status, 'Applied');
+  assert.equal(vdoc.status, 'Pending');
   assert.equal(vdoc.amount, 500);
+  assert.equal(vdoc.acknowledged, false);
   await assertSucceeds(firestore.getDoc(firestore.doc(as.vendor, `penalties/${vid}`)));
   await assertFails(firestore.getDoc(firestore.doc(as.vendor, `penalties/${did}`)));
   const driver = env.authenticatedContext('fd1').firestore();
   await assertSucceeds(firestore.getDoc(firestore.doc(driver, `penalties/${did}`)));
+  // No client — partner or admin — can write or edit a penalty.
   await assertFails(firestore.updateDoc(firestore.doc(as.vendor, `penalties/${vid}`), { status: 'Waived' }));
+  await assertFails(firestore.updateDoc(firestore.doc(as.admin, `penalties/${vid}`), { status: 'Waived' }));
+  await assertFails(firestore.updateDoc(firestore.doc(driver, `penalties/${did}`), { acknowledged: true }));
+  await assertFails(firestore.setDoc(firestore.doc(as.admin, 'penalties/forged'), { driverId: 'fd1', amount: 1, status: 'Pending' }));
+  await assertFails(firestore.deleteDoc(firestore.doc(as.admin, `penalties/${did}`)));
 
   const load = async (id) => ps.mapPenalty({ ...(await readDoc(`penalties/${id}`)), id });
-  await assert.rejects(ps.transitionPenalty(await load(did), 'recover', 'UTR1', 'admin1'), /already pending/);
-  await ps.transitionPenalty(await load(did), 'apply', '', 'admin1');
-  await assert.rejects(ps.transitionPenalty(await load(did), 'dispute', '', 'admin1'), /required/);
-  await ps.transitionPenalty(await load(did), 'dispute', 'Driver says the customer changed pickup', 'admin1');
-  await ps.transitionPenalty(await load(did), 'reverse', 'Customer confirmed the change', 'admin1');
-  assert.equal((await load(did)).status, 'Reversed');
-  await ps.transitionPenalty(await load(vid), 'recover', 'UTR5566', 'admin1');
+  assert.deepEqual(ps.availableActions(await load(did)).sort(), ['Deducted', 'Paid', 'Waived']);
+  await assert.rejects(ps.transitionPenalty(await load(did), 'Paid', '', ''), /payment reference/);
+  await assert.rejects(ps.transitionPenalty(await load(did), 'Waived', '', ''), /required/);
+  await ps.transitionPenalty(await load(did), 'Waived', 'First offence — customer changed the pickup', '');
+  assert.equal((await load(did)).status, 'Waived');
+  assert.deepEqual(ps.availableActions(await load(did)), []);
+  await assert.rejects(ps.transitionPenalty(await load(did), 'Paid', '', 'UTR9'), /cannot become/);
+  await ps.transitionPenalty(await load(vid), 'Paid', '', 'UTR5566');
   const v = await load(vid);
-  assert.equal(v.status, 'Recovered');
-  assert.equal(v.recoveryReference, 'UTR5566');
-  await assert.rejects(ps.transitionPenalty(v, 'waive', 'late', 'admin1'), /already recovered/);
+  assert.equal(v.status, 'Paid');
+  assert.equal(v.paymentReference, 'UTR5566');
+  assert.equal(v.history.length >= 2, true);
   assert.deepEqual(ps.availableActions(v), []);
 });
 
-test('penalties: only pending penalties can be deleted; applied ones cannot be edited', async () => {
+test('penalties: earlier-era documents load, and outstanding totals count only unresolved ones', async () => {
   const { penaltyService: ps } = services.admin;
-  const id = await ps.createPenalty(penaltyInput({ amount: '300' }), [], 'admin1');
-  const p = ps.mapPenalty({ ...(await readDoc(`penalties/${id}`)), id });
-  await ps.updatePenalty(p, penaltyInput({ amount: '350' }), [], 'admin1');
-  assert.equal((await readDoc(`penalties/${id}`)).amount, 350);
-  await ps.transitionPenalty(p, 'apply', '', 'admin1');
-  await assert.rejects(ps.updatePenalty(p, penaltyInput({ amount: '10' }), [], 'admin1'), /cannot be edited/);
-  await assert.rejects(ps.deletePenalty(p), /Only pending/);
-  const id2 = await ps.createPenalty(penaltyInput(), [], 'admin1');
-  await ps.deletePenalty(ps.mapPenalty({ ...(await readDoc(`penalties/${id2}`)), id: id2 }));
-  assert.equal((await firestore.getDoc(firestore.doc(as.admin, `penalties/${id2}`))).exists(), false);
   const legacy = ps.mapPenalty({ id: 'PNL-1', type: 'Vendor', entity: 'Kings', entityId: 'v9', amount: '₹2,500', status: 'Applied', date: '08 Aug 2024', reason: 'x' });
   assert.equal(legacy.party, 'Vendor');
   assert.equal(legacy.amount, 2500);
-  assert.equal(ps.outstandingFor([legacy], 'Vendor', 'v9'), 2500);
+  assert.equal(legacy.status, 'Pending'); // the earlier "Applied" reads as the current pending state
+  assert.equal(legacy.storedStatus, 'Applied');
+  assert.equal(ps.mapPenalty({ id: 'x', status: 'Recovered', amount: 5 }).status, 'Paid');
+  assert.equal(ps.mapPenalty({ id: 'y', status: 'Reversed', amount: 5 }).status, 'Waived');
+  const mixed = [legacy, ps.mapPenalty({ id: 'z', type: 'Vendor', entityId: 'v9', amount: 100, status: 'Disputed' }), ps.mapPenalty({ id: 'w', type: 'Vendor', entityId: 'v9', amount: 900, status: 'Waived' })];
+  assert.equal(ps.outstandingFor(mixed, 'Vendor', 'v9'), 2600);
+  // Acknowledgement fields are carried through.
+  const acked = ps.mapPenalty({ id: 'a', driverId: 'd1', amount: 10, status: 'Acknowledged', acknowledged: true, acknowledgedAt: new Date(2026, 8, 1), acknowledgedByName: 'Kumar', acknowledgementText: 'I have read and understood the penalty information.' });
+  assert.equal(acked.acknowledged, true);
+  assert.equal(acked.acknowledgedByName, 'Kumar');
+  assert.ok(acked.acknowledgedAt instanceof Date);
 });
 // ── Reports ─────────────────────────────────────────────────────────────────
 
@@ -1166,7 +1164,7 @@ test('rules: bookings are created and priced only by the server; admins cannot t
   await assertFails(firestore.updateDoc(firestore.doc(as.admin, 'bookings/priced1'), { fareOverride: { overriddenFare: 10 } }));
   await assertSucceeds(firestore.updateDoc(firestore.doc(as.admin, 'bookings/priced1'), { customer: 'A. Kumar', notes: 'Call on arrival' }));
   // Writing the whole document back unchanged (merge) is still allowed.
-  await assertSucceeds(firestore.setDoc(firestore.doc(as.admin, 'bookings/priced1'), { fare: 945, status: 'Confirmed' }, { merge: true }));
+  await assertFails(firestore.setDoc(firestore.doc(as.admin, 'bookings/priced1'), { fare: 945, status: 'Confirmed' }, { merge: true })); // status moves only through the booking functions
 });
 
 test('pricing downstream: an overridden fare invoices, collects and reports the charged amount', () => {
@@ -1251,7 +1249,7 @@ test('customers: statistics are derived from bookings, never from stored counter
 });
 
 test('vendor portal: mappers show only recorded values — no sample vehicles, phones, ratings or payouts', () => {
-  const m = loadAppModule('vendor/web', 'services/vendorMappers.ts');
+  const m = loadAppModule('vendor/web', 'services/vendorMappers.ts', { '../utils/time': loadAppModule('vendor/web', 'utils/time.ts') });
   const v = m.mapVehicle('veh1', { verified: true });
   assert.deepEqual([v.id, v.vehicleNumber, v.make, v.model, v.year, v.seatingCapacity, v.status, v.docStatus], ['veh1', '', '', '', '', null, 'Active', 'Pending']);
   assert.equal(m.dispatchableVehicle(v), false);

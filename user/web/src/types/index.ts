@@ -61,6 +61,15 @@ export interface FareConfig {
   driverAllowance: number;
   /** Per-km rate for outstation trips, when the admin configured one. */
   outstationPerKmRate?: number;
+  /** Charges the booking breakup lists separately (waiting, extra km, toll/parking/permit/carrier). */
+  extras?: {
+    waitingPerHour: number;
+    extraKmRate: number;
+    tollIncluded: boolean;
+    parkingIncluded: boolean;
+    permitCharge: number;
+    carrierCharge: number;
+  };
 }
 
 export interface RideCategory {
@@ -75,7 +84,19 @@ export interface RideCategory {
   displayOrder: number;
 }
 
+export interface DiscountDetail {
+  type: 'percentage' | 'fixed' | 'coupon';
+  value: number;
+  amount: number;
+  source: 'admin' | 'coupon';
+  reason: string;
+}
+
 export interface FareBreakdown {
+  /** Package total before the global % adjustment. */
+  subtotalBeforeAdjustment?: number;
+  globalAdjustment?: { id: string; name: string; direction: 'increase' | 'decrease'; percent: number; amount: number } | null;
+  discountDetail?: DiscountDetail | null;
   baseFare: number;
   distanceFare: number;
   timeFare: number;

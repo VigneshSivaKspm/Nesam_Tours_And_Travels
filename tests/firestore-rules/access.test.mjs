@@ -70,7 +70,7 @@ async function openTrip(extra = {}) {
   const id = `mk${++seq}`;
   await env.withSecurityRulesDisabled(async (c) => {
     const b = writeBatch(c.firestore());
-    b.set(doc(c.firestore(), 'bookings', id), { customerId: 'cApproved', status: 'Pending', payment: 'Pending', fare: 500, fareVerified: true, ...extra });
+    b.set(doc(c.firestore(), 'bookings', id), { customerId: 'cApproved', status: 'Approved', payment: 'Pending', fare: 500, fareVerified: true, ...extra });
     b.set(doc(c.firestore(), 'marketplace_trips', id), { id, status: 'Open', offeredPayout: 425 });
     await b.commit();
   });
@@ -129,10 +129,13 @@ test('permissions: operations runs bookings but never payment, invoice or fare f
 });
 
 test('permissions: finance changes only payment/invoice fields and owns financial records', async () => {
-  await assertSucceeds(updateDoc(doc(as.fin, 'bookings/b1'), { payment: 'Paid', paidAt: serverTimestamp(), paymentReference: 'UTR1', updatedAt: serverTimestamp() }));
+  // Invoice links are finance's; payment records are written only by recordPayment.
+  await assertSucceeds(updateDoc(doc(as.fin, 'bookings/b1'), { invoiceId: 'inv1', invoiceNumber: 'INV-1', updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(doc(as.fin, 'bookings/b1'), { payment: 'Paid', paidAt: serverTimestamp(), paymentReference: 'UTR1', updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(doc(as.fin, 'bookings/b1'), { paymentSummary: { totalPaid: 945 } }));
   await assertFails(updateDoc(doc(as.fin, 'bookings/b1'), { status: 'Cancelled' }));
   await assertFails(updateDoc(doc(as.fin, 'bookings/b1'), { fare: 1 }));
-  await assertSucceeds(setDoc(doc(as.fin, 'payments/p2'), { amount: 1 }));
+  await assertFails(setDoc(doc(as.fin, 'payments/p2'), { amount: 1 })); // payment records are written by the server only
   await assertFails(setDoc(doc(as.ops, 'payments/p3'), { amount: 1 }));
   await assertSucceeds(getDoc(doc(as.rep, 'payments/p1')));
   await assertFails(setDoc(doc(as.rep, 'payments/p4'), { amount: 1 }));
@@ -252,14 +255,17 @@ test('customers: Approved and legacy Active accounts are active; Blocked account
 
 // ── Trip evidence ───────────────────────────────────────────────────────────
 
-test('evidence: pre-trip record and starting odometer are write-once', async () => {
+test('evidence: pre-trip record, photos and odometer are written only by the verification functions', async () => {
   const id = `ev${++seq}`;
-  await env.withSecurityRulesDisabled((c) => setDoc(doc(c.firestore(), 'bookings', id), { customerId: 'cApproved', status: 'Assigned', assignedDriverId: 'drvI', fare: 500 }));
+  await env.withSecurityRulesDisabled((c) => setDoc(doc(c.firestore(), 'bookings', id), { customerId: 'cApproved', status: 'Assigned', assignedDriverId: 'drvI', fare: 500, preTrip: { odometerReading: 100 }, startOdometer: 100 }));
   const ref = doc(as.drvI, 'bookings', id);
-  await assertSucceeds(updateDoc(ref, { preTrip: { selfie: 'a', odometerReading: 100 }, startOdometer: 100, tripStage: 'En Route Pickup', updatedAt: serverTimestamp() }));
-  await assertFails(updateDoc(ref, { preTrip: { selfie: 'b', odometerReading: 100 }, updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { preTrip: { odometerReading: 100 }, startOdometer: 100, tripStage: 'En Route Pickup', updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { preTrip: { odometerReading: 1 }, updatedAt: serverTimestamp() }));
   await assertFails(updateDoc(ref, { startOdometer: 50, updatedAt: serverTimestamp() }));
-  await assertSucceeds(updateDoc(ref, { tripStage: 'Reached Pickup', reachedPickupAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { vehicleFrontPhoto: 'x', updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(ref, { tripStage: 'Reached Pickup', reachedPickupAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  // Position and tolls stay with the driver.
+  await assertSucceeds(updateDoc(ref, { driverLocation: { lat: 10, lng: 77, heading: null }, updatedAt: serverTimestamp() }));
 });
 
 test('notifications: any staff member marks the shared admin inbox read; only engagement edits or deletes', async () => {
@@ -296,7 +302,8 @@ test('money: price, commission, payouts and the finance snapshot are server-only
   for (const change of [{ assignedDriverId: 'drvI' }, { assignedVendorId: 'v1' }, { assignedVehicleId: 'vApproved' }, { assignedVehicleNumber: 'TN01AB1234' }, { driver: 'X' }, { driverPhone: '1' }]) {
     await assertFails(updateDoc(doc(as.ops, 'bookings', id), { ...change, updatedAt: serverTimestamp() }));
   }
-  await assertSucceeds(updateDoc(doc(as.ops, 'bookings', id), { status: 'Cancelled', cancelledAt: serverTimestamp(), cancelledBy: 'admin', updatedAt: serverTimestamp() }));
+  // Status changes belong to the booking functions (approve, reject, cancel, assign), never a direct write.
+  await assertFails(updateDoc(doc(as.ops, 'bookings', id), { status: 'Cancelled', cancelledAt: serverTimestamp(), cancelledBy: 'admin', updatedAt: serverTimestamp() }));
   // The platform offer is priced by the server; operations can still withdraw it.
   await assertFails(updateDoc(doc(as.ops, 'marketplace_trips', id), { offeredPayout: 9999 }));
   await assertSucceeds(updateDoc(doc(as.ops, 'marketplace_trips', id), { status: 'Closed' }));
@@ -311,8 +318,9 @@ test('money: a completed trip is financially final — operations may only corre
   await assertFails(updateDoc(doc(as.ops, 'bookings/final1'), { status: 'Cancelled' }));
   await assertFails(updateDoc(doc(as.ops, 'bookings/final1'), { pickup: 'Elsewhere' }));
   await assertFails(updateDoc(doc(as.ops, 'bookings/final1'), { tollCharges: 5000 }));
-  // Finance still records the payment.
-  await assertSucceeds(updateDoc(doc(as.fin, 'bookings/final1'), { payment: 'Paid', paidAt: serverTimestamp(), updatedAt: serverTimestamp() }));
+  // Finance links the invoice; the payment itself is recorded by the recordPayment function.
+  await assertSucceeds(updateDoc(doc(as.fin, 'bookings/final1'), { invoiceId: 'inv9', invoiceNumber: 'INV-9', updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(doc(as.fin, 'bookings/final1'), { payment: 'Paid', paidAt: serverTimestamp(), updatedAt: serverTimestamp() }));
 });
 
 test('money: payout requests keep their amount and partner; only finance records the outcome', async () => {

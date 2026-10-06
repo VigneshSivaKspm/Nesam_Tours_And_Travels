@@ -584,3 +584,40 @@ test('driver claim: the vehicle is the one paired on the driver record (by id); 
   await assertFails(claim(ctx.drvB, 'drvB', id2, { assignedVehicleId: 'vehOther', assignedVehicleNumber: 'TN05OT0006' }));
   await assertSucceeds(claim(ctx.drvB, 'drvB', id2, { assignedVehicleNumber: 'TN01AB1234' }));
 });
+
+// A booking created by the current functions is far larger than the early ones
+// (fare breakup, discount, payment summary, contact blocks). Every legitimate write
+// must still evaluate well inside Firestore's per-request expression budget.
+test('large bookings: every allowed write still evaluates within the rules budget', async () => {
+  const lines = Array.from({ length: 24 }, (_, i) => ({ key: `line${i}`, label: `Charge ${i} with a long description`, amount: 100 + i, treatment: i % 2 ? 'included' : 'extra', note: 'x'.repeat(60) }));
+  const fat = {
+    fareBreakup: { lines, packageTotal: 9450, payableExtras: [], notes: Array.from({ length: 10 }, (_, i) => `Note ${i} `.repeat(8)) },
+    fareBreakdown: { baseFare: 10000, subtotal: 9000, taxableAmount: 9000, gst: 450, gstRate: 0.05, discount: 1000, total: 9450, route: { km: 120, minutes: 180 } },
+    discountDetails: { type: 'percentage', value: 10, amount: 1000, reason: 'Regular customer', byUid: 'ops' },
+    globalAdjustment: { name: 'Festival', percent: 10, amount: 1000 },
+    paymentSummary: { totalPaid: 2000, balanceDue: 7450, status: 'Partially Paid', transactions: 1, partnerCashHeld: 0 },
+    customerWhatsapp: { countryCode: '+91', number: '9876543210', e164: '+919876543210', sameAsMobile: true },
+    customerEmail: 'caller@example.com', pickupAddress: 'Door 4, Theni Bus Stand, Theni', pickupLat: 10.01, pickupLng: 77.47, pickupLatitude: 10.01, pickupLongitude: 77.47,
+    history: Array.from({ length: 12 }, (_, i) => ({ at: `2026-10-0${(i % 9) + 1}`, by: 'ops', what: `change ${i}` })),
+  };
+  // Independent driver claim → progress update.
+  const a = await openTrip({ extra: fat });
+  await assertSucceeds(driverClaim(ctx.drvA, 'drvA', a));
+  await assertSucceeds(updateDoc(doc(ctx.drvA, 'bookings', a), { tolls: [{ id: 't', name: 'Toll', amount: 85, receiptPhotoUrl: 'u', uploadedAt: 'now' }], tollCharges: 85, updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(doc(ctx.drvA, 'bookings', a), { paymentSummary: { totalPaid: 9450 }, updatedAt: serverTimestamp() }));
+  // Vendor claim.
+  const v = await openTrip({ extra: fat });
+  await assertSucceeds(vendorAccept(ctx.v1, 'v1', v));
+  // Customer cancel (the last alternatives evaluated before the customer branch runs).
+  const c = await openTrip({ extra: fat, status: 'Pending' });
+  await assertSucceeds(updateDoc(doc(ctx.cust, 'bookings', c), { status: 'Cancelled', cancelReason: 'Change of plan', cancelledBy: 'customer', cancelledAt: serverTimestamp(), cancellationFee: 0, updatedAt: serverTimestamp() }));
+  // Staff: contact correction by operations and an invoice link by finance.
+  await env.withSecurityRulesDisabled(async (e) => {
+    const db = e.firestore();
+    await setDoc(doc(db, 'admins/opsX'), { role: 'admin', status: 'active', staffRole: 'r1', permissions: ['operations'] });
+    await setDoc(doc(db, 'admins/finX'), { role: 'admin', status: 'active', staffRole: 'r2', permissions: ['finance'] });
+  });
+  const s = await openTrip({ extra: fat });
+  await assertSucceeds(updateDoc(doc(env.authenticatedContext('opsX').firestore(), 'bookings', s), { phone: '+919800000099', notes: 'Gate 2', updatedAt: serverTimestamp() }));
+  await assertSucceeds(updateDoc(doc(env.authenticatedContext('finX').firestore(), 'bookings', s), { invoiceId: 'inv1', invoiceNumber: 'INV-1', updatedAt: serverTimestamp() }));
+});

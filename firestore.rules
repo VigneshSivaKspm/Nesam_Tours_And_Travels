@@ -813,10 +813,12 @@ service cloud.firestore {
                   || (isDriver() && resource.data.driverId == uid());
       allow write: if false;
     }
+    // Mirror of the per-booking payment transactions, written only by recordPayment /
+    // voidPayment: a client cannot create or edit a payment record.
     match /payments/{paymentId} {
       allow read: if canReadFinance()
                   || (isSignedIn() && resource.data.customerId == uid());
-      allow write: if can('finance');
+      allow write: if false;
     }
     match /b2b_partners/{partnerId} {
       allow read, write: if can('system');

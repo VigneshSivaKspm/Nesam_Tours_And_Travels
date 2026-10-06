@@ -103,7 +103,7 @@ function place(prefix: 'pickup' | 'drop', d: Record<string, any>): GeoPlace {
 function mapFareBreakdown(v: unknown, adjustment?: unknown): FareBreakdown | null {
   if (!v || typeof v !== 'object') return null;
   const f = v as Record<string, unknown>;
-  const keys: Exclude<keyof FareBreakdown, 'adjustmentName' | 'adjustmentAmount'>[] = [
+  const keys: Exclude<keyof FareBreakdown, 'adjustmentName' | 'adjustmentAmount' | 'subtotalBeforeAdjustment' | 'globalAdjustment' | 'discountDetail'>[] = [
     'baseFare', 'distanceFare', 'timeFare', 'nightCharge', 'driverAllowance', 'minimumFareAdjustment', 'adminAdjustment',
     'subtotal', 'discount', 'taxableAmount', 'gstRate', 'gst', 'total', 'distanceKm', 'durationMin',
     'perKmRate', 'perMinuteRate',

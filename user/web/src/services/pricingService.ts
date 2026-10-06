@@ -7,7 +7,7 @@
 import { collection, onSnapshot, query, where, doc } from 'firebase/firestore';
 import { db } from './firebase';
 import { GST_RATE, NIGHT_END_HOUR, NIGHT_START_HOUR, OUTSTATION_THRESHOLD_KM } from '../config/constants';
-import { AppliedCoupon, Coupon, FareBreakdown, GeoPlace, RideCategory, RouteInfo, TripType } from '../types';
+import { AppliedCoupon, Coupon, DiscountDetail, FareBreakdown, GeoPlace, RideCategory, RouteInfo, TripType } from '../types';
 
 // Same coercion as the booking server (functions/src/domain/pricing.ts): a
 // value stored with the wrong type counts as missing and is never parsed, so
@@ -56,6 +56,15 @@ function mapCategory(id: string, d: Record<string, any>): RideCategory | null {
       nightCharge: num(f.nightAllowance),
       driverAllowance: num(f.outstationDriverBattaPerDay) || num(f.driverAllowance),
       outstationPerKmRate: num(f.outstationPerKmRate) || undefined,
+      extras: {
+        waitingPerHour,
+        extraKmRate: num(f.extraKmCharge) || perKmRate,
+        // Absent flags mean "not included": the customer pays at actuals.
+        tollIncluded: f.tollIncluded === true,
+        parkingIncluded: f.parkingIncluded === true,
+        permitCharge: num(f.permitCharge),
+        carrierCharge: num(f.carrierCharge),
+      },
     },
     displayOrder: num(d.displayOrder, 99),
   };
@@ -149,18 +158,26 @@ export function calculateFare({ category, route, tripType, pickupTime, discount 
   const percent = adjustment ? Math.min(100, Math.max(0, adjustment.percent)) : 0;
   const adjustmentAmount = adjustment && percent > 0 ? (adjustment.direction === 'decrease' ? -1 : 1) * Math.round((subtotalBeforeAdjustment * percent) / 100) : 0;
   const subtotal = Math.max(0, subtotalBeforeAdjustment + adjustmentAmount);
-  const appliedDiscount = Math.min(Math.max(0, Math.round(discount)), subtotal);
+  const globalAdjustment = adjustment && percent > 0
+    ? { id: adjustment.id, name: adjustment.name, direction: adjustment.direction, percent, amount: adjustmentAmount }
+    : null;
+  const requested = Math.max(0, Math.round(discount));
+  const discountDetail: DiscountDetail | null = requested > 0 ? { type: 'coupon', value: requested, amount: 0, source: 'coupon', reason: '' } : null;
+  const appliedDiscount = Math.min(requested, subtotal);
+  if (discountDetail) discountDetail.amount = appliedDiscount;
   const taxableAmount = subtotal - appliedDiscount;
   const gst = Math.round(taxableAmount * GST_RATE);
 
   return {
+    subtotalBeforeAdjustment,
+    globalAdjustment,
+    discountDetail,
     baseFare,
     distanceFare,
     timeFare,
     nightCharge,
     driverAllowance,
     minimumFareAdjustment,
-    ...(adjustment && percent > 0 ? { adjustmentName: adjustment.name, adjustmentAmount } : {}),
     subtotal,
     discount: appliedDiscount,
     taxableAmount,
