@@ -272,7 +272,7 @@ test('backfill: super admin only; dry run changes nothing; applying is idempoten
 // ── Marketplace callables ───────────────────────────────────────────────────
 
 const pendingBooking = (id, extra = {}) => db.doc(`bookings/${id}`).set({
-  bookingId: `NT-${id}`, status: 'Pending', fareVerified: true, fare: 1050, vehicleCategoryId: 'sedan', pickup: 'Theni', drop: 'Bodi',
+  bookingId: `NT-${id}`, status: 'Approved', fareVerified: true, fare: 1050, vehicleCategoryId: 'sedan', pickup: 'Theni', drop: 'Bodi',
   fareBreakdown: { taxableAmount: 1000, gst: 50, total: 1050 }, ...extra,
 });
 

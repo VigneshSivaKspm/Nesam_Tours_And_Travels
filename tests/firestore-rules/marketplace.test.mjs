@@ -42,24 +42,4 @@ test('admin: rejecting one bid leaves the trip and the other bids open', async (
   assert.equal((await get('marketplace_trips/award3')).status, 'Bidding');
   assert.equal((await get('bookings/award3')).status, 'Pending');
 });
-
-const paymentSource = readFileSync(new URL('../../admin/src/services/paymentReconciliation.ts', import.meta.url), 'utf8');
-const paymentExports = {};
-new Function('require', 'exports', ts.transpileModule(paymentSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText)(requireAdmin, paymentExports);
-test('admin: payment reconciliation rejects wrong amounts and unapproved tolls, records once', async () => {
-  await put('bookings/pay1', { status: 'Completed', fareVerified: true, fare: 1000, tollCharges: 50, paymentMethod: 'UPI', payment: 'Pending' });
-  const reconcile = (amount, tolls) => paymentExports.reconcilePayment(db, 'pay1', amount, 'BANK-REF-1', tolls, 'admin1');
-  await assert.rejects(reconcile('1000', true), /Expected received/);
-  await assert.rejects(reconcile('1050', false), /toll receipts/);
-  const results = await Promise.allSettled([reconcile('1050', true), reconcile('1050', true)]);
-  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
-  assert.equal((await get('bookings/pay1')).payment, 'Paid');
-  assert.equal((await get('payments/booking_pay1')).amount, 1050);
-  assert.equal((await get('payments/booking_pay1')).verifiedBy, 'admin1');
-});
-test('admin: cash and unverified fares cannot become platform payout balance', async () => {
-  await put('bookings/pay2', { status: 'Completed', fareVerified: true, fare: 1000, paymentMethod: 'Cash' });
-  await assert.rejects(paymentExports.reconcilePayment(db, 'pay2', '1000', 'BANK-REF', false, 'admin1'), /Cash/);
-  await put('bookings/pay3', { status: 'Completed', fare: 1000, paymentMethod: 'UPI' });
-  await assert.rejects(paymentExports.reconcilePayment(db, 'pay3', '1000', 'BANK-REF', false, 'admin1'), /review its fare/);
-});
+// Payment recording moved to the recordPayment function; it is covered by workflow.test.mjs.
