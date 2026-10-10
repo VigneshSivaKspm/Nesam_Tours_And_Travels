@@ -22,6 +22,12 @@ export const colors = {
   info: '#1D4ED8',
   infoSoft: '#EFF6FF',
   white: '#FFFFFF',
+  /** Page background of the redesigned customer screens. */
+  page: '#FFFFFF',
+  /** Secondary text in the redesigned screens (cool grey). */
+  slate: '#64748B',
+  /** Card headings such as “Upcoming trip”. */
+  navy: '#1E2B58',
   overlay: 'rgba(17,17,17,0.55)',
 } as const;
 
@@ -33,7 +39,7 @@ export const type = {
   h2: { fontSize: 18, fontWeight: '800' as const, color: colors.ink },
   h3: { fontSize: 15, fontWeight: '700' as const, color: colors.ink },
   body: { fontSize: 14, color: colors.text },
-  small: { fontSize: 12, color: colors.muted },
-  tiny: { fontSize: 11, color: colors.faint },
-  label: { fontSize: 12, fontWeight: '700' as const, color: colors.text },
+  small: { fontSize: 13, color: colors.muted },
+  tiny: { fontSize: 12, color: colors.muted },
+  label: { fontSize: 13, fontWeight: '700' as const, color: colors.text },
 } as const;

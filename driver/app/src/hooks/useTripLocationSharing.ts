@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import type { TripDetails } from '../types/driver';
 import { watchPosition } from '../services/locationService';
@@ -6,18 +6,34 @@ import { updateDriverLocation } from '../services/driverService';
 import { haversineKm } from '../utils/geo';
 import { LOCATION_SHARE_INTERVAL_MS, LOCATION_SHARE_MIN_MOVE_KM } from '../config/constants';
 
-const SHARING_STAGES = ['En Route Pickup', 'Reached Pickup', 'In Progress', 'Arrived Destination'];
 const KEEP_AWAKE_TAG = 'nesam-trip';
+/** Before Reached Pickup, the position is shared only from this long before the booked pickup. */
+const SHARE_BEFORE_PICKUP_MS = 2 * 60 * 60 * 1000;
+
+/** Whether the driver's position should be shown to the customer now. */
+export function shouldShareLocation(trip: Pick<TripDetails, 'status' | 'subStatus' | 'pickupAt'> | null, now = Date.now()): boolean {
+  if (!trip || !['Assigned', 'Confirmed', 'Ongoing'].includes(trip.status)) return false;
+  if (trip.subStatus === 'Reached Pickup' || trip.subStatus === 'Trip Started') return true;
+  if (trip.subStatus !== 'Not Started') return false;
+  // Driving to the pickup: an instant ride, or a scheduled one that is close.
+  return !trip.pickupAt || trip.pickupAt.getTime() - now <= SHARE_BEFORE_PICKUP_MS;
+}
 
 /**
- * While a trip is under way (after the pre-trip check, until completion) the
- * driver's position is written to bookings/{id}.driverLocation — throttled to
- * one write per LOCATION_SHARE_INTERVAL_MS or per LOCATION_SHARE_MIN_MOVE_KM —
- * and the screen is kept awake. Runs while the app is in the foreground.
+ * While the driver is on the way to the pickup, at the pickup and on the trip,
+ * their position is written to bookings/{id}.driverLocation — throttled to one
+ * write per LOCATION_SHARE_INTERVAL_MS or per LOCATION_SHARE_MIN_MOVE_KM — and
+ * the screen is kept awake. Runs while the app is in the foreground.
  */
 export function useTripLocationSharing(trip: TripDetails | null): void {
   const bookingId = trip?.id ?? null;
-  const sharing = !!trip && (trip.status === 'Assigned' || trip.status === 'Ongoing') && SHARING_STAGES.includes(trip.stage);
+  // Re-evaluated every minute so a scheduled pickup starts sharing on time.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 60000);
+    return () => clearInterval(t);
+  }, []);
+  const sharing = shouldShareLocation(trip, now);
   const last = useRef<{ at: number; lat: number; lng: number } | null>(null);
 
   useEffect(() => {

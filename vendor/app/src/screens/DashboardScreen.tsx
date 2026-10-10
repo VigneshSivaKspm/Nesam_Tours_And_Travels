@@ -8,13 +8,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { useVendorData } from '../context/VendorData';
 import { Badge, Card, EmptyState, Notice } from '../components/ui';
 import { daysUntil } from '../utils/wallet';
+import { tripStageLabel } from '../services/vendorService';
 import { EXPIRY_WARNING_DAYS } from '../config/constants';
 import { formatINR } from '../utils/format';
 import { colors, radius, space, type } from '../theme';
 
 export function DashboardScreen() {
   const navigation = useNavigation();
-  const { profile, vehicles, drivers, activeBookings, awaitingDispatch, marketTrips, wallet, errors } = useVendorData();
+  const { profile, vehicles, drivers, activeBookings, awaitingDispatch, marketTrips, wallet, monthEarnings, errors } = useVendorData();
 
   const expiring = useMemo(
     () =>
@@ -54,7 +55,7 @@ export function DashboardScreen() {
 
         <View style={styles.grid}>
           <Stat label="Available balance" value={formatINR(wallet.available)} accent onPress={() => navigation.navigate('Wallet')} />
-          <Stat label="This month (net)" value={formatINR(wallet.monthNet)} />
+          <Stat label="Earned this month" value={formatINR(monthEarnings)} />
           <Stat label="Active trips" value={String(activeBookings.length)} onPress={() => navigation.navigate('Tabs', { screen: 'Trips' })} />
           <Stat label="Open marketplace" value={String(marketTrips.length)} onPress={() => navigation.navigate('Tabs', { screen: 'Market' })} />
           <Stat label="Vehicles" value={`${vehicles.filter((v) => v.status === 'Active').length}/${vehicles.length}`} onPress={() => navigation.navigate('Tabs', { screen: 'Fleet' })} />
@@ -79,7 +80,7 @@ export function DashboardScreen() {
             <Card key={b.id}>
               <View style={styles.row}>
                 <Text style={type.tiny}>{b.bookingId}</Text>
-                <Badge label={b.status === 'Confirmed' || !b.driverId ? 'Needs driver' : b.tripStage || b.status} tone={b.status === 'Confirmed' || !b.driverId ? 'warning' : 'brand'} />
+                <Badge label={b.status === 'Confirmed' || !b.driverId ? 'Needs driver' : tripStageLabel(b)} tone={b.status === 'Confirmed' || !b.driverId ? 'warning' : 'brand'} />
               </View>
               <Text style={type.body} numberOfLines={1}>
                 {b.pickupAddress} → {b.dropAddress}

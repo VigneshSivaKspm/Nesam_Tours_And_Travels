@@ -3,6 +3,12 @@ import { FareBreakdown } from '../types';
 import { formatINR } from '../utils/format';
 
 export const FareLines: React.FC<{ fare: FareBreakdown; tolls?: number }> = ({ fare, tolls = 0 }) => {
+  // The global % adjustment is part of the subtotal; without its row the lines would not add up to the total.
+  const adjustment: [string, number] | null = fare.globalAdjustment?.amount
+    ? [`${fare.globalAdjustment.name || 'Fare adjustment'} (${fare.globalAdjustment.direction === 'increase' ? '+' : '−'}${fare.globalAdjustment.percent}%)`, fare.globalAdjustment.amount]
+    : fare.adjustmentAmount
+      ? [fare.adjustmentName || 'Fare adjustment', fare.adjustmentAmount]
+      : null;
   const rows: [string, number][] = [
     ['Base fare', fare.baseFare],
     [`Distance (${fare.distanceKm} km @ ₹${fare.perKmRate}/km)`, fare.distanceFare],
@@ -10,6 +16,7 @@ export const FareLines: React.FC<{ fare: FareBreakdown; tolls?: number }> = ({ f
     ...(fare.nightCharge ? ([['Night charge', fare.nightCharge]] as [string, number][]) : []),
     ...(fare.driverAllowance ? ([['Driver allowance (outstation)', fare.driverAllowance]] as [string, number][]) : []),
     ...(fare.minimumFareAdjustment ? ([['Minimum fare adjustment', fare.minimumFareAdjustment]] as [string, number][]) : []),
+    ...(adjustment ? [adjustment] : []),
     ...(fare.adminAdjustment ? ([['Agreed fare adjustment', fare.adminAdjustment]] as [string, number][]) : []),
     ...(fare.discount ? ([['Promo discount', -fare.discount]] as [string, number][]) : []),
     [`GST (${Math.round(fare.gstRate * 100)}%)`, fare.gst],

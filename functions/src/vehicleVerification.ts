@@ -61,7 +61,8 @@ export const createCaptureSession = onCall(async (request) => {
     if (!snap.exists) throw new HttpsError('not-found', 'This trip no longer exists.');
     const b = snap.data()!;
     if (b.assignedDriverId !== driver.uid) throw new HttpsError('permission-denied', 'This trip is not assigned to you.');
-    if (!['Assigned', 'Confirmed'].includes(b.status) || tripSubStatusOf(b) !== 'Not Started') throw new HttpsError('failed-precondition', 'Vehicle verification is only needed before the trip starts.');
+    // Before leaving or at the pickup — any time before Trip Started.
+    if (!['Assigned', 'Confirmed'].includes(b.status) || !['Not Started', 'Reached Pickup'].includes(tripSubStatusOf(b))) throw new HttpsError('failed-precondition', 'Vehicle verification is only needed before the trip starts.');
     const done = await tx.get(db.doc(`vehicle_verifications/${bookingId}`));
     if (done.exists && done.data()!.status === 'Submitted' && done.data()!.driverId === driver.uid) {
       throw new HttpsError('failed-precondition', 'Vehicle verification is already submitted for this trip. Ask NESAM if it must be redone.');

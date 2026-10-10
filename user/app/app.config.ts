@@ -5,8 +5,11 @@ import type { ExpoConfig } from "expo/config";
 // Provide it at build time: GOOGLE_MAPS_ANDROID_API_KEY=... npx expo prebuild
 const mapsKey = process.env.GOOGLE_MAPS_ANDROID_API_KEY?.trim() ?? "";
 
+// Firebase Cloud Messaging needs the app's google-services.json (download it from the Firebase console).
+// Set GOOGLE_SERVICES_JSON to its path (an EAS file secret works); builds without it have no push.
+const googleServicesFile = process.env.GOOGLE_SERVICES_JSON;
+
 const config: ExpoConfig = {
-<<<<<<< HEAD
   owner: 'vigneshsivakspm',
   name: 'NESAM Customer',
   slug: 'nesam-customer-app',
@@ -17,16 +20,6 @@ const config: ExpoConfig = {
   icon: './assets/icon.png',
   userInterfaceStyle: 'light',
   backgroundColor: '#F7F7F7',
-=======
-  name: "NESAM Customer",
-  slug: "nesam-customer-app",
-  scheme: "nesamcustomer",
-  version: "1.0.0",
-  orientation: "portrait",
-  icon: "./assets/icon.png",
-  userInterfaceStyle: "light",
-  backgroundColor: "#F7F7F7",
->>>>>>> origin/main
   ios: {
     supportsTablet: false,
     bundleIdentifier: "com.nesamtours.customer",
@@ -34,6 +27,7 @@ const config: ExpoConfig = {
   android: {
     package: "com.nesamtours.customer",
     versionCode: 1,
+    ...(googleServicesFile ? { googleServicesFile } : {}),
     adaptiveIcon: {
       foregroundImage: "./assets/adaptive-icon.png",
       backgroundColor: "#FFFFFF",
@@ -81,6 +75,15 @@ const config: ExpoConfig = {
         microphonePermission: false,
       },
     ],
+    [
+      "expo-notifications",
+      {
+        color: "#E31E24",
+        defaultChannel: "nesam_general",
+        sounds: ["./assets/sounds/new_booking.wav", "./assets/sounds/approval.wav", "./assets/sounds/general.wav"],
+      },
+    ],
+    ["expo-audio", { microphonePermission: false }],
     "@react-native-community/datetimepicker",
     "expo-sharing",
     "./plugins/withReleaseSigning",
@@ -107,11 +110,7 @@ const config: ExpoConfig = {
   extra: {
     mapsEnabled: !!mapsKey,
     eas: {
-<<<<<<< HEAD
       projectId: '94ce7c34-2741-4406-803d-09ad8d519bbf',
-=======
-      projectId: "a38f9e90-9063-4d3c-ab46-11af066cd852",
->>>>>>> origin/main
     },
   },
 };

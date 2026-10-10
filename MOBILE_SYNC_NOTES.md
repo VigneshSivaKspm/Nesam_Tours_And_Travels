@@ -1,13 +1,45 @@
-# Mobile sync notes (web-first phase)
+# Mobile sync notes
 
-The web apps are the reference implementation for this phase. The React
-Native apps (`user/app`, `driver/app`, `vendor/app`) have **not** been changed.
-This file lists every backend, rules and data-contract change that the mobile
-apps must adopt before they are released against the new backend. It is
-updated at the end of each phase.
+The web apps are the reference implementation. This file lists every backend,
+rules and data-contract change the React Native apps (`user/app`,
+`driver/app`, `vendor/app`) must follow, and — in the status section below —
+what the apps do now.
 
-Nothing here is deployed yet. Functions, `firestore.rules` and `storage.rules`
-must be deployed together with the web apps.
+Nothing here is deployed yet. Functions, `firestore.rules`,
+`firestore.indexes.json` and `storage.rules` must be deployed together with the
+web apps and before any mobile build that depends on them is released.
+
+---
+
+## Mobile adoption status (2026-10-08)
+
+✔ = done in the app and covered by its checks (`tsc`, `eslint --max-warnings 0`,
+`jest`, `expo export --platform android`). "Not re-verified" = done in an
+earlier pass but not re-checked line by line in this one.
+
+| Area | user/app | driver/app | vendor/app |
+|---|---|---|---|
+| Pricing mirrors the server (no default categories, India-time night charge and coupon dates, strict numbers, global % adjustment) | ✔ — `__tests__/serverParity.test.ts` runs the server engine and the app engine on the same inputs | — | — |
+| Fare breakup: included / extra / not-applicable lines; total always equals the package total | ✔ quote (client mirror of `functions/src/domain/fareBreakup.ts`) and booked trip (stored `fareBreakup.lines`) | — | — |
+| Booking only through `createBooking`; WhatsApp (same-as-mobile or other number) and optional email sent | ✔ legacy client booking builder and `PARTNER_PAYOUT_SHARE` removed | — | — |
+| Statuses `Approved` / `Rejected`; `approvedAt` | ✔ Pending = "Awaiting approval"; auto-withdraw of an unaccepted instant ride starts at approval, never while under review (same fix in user/web) | ✔ | — |
+| Customer status allow-list (`Approved`/`Active` only) | ✔ | — | — |
+| Payment summary (paid so far / balance) on receipts; UPI link for the balance | ✔ | — | — |
+| Server wallet + ledger only (no client balance or payout maths); negative balance explained | — | ✔ | ✔ |
+| No payout estimate: "Not recorded" when the booking has none; fleet trips "Paid by your fleet" | — | ✔ | ✔ |
+| Payout request pays to the saved account (no destination typed) | — | ✔ | ✔ |
+| Marketplace: drivers query `Open`, vendors `Open`/`Bidding`; fleet drivers do not subscribe | — | ✔ | ✔ |
+| Independent driver claim sends the paired `assignedVehicleId` + exact number | — | ✔ | — |
+| Approved vehicles are deactivated, not deleted | — | — | ✔ |
+| Placeholder rating not written; rating shown only when `ratingCount > 0` | — | ✔ | — |
+| Legal acceptance gate (role-specific current versions) | ✔ | ✔ | ✔ |
+| Notifications: categories, colour + text + icon popups, three tones/channels, push tap routing | ✔ | ✔ | ✔ |
+| 12-hour times built from Intl parts (same text on every JS engine) | ✔ | ✔ | ✔ |
+| Vendor dispatch by vehicle id, write-once trip evidence, vehicle re-review | — | ✔ — pre-trip single write, live camera capture, vehicle id and number checks | ✔ — vehicle selection & status guard |
+| Finance snapshot (`finance.partnerPayout`) shown on trips | — | ✔ — mapped in `driverService.ts`, finalized indicator | ✔ — mapped in `vendorService.ts`, finalized indicator |
+
+Push needs `GOOGLE_SERVICES_JSON` at build time for every app (see each
+`app.config.ts`); without it the build works but receives no push.
 
 ---
 
@@ -58,3 +90,16 @@ The server now owns every partner-money number. Reference implementations:
 | **Admin marketplace actions are callables**: `awardMarketplaceBid`, `postBookingToMarketplace`, `assignIndependentDriver`; client creation of `marketplace_trips` is refused and staff cannot change `offeredPayout` | Admin-only | None |
 | **Driver rating**: a stored `rating` is shown only when backed by `ratingCount > 0`; web signup no longer writes the placeholder `rating: 5, totalTrips: 0` (the rules still accept those values from older app versions) | `driver/app` signup writes `rating: 5, totalTrips: 0` (`driverService.ts` ~line 318) and shows it as a real rating | Stop writing them; show "No ratings yet" until ratings exist |
 | **Wallet read rule keyed on document id** (`wallets/{type}_{uid}`) | None | None |
+
+---
+
+## Admin Marketplace & Bidding UI Redesign (2026-10-09)
+
+- **Page Redesign**: Modernized `admin/src/pages/Marketplace.tsx` to match the core Admin Design System (`Dashboard.tsx`, `Bookings.tsx`, `Penalties.tsx`).
+- **Key Metrics Summary Bar**: Real-time counter cards showing Total, Open, In Bidding, Assigned, and Closed/Completed marketplace trips.
+- **Post to Marketplace Form**: Clean, collapsible drawer with strict finance permission check (`canFinance`), clear input hints, real-time validation, and accessible buttons.
+- **Search & Filter Controls**: Compact search input (matches booking code, customer/driver name, pickup/drop location, vehicle category) alongside status tabs and result counts.
+- **Scannable Trip Cards**: Structured route display (green pickup dot, route connector, red drop destination), category badge, distance, formatted payout (`₹`), and pickup time.
+- **Bid Review & Awarding Drawer**: Clear vendor bids listing with bid amount, counter-offers, notes, and distinct status badges (`Pending`, `Awarded`, `Rejected`). Includes direct `awardMarketplaceBid` and `rejectBid` callables.
+- **Independent Driver Assignment**: Seamless inline selector for eligible independent drivers (`status: Approved`, `presenceStatus: Online`, no `vendorId`).
+- **Responsive & Accessible**: Fully responsive desktop and mobile layouts with accessible contrast, feedback banners (`Notice`), toast alerts (`useToast`), and zero spurious red borders.

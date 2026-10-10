@@ -1,30 +1,24 @@
 import {
   buildClaimUpdate,
   buildNewDriverDoc,
-  buildStartTripUpdate,
   emptyRegistration,
   mapBooking,
   mapDriverDoc,
   tollTotal,
   validatePayoutAmount,
 } from '../src/services/driverService';
-import { categoryMatches, last7Days, summarizeEarnings, summarizeWallet } from '../src/utils/earnings';
-import type { DriverProfile, PayoutRequest, TripDetails } from '../src/types/driver';
+import { categoryMatches, payoutText } from '../src/utils/earnings';
+import { last7Days, mapLedgerEntry, mapWallet, summarizeEarnings } from '../src/utils/ledger';
+import type { DriverProfile, LedgerEntry } from '../src/types/driver';
 
 const driver = mapDriverDoc('drv1', { name: 'Murugan', phone: '+91 98765 43210', status: 'Approved' }).driver as DriverProfile;
 
 describe('rules payloads', () => {
   it('claim writes exactly the driverClaimOk allow-list', () => {
-    expect(Object.keys(buildClaimUpdate(driver, 'TN01AB1234', 425)).sort()).toEqual(
-      ['assignedAt', 'assignedDriverId', 'assignedDriverName', 'assignedVehicleNumber', 'driver', 'driverPayout', 'driverPhone', 'status', 'tripStage', 'updatedAt'].sort(),
+    expect(Object.keys(buildClaimUpdate(driver, { id: 'veh1', number: 'TN01AB1234' }, 425)).sort()).toEqual(
+      ['assignedAt', 'assignedDriverId', 'assignedDriverName', 'assignedVehicleId', 'assignedVehicleNumber', 'driver', 'driverPayout', 'driverPhone', 'status', 'tripStage', 'updatedAt'].sort(),
     );
-    expect(buildClaimUpdate(driver, 'x', 1)).toMatchObject({ status: 'Assigned', assignedDriverId: 'drv1' });
-  });
-
-  it('trip start sends the OTP only as an attempt', () => {
-    const u = buildStartTripUpdate('1234');
-    expect(u).toMatchObject({ status: 'Ongoing', tripStage: 'In Progress', otpAttempt: '1234' });
-    expect(Object.keys(u).sort()).toEqual(['otpAttempt', 'startedAt', 'status', 'tripStage', 'updatedAt']);
+    expect(buildClaimUpdate(driver, { id: '', number: 'x' }, 1)).toMatchObject({ status: 'Assigned', assignedDriverId: 'drv1', assignedVehicleId: '' });
   });
 
   it('a self-registered driver can never grant itself approval', () => {
@@ -36,12 +30,16 @@ describe('rules payloads', () => {
 });
 
 describe('booking mapping', () => {
-  it('reads flat and nested locations and derives stage', () => {
-    const t = mapBooking('b1', { status: 'Ongoing', tripStage: 'Reached Pickup', fare: 1000, pickup: 'A', pickupLat: 10, pickupLng: 77, drop: { address: 'B', lat: 9, lng: 78 } });
-    expect(t.stage).toBe('In Progress');
+  it('reads flat and nested locations and the trip step', () => {
+    const t = mapBooking('b1', { status: 'Ongoing', tripSubStatus: 'Reached Pickup', tripStage: 'Reached Pickup', boardingVerifiedAt: new Date(), fare: 1000, pickup: 'A', pickupLat: 10, pickupLng: 77, drop: { address: 'B', lat: 9, lng: 78 } });
+    expect(t.subStatus).toBe('Reached Pickup');
+    expect(t.boardingVerified).toBe(true);
+    expect(t.stage).toBe('Reached Pickup');
     expect(t.pickup).toMatchObject({ address: 'A', lat: 10 });
     expect(t.drop).toMatchObject({ address: 'B', lng: 78 });
-    expect(t.driverEarnings).toBe(850);
+    // No driverPayout on the booking: nothing is estimated from the fare.
+    expect(t.payoutRecorded).toBe(false);
+    expect(t.driverEarnings).toBe(0);
   });
   it('prefers the explicit driver payout and ignores malformed tolls', () => {
     const t = mapBooking('b1', { status: 'Completed', fare: 1000, driverPayout: 700, tolls: [{ id: 'a', amount: 50 }, 'junk', null] });
@@ -49,21 +47,55 @@ describe('booking mapping', () => {
     expect(t.tolls).toHaveLength(1);
     expect(t.stage).toBe('Completed');
   });
+  it('uses the finalized payout once finance closes the trip', () => {
+    const agreed = mapBooking('p', { status: 'Completed', driverPayout: 850 });
+    expect(agreed).toMatchObject({ driverEarnings: 850, payoutRecorded: true, payoutFinalized: false });
+    const fin = mapBooking('p', { status: 'Completed', driverPayout: 850, finance: { schema: 1, partnerType: 'driver', partnerPayout: 820 } });
+    expect(fin).toMatchObject({ driverEarnings: 820, payoutRecorded: true, payoutFinalized: true });
+    expect(mapBooking('p', { status: 'Completed', finance: { schema: 1, partnerType: 'vendor', partnerPayout: 900 } }).fleetTrip).toBe(true);
+  });
+  it('maps the three trip steps and the legacy stages of older bookings', () => {
+    expect(mapBooking('n', { status: 'Assigned' }).subStatus).toBe('Not Started');
+    const started = mapBooking('s', { status: 'Ongoing', tripSubStatus: 'Trip Started', tripStage: 'In Progress' });
+    expect(started.subStatus).toBe('Trip Started');
+    // Earlier order: "Trip Started" while driving to the pickup → not at the pickup yet.
+    expect(mapBooking('r', { status: 'Ongoing', tripSubStatus: 'Trip Started', tripStage: 'En Route Pickup' }).subStatus).toBe('Not Started');
+    // Older flow: OTP was checked at the start, so boarding counts as verified.
+    const old = mapBooking('o', { status: 'Ongoing', tripStage: 'In Progress', startedAt: new Date() });
+    expect(old.subStatus).toBe('Trip Started');
+    expect(old.boardingVerified).toBe(true);
+    expect(mapBooking('e', { status: 'Completed' }).subStatus).toBe('Trip Ended');
+  });
+  it('knows whether the vehicle photos were submitted and the balance due', () => {
+    const t = mapBooking('v', { status: 'Assigned', vehicleVerification: { status: 'Submitted' }, paymentSummary: { balanceDue: 250 }, preTrip: { vehicleFront: 'f', vehicleRear: 'r', vehicleInterior: 'i', odometerReading: 100 } });
+    expect(t.verificationSubmitted).toBe(true);
+    expect(t.balanceDue).toBe(250);
+    expect(t.preTrip).toMatchObject({ vehicleFront: 'f', vehicleRear: 'r', vehicleInterior: 'i' });
+    expect(JSON.stringify(t.preTrip)).not.toMatch(/selfie/i);
+    expect(mapBooking('x', { status: 'Assigned' }).verificationSubmitted).toBe(false);
+  });
   it('maps legacy "Trip Started" to Ongoing', () => {
     expect(mapBooking('b', { status: 'Trip Started' }).status).toBe('Ongoing');
   });
 });
 
-function trip(id: string, earnings: number, tolls: number, completedAt: Date): TripDetails {
-  return { ...mapBooking(id, { status: 'Completed' }), driverEarnings: earnings, tollCharges: tolls, completedAt };
+function entry(id: string, type: string, amount: number, at: Date, over: Record<string, unknown> = {}): LedgerEntry {
+  return mapLedgerEntry(id, { schema: 2, type, direction: 'credit', netAmount: amount, status: 'available', createdAt: at, ...over })!;
 }
 
-describe('earnings & wallet', () => {
+describe('earnings & wallet (server ledger)', () => {
   const now = new Date(2026, 8, 28, 15, 0);
-  const trips = [trip('a', 500, 50, new Date(2026, 8, 28, 9)), trip('b', 300, 0, new Date(2026, 8, 25, 9)), trip('c', 1000, 0, new Date(2026, 7, 1, 9))];
+  const ledger = [
+    entry('a', 'trip_earning', 500, new Date(2026, 8, 28, 9)),
+    entry('a-toll', 'toll_reimbursement', 50, new Date(2026, 8, 28, 9)),
+    entry('b', 'trip_earning', 300, new Date(2026, 8, 25, 9)),
+    entry('c', 'trip_earning', 1000, new Date(2026, 7, 1, 9)),
+    entry('cash', 'cash_collected', 1200, new Date(2026, 8, 28, 10), { direction: 'debit' }),
+    entry('gone', 'trip_earning', 999, new Date(2026, 8, 28, 11), { status: 'cancelled' }),
+  ];
 
-  it('summarises by period including tolls', () => {
-    const s = summarizeEarnings(trips, now);
+  it('summarises only credited earnings, by period', () => {
+    const s = summarizeEarnings(ledger, now);
     expect(s.todayEarnings).toBe(550);
     expect(s.thisWeekEarnings).toBe(850);
     expect(s.thisMonthEarnings).toBe(850);
@@ -72,22 +104,30 @@ describe('earnings & wallet', () => {
     expect(s.totalTripsCompleted).toBe(3);
   });
 
-  it('holds back pending payouts and releases rejected ones', () => {
-    const p = (amount: number, status: string): PayoutRequest => ({ id: status + amount, amount, requestedAt: '', method: 'UPI', details: '', status, utr: '', processedAt: '' });
-    const w = summarizeWallet(1850, [p(500, 'Paid'), p(300, 'Pending'), p(400, 'Rejected'), p(100, 'Deferred')]);
-    expect(w.totalPaidOut).toBe(500);
-    expect(w.pendingPayouts).toBe(400);
-    expect(w.availableBalance).toBe(950);
-    expect(summarizeWallet(100, [p(500, 'Paid')]).availableBalance).toBe(0);
+  it('ignores records that are not schema-2 ledger entries', () => {
+    expect(mapLedgerEntry('old', { type: 'trip_earning', netAmount: 10 })).toBeNull();
   });
 
-  it('builds the 7-day chart', () => {
-    const days = last7Days(trips, now);
+  it('reads the wallet as the server wrote it, including a negative balance', () => {
+    expect(mapWallet(undefined).available).toBe(0);
+    expect(mapWallet({ available: -700, reserved: 100, paidOut: 500, pending: 'x' })).toMatchObject({ available: -700, reserved: 100, paidOut: 500, pending: 0 });
+  });
+
+  it('builds the 7-day chart from credited earnings', () => {
+    const days = last7Days(ledger, now);
     expect(days).toHaveLength(7);
     expect(days[6]!.amount).toBe(550);
     expect(days[3]!.amount).toBe(300);
   });
 
+  it('never estimates a payout', () => {
+    expect(payoutText(mapBooking('p', { status: 'Completed', fare: 1000 }))).toBe('Not recorded');
+    expect(payoutText(mapBooking('p', { status: 'Completed', fare: 1000, driverPayout: 850 }))).toMatch(/850/);
+    expect(payoutText(mapBooking('p', { status: 'Completed', fare: 1000, driverPayout: 850, assignedVendorId: 'v1' }))).toBe('Paid by your fleet');
+  });
+});
+
+describe('payout requests', () => {
   it('validates payout amounts', () => {
     expect(validatePayoutAmount(99, 1000)).toMatch(/Minimum/);
     expect(validatePayoutAmount(1001, 1000)).toMatch(/exceeds/);
@@ -113,14 +153,3 @@ describe('category matching', () => {
   });
 });
 
-
-describe('settled withdrawable balance', () => {
-  it('excludes cash, unpaid and fleet trips, and unapproved tolls', () => {
-    const base = { status: 'Completed', fare: 1000, driverPayout: 850, fareVerified: true, payment: 'Paid', paymentMethod: 'UPI', tollCharges: 50 };
-    expect(mapBooking('p', base).withdrawableAmount).toBe(850);
-    expect(mapBooking('p', { ...base, tollsApproved: true }).withdrawableAmount).toBe(900);
-    expect(mapBooking('p', { ...base, paymentMethod: 'Cash' }).withdrawableAmount).toBe(0);
-    expect(mapBooking('p', { ...base, assignedVendorId: 'vendor' }).withdrawableAmount).toBe(0);
-    expect(mapBooking('p', { ...base, payment: 'Pending' }).withdrawableAmount).toBe(0);
-  });
-});

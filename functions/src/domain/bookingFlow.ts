@@ -66,33 +66,45 @@ export const isMarketplaceVisible = (status: unknown) => status === 'Approved';
 
 // ── Driver trip sub-status (separate from the booking status) ─────────────
 
-export const TRIP_SUB_STATUSES = ['Not Started', 'Trip Started', 'Reached Pickup', 'Trip Ended'] as const;
+// Driver workflow: Reached Pickup Location → Trip Started → Trip Ended.
+//   Reached Pickup  the driver is at the pickup (booking stays Assigned).
+//   Trip Started    the customer's boarding OTP and the vehicle photos are
+//                   verified; the booking becomes Ongoing.
+//   Trip Ended      the booking becomes Completed.
+export const TRIP_SUB_STATUSES = ['Not Started', 'Reached Pickup', 'Trip Started', 'Trip Ended'] as const;
 export type TripSubStatus = (typeof TRIP_SUB_STATUSES)[number];
 
 export const isTripSubStatus = (v: unknown): v is TripSubStatus => (TRIP_SUB_STATUSES as readonly string[]).includes(String(v));
 
-/** A booking without a sub-status is Not Started; legacy tripStage values map across. */
+/**
+ * A booking without a sub-status is Not Started; legacy tripStage values map across.
+ * Trips recorded under the earlier order (Trip Started = driving to the pickup,
+ * mirrored as tripStage 'En Route Pickup') have not reached the pickup yet.
+ */
 export function tripSubStatusOf(b: { tripSubStatus?: unknown; tripStage?: unknown; status?: unknown }): TripSubStatus {
+  if (b.tripSubStatus === 'Trip Started' && b.tripStage === 'En Route Pickup') return 'Not Started';
   if (isTripSubStatus(b.tripSubStatus)) return b.tripSubStatus;
   if (b.status === 'Completed') return 'Trip Ended';
   switch (b.tripStage) {
-    case 'En Route Pickup': return 'Trip Started';
     case 'Reached Pickup': return 'Reached Pickup';
     case 'In Progress':
-    case 'Arrived Destination': return 'Reached Pickup';
+    case 'Arrived Destination': return 'Trip Started';
     case 'Completed': return 'Trip Ended';
     default: return 'Not Started';
   }
 }
 
 const TRIP_NEXT: Record<TripSubStatus, TripSubStatus | null> = {
-  'Not Started': 'Trip Started',
-  'Trip Started': 'Reached Pickup',
-  'Reached Pickup': 'Trip Ended',
+  'Not Started': 'Reached Pickup',
+  'Reached Pickup': 'Trip Started',
+  'Trip Started': 'Trip Ended',
   'Trip Ended': null,
 };
 
-/** Only the next stage is legal: Trip End needs Reached Pickup, which needs Trip Started. */
+/** The step a driver can take next, or null once the trip has ended. */
+export const nextTripStep = (current: TripSubStatus): TripSubStatus | null => TRIP_NEXT[current];
+
+/** Only the next stage is legal: Trip End needs Trip Started, which needs Reached Pickup. */
 export function tripStageBlocker(current: TripSubStatus, to: TripSubStatus): string {
   if (current === to) return `This trip is already at "${to}".`;
   if (TRIP_NEXT[current] === to) return '';
@@ -104,8 +116,8 @@ export function tripStageBlocker(current: TripSubStatus, to: TripSubStatus): str
 /** Legacy tripStage vocabulary that older apps and the customer panels still read. */
 export const LEGACY_STAGE_FOR: Record<TripSubStatus, string> = {
   'Not Started': 'Assigned',
-  'Trip Started': 'En Route Pickup',
   'Reached Pickup': 'Reached Pickup',
+  'Trip Started': 'In Progress',
   'Trip Ended': 'Completed',
 };
 

@@ -17,6 +17,8 @@ import { OnboardingWizard } from './src/screens/onboarding/OnboardingWizard';
 import { MainNavigator } from './src/navigation/MainNavigator';
 import { navigationRef } from './src/navigation/navigationRef';
 import { VendorDataProvider } from './src/context/VendorData';
+import { InboxProvider } from './src/context/Inbox';
+import { LegalGate } from './src/components/LegalGate';
 import { signOutUser, subscribeToAuthUser } from './src/services/authService';
 import { subscribeToVendor, type VendorSnapshot } from './src/services/onboardingService';
 import { describeDataError } from './src/utils/retry';
@@ -85,9 +87,13 @@ function Root() {
   }
 
   return (
-    <VendorDataProvider key={vendor.profile.id} profile={vendor.profile} record={vendor.record}>
-      <MainNavigator onSignOut={signOut} />
-    </VendorDataProvider>
+    <LegalGate key={vendor.profile.id} role="vendor">
+      <InboxProvider userId={vendor.profile.id} role="vendor" penaltyField="vendorId">
+        <VendorDataProvider profile={vendor.profile} record={vendor.record}>
+          <MainNavigator onSignOut={signOut} />
+        </VendorDataProvider>
+      </InboxProvider>
+    </LegalGate>
   );
 }
 

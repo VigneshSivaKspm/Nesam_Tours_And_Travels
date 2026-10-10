@@ -26,10 +26,13 @@ export interface DriverProfile {
   pincode: string;
   emergencyContactName: string;
   emergencyContact: string;
-  rating: number;
+  /** null until customers have rated this driver. */
+  rating: number | null;
   joiningDate: string;
   vendorId?: string;
   vendorName?: string;
+  /** Vehicle record paired with this driver by NESAM/vendor; a claim must name it. */
+  assignedVehicleId?: string;
   approvalStatus: ApprovalStatus;
   docStatus: DocumentStatus;
   rejectionReason?: string;
@@ -100,14 +103,17 @@ export interface DriverAccount extends RegistrationData {
   driver: DriverProfile;
 }
 
+/** Vehicle verification recorded by the server: three camera photos (no driver selfie) and the starting odometer. */
 export interface PreTripPhotos {
-  selfie: string;
   vehicleFront: string;
-  odometer: string;
-  rearSeat: string;
+  vehicleRear: string;
+  vehicleInterior: string;
   odometerReading: number;
   capturedAt: string;
 }
+
+/** The driver's three trip steps — Reached Pickup → Trip Started → Trip Ended (stored as tripSubStatus; the server enforces the order). */
+export type TripSubStatus = 'Not Started' | 'Reached Pickup' | 'Trip Started' | 'Trip Ended';
 
 // Driver-reported progress, stored on the booking as `tripStage`.
 export type TripStage =
@@ -119,7 +125,7 @@ export type TripStage =
   | 'Completed';
 
 // Booking lifecycle status (see firestore.rules).
-export type BookingStatus = 'Pending' | 'Confirmed' | 'Assigned' | 'Ongoing' | 'Completed' | 'Cancelled';
+export type BookingStatus = 'Pending' | 'Approved' | 'Confirmed' | 'Assigned' | 'Ongoing' | 'Completed' | 'Cancelled' | 'Rejected';
 
 export interface TripLocation {
   address: string;
@@ -146,14 +152,31 @@ export interface TripDetails {
   vehicleType: string;
   serviceType: string;
   fareAmount: number;
+  /** The agreed payout recorded on the booking; 0 when none is recorded (see payoutRecorded). */
   driverEarnings: number;
+  /** false = no driverPayout on the booking: shown as "Not recorded", never estimated. */
+  payoutRecorded: boolean;
+  /** true once finance finalized the trip (bookings/{id}.finance); driverEarnings is then the finalized amount. */
+  payoutFinalized: boolean;
+  /** Assigned through a vendor: the vendor is paid and settles with the driver. */
+  fleetTrip: boolean;
   tollCharges: number;
   status: BookingStatus;
+  /** Legacy stage the older screens read; the server mirrors the sub-status into it. */
   stage: TripStage;
+  subStatus: TripSubStatus;
+  /** The three vehicle photos and odometer were submitted and accepted for review. */
+  verificationSubmitted: boolean;
+  /** The customer's boarding OTP was verified at pickup. */
+  boardingVerified: boolean;
+  /** What the customer still owes on this booking, from the recorded payments. */
+  balanceDue?: number;
+  reachedPickupAt?: Date | null;
+  /** Booked pickup time (pickupAt / scheduledAt); null when the booking does not say. */
+  pickupAt: Date | null;
   scheduledDate: string;
   scheduledTime: string;
   paymentMode: string;
-  withdrawableAmount: number;
   /** Rider's note for the driver (gate number, landmark, luggage). */
   notes: string;
   startOdometer?: number;
@@ -186,6 +209,31 @@ export interface DriverEarningsSummary {
   tollReimbursements: number;
 }
 
+/** wallets/driver_{uid}, written only by the server (functions/src/ledger.ts). */
+export interface DriverWallet {
+  /** Withdrawable now; negative when cash fares collected exceed earnings. */
+  available: number;
+  /** Earnings on trips whose customer payment is not verified yet. */
+  pending: number;
+  reserved: number;
+  paidOut: number;
+  cashCollected: number;
+  tripEarnings: number;
+  tollReimbursements: number;
+}
+
+/** wallet_ledger entry (schema 2) for this driver. */
+export interface LedgerEntry {
+  id: string;
+  type: string;
+  direction: 'credit' | 'debit';
+  amount: number;
+  status: string;
+  bookingId: string;
+  bookingCode: string;
+  createdAt: Date | null;
+}
+
 export interface PayoutRequest {
   id: string;
   amount: number;
@@ -198,6 +246,10 @@ export interface PayoutRequest {
   processedAt: string;
 }
 
+export type NotificationCategory = 'bookings' | 'approvals' | 'trips' | 'payments' | 'penalties' | 'general';
+export type NotificationSeverity = 'info' | 'success' | 'warning' | 'critical';
+export type NotificationSound = 'new_booking' | 'approval' | 'general';
+
 export interface DriverNotification {
   id: string;
   title: string;
@@ -205,4 +257,32 @@ export interface DriverNotification {
   time: string;
   read: boolean;
   createdAtMs: number;
+  category: NotificationCategory;
+  severity: NotificationSeverity;
+  sound: NotificationSound;
+  bookingId: string;
+  bookingCode: string;
+  ctaLabel: string;
+  ctaPage: string;
+  /** false = quiet inbox entry (no popup or tone). */
+  popup: boolean;
+}
+
+export type PenaltyStatus = 'Pending' | 'Acknowledged' | 'Paid' | 'Deducted' | 'Waived' | 'Disputed';
+
+export interface DriverPenalty {
+  id: string;
+  amount: number;
+  category: string;
+  reason: string;
+  description: string;
+  bookingCode: string;
+  bookingId: string;
+  incidentDate: string;
+  status: PenaltyStatus;
+  acknowledged: boolean;
+  acknowledgedAt: Date | null;
+  disputeNote: string;
+  issuedAt: Date | null;
+  issuedByName: string;
 }

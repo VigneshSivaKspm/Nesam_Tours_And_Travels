@@ -188,7 +188,7 @@ function AdminShell({ session }: { session: AdminSession }) {
       case "bookings":
         return <Bookings onSelectBooking={(id) => setSelectedBookingId(id)} />;
       case "marketplace":
-        return <Marketplace />;
+        return <Marketplace onSelectBooking={(id) => setSelectedBookingId(id)} />;
 
       // People
       case "customers":

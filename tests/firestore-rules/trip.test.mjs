@@ -170,47 +170,41 @@ test('vehicle photos: an exact copy of an earlier photo is refused and raises a 
   assert.ok((await db.collection('notifications').where('bookingId', '==', second).get()).docs.some((d) => /flagged/.test(d.data().title)));
 });
 
-test('trip: Trip Started needs the photo verification; steps run strictly in order and a skip is refused and logged', async () => {
+test('trip: Reached Pickup → Trip Started → Trip Ended; skips and repeats are refused and logged', async () => {
   const id = await assigned();
-  await assert.rejects(advance(id, 'Trip Started'), (e) => /vehicle photo verification/.test(e.message) && e.details?.verificationRequired === true);
-  await assert.rejects(advance(id, 'Reached Pickup'), /cannot be recorded yet. The next step is "Trip Started"/);
-  await assert.rejects(advance(id, 'Trip Ended'), /cannot be recorded yet. The next step is "Trip Started"/);
-  await assert.rejects(advance(id, 'Not Started'), /Choose Trip Started/);
-  await assert.rejects(advance(id, 'Bogus'), /Choose Trip Started/);
+  // An app customer (walk-in customers get the OTP in the approval WhatsApp/SMS/email instead).
+  await db.doc(`bookings/${id}`).update({ customerId: 'custTrip' });
+  // Only Reached Pickup can come first.
+  await assert.rejects(advance(id, 'Trip Started'), /cannot be recorded yet. The next step is "Reached Pickup"/);
+  await assert.rejects(advance(id, 'Trip Ended'), /cannot be recorded yet. The next step is "Reached Pickup"/);
+  await assert.rejects(advance(id, 'Not Started'), /Choose Reached Pickup/);
+  await assert.rejects(advance(id, 'Bogus'), /Choose Reached Pickup/);
   const skips = (await secEvents('trip_state_violation')).filter((e) => e.bookingId === id);
   assert.ok(skips.length >= 2);
   assert.equal(skips[0].source, 'server');
   assert.equal((await booking(id)).tripSubStatus, 'Not Started');
-  await verify(id);
   // Someone else's trip, a suspended driver and an anonymous caller cannot move it.
-  await assert.rejects(advance(id, 'Trip Started', {}, 'drvB'), /not assigned to you/);
-  await assert.rejects(advance(id, 'Trip Started', {}, 'drvSusp'), /not active/);
-  await assert.rejects(call(advanceTrip, null, { bookingId: id, to: 'Trip Started' }), /Sign in/);
-  const started = await advance(id, 'Trip Started', { requestId: 'trip_req_start_01', location: { lat: 10.0, lng: 77.46, accuracy: 20 } });
-  assert.equal(started.duplicate, false);
-  let b = await booking(id);
-  assert.equal(b.status, 'Ongoing');
-  assert.equal(b.tripSubStatus, 'Trip Started');
-  assert.equal(b.tripStage, 'En Route Pickup'); // legacy mirror for the customer app
-  assert.ok(b.tripStartedAt);
-  assert.equal(b.tripStartedLocation.lat, 10.0);
-  assert.equal(b.vehicleVerification.status, 'Submitted');
-  // A retried tap is a no-op; moving to the same step with a new request is an invalid transition.
-  assert.equal((await advance(id, 'Trip Started', { requestId: 'trip_req_start_01' })).duplicate, true);
-  await assert.rejects(advance(id, 'Trip Started', { requestId: 'trip_req_start_02' }), /already|cannot|order/i);
-  await assert.rejects(advance(id, 'Trip Ended', { endOdometer: 12100 }), /Reached Pickup|order|Trip Started/i);
+  await assert.rejects(advance(id, 'Reached Pickup', {}, 'drvB'), /not assigned to you/);
+  await assert.rejects(advance(id, 'Reached Pickup', {}, 'drvSusp'), /not active/);
+  await assert.rejects(call(advanceTrip, null, { bookingId: id, to: 'Reached Pickup' }), /Sign in/);
+  // The boarding OTP cannot be checked before the driver is at the pickup.
+  await assert.rejects(call(verifyBoarding, 'drvA', { bookingId: id, otp: '1234' }), /reached the pickup first/);
   // Reached Pickup is checked against the pickup location when one is shared.
   await assert.rejects(advance(id, 'Reached Pickup', { location: { lat: 11.2, lng: 78.2 } }), (e) => /km from the pickup/.test(e.message) && e.details.distanceKm > 100);
-  await advance(id, 'Reached Pickup', { location: { lat: 10.011, lng: 77.471, accuracy: 8 } });
-  b = await booking(id);
+  const reached = await advance(id, 'Reached Pickup', { requestId: 'trip_req_reach_01', location: { lat: 10.011, lng: 77.471, accuracy: 8 } });
+  assert.equal(reached.duplicate, false);
+  let b = await booking(id);
+  assert.equal(b.status, 'Assigned'); // the ride itself has not started
   assert.equal(b.tripSubStatus, 'Reached Pickup');
+  assert.equal(b.tripStage, 'Reached Pickup'); // legacy mirror for older apps
   assert.ok(b.reachedPickupAt);
   assert.equal(b.reachedPickupLocation.accuracy, 8);
-  // The customer is told when the driver starts and arrives.
-  const msgs = (await db.collection('notifications').where('bookingId', '==', id).where('recipientType', '==', 'admin').get()).docs.map((d) => d.data().title);
-  assert.ok(msgs.includes('Trip started') && msgs.includes('Driver at pickup'));
-  // Ending needs the boarding OTP first, then an odometer reading that is not lower than the start.
-  await assert.rejects(advance(id, 'Trip Ended', { endOdometer: 12100 }), (e) => /boarding OTP/.test(e.message) && e.details.boardingRequired === true);
+  // A retried tap is a no-op; the same step with a new request is an invalid transition.
+  assert.equal((await advance(id, 'Reached Pickup', { requestId: 'trip_req_reach_01' })).duplicate, true);
+  await assert.rejects(advance(id, 'Reached Pickup', { requestId: 'trip_req_reach_02' }), /already/);
+  await assert.rejects(advance(id, 'Trip Ended', { endOdometer: 12100 }), /next step is "Trip Started"/);
+  // Trip Started needs the customer's boarding OTP …
+  await assert.rejects(advance(id, 'Trip Started'), (e) => /boarding OTP/.test(e.message) && e.details.boardingRequired === true);
   const otp = (await db.doc(`booking_secrets/${id}`).get()).data().otp;
   assert.match(otp, /^\d{4}$/);
   const wrong = otp === '0000' ? '1111' : '0000';
@@ -220,6 +214,30 @@ test('trip: Trip Started needs the photo verification; steps run strictly in ord
   assert.equal((await call(verifyBoarding, 'drvA', { bookingId: id, otp })).already, false);
   assert.equal((await call(verifyBoarding, 'drvA', { bookingId: id, otp })).already, true);
   assert.ok((await booking(id)).boardingVerifiedAt);
+  // … and the vehicle photo verification, which can be done at the pickup.
+  await assert.rejects(advance(id, 'Trip Started'), (e) => /vehicle photo verification/.test(e.message) && e.details?.verificationRequired === true);
+  await verify(id);
+  const started = await advance(id, 'Trip Started', { requestId: 'trip_req_start_01', location: { lat: 10.0, lng: 77.46, accuracy: 20 } });
+  assert.equal(started.stage, 'Trip Started');
+  b = await booking(id);
+  assert.equal(b.status, 'Ongoing');
+  assert.equal(b.tripSubStatus, 'Trip Started');
+  assert.equal(b.tripStage, 'In Progress');
+  assert.ok(b.tripStartedAt && b.startedAt);
+  assert.equal(b.tripStartedLocation.lat, 10.0);
+  assert.equal(b.startOdometer, 12000);
+  assert.equal(b.vehicleVerification.status, 'Submitted');
+  assert.equal((await advance(id, 'Trip Started', { requestId: 'trip_req_start_01' })).duplicate, true);
+  await assert.rejects(advance(id, 'Reached Pickup'), /next step is "Trip Ended"/);
+  // Photos cannot be retaken once the trip is under way.
+  await assert.rejects(call(vv.createCaptureSession, 'drvA', { bookingId: id }), /only needed before the trip starts|already submitted/);
+  // Admin and customer are told at each step.
+  const adminMsgs = (await db.collection('notifications').where('bookingId', '==', id).where('recipientType', '==', 'admin').get()).docs.map((d) => d.data().title);
+  assert.ok(adminMsgs.includes('Driver at pickup') && adminMsgs.includes('Trip started'));
+  const custMsgs = (await db.collection('notifications').where('bookingId', '==', id).where('recipientType', '==', 'customer').get()).docs.map((d) => d.data());
+  assert.ok(custMsgs.some((n) => n.title === 'Your driver has arrived' && /boarding OTP/.test(n.message) && !n.message.includes(otp)));
+  assert.ok(custMsgs.some((n) => n.title === 'Your trip has started'));
+  // Ending needs an odometer reading that is not lower than the start.
   await assert.rejects(advance(id, 'Trip Ended', {}), /ending odometer/);
   await assert.rejects(advance(id, 'Trip Ended', { endOdometer: 11000 }), /at least the starting reading \(12000 km\)/);
   await assert.rejects(advance(id, 'Trip Ended', { endOdometer: 12100, tolls: [{ id: 't', name: 'Toll', amount: -5 }] }), /greater than zero/);
@@ -233,19 +251,29 @@ test('trip: Trip Started needs the photo verification; steps run strictly in ord
   assert.equal(b.tollCharges, 85);
   assert.ok(b.tripEndedAt && b.completedAt);
   assert.equal(b.tripEndedLocation.lng, 77.5);
-  // Every transition was recorded as an event and in the audit trail, in order.
+  // Every transition was recorded as an event and in the audit trail.
   const events = (await db.collection(`bookings/${id}/events`).get()).docs.map((d) => d.data().type);
-  for (const t of ['trip_trip_started', 'trip_reached_pickup', 'boarding_verified', 'trip_trip_ended']) assert.ok(events.includes(t), t);
+  for (const t of ['trip_reached_pickup', 'boarding_verified', 'trip_trip_started', 'trip_trip_ended']) assert.ok(events.includes(t), t);
   const audits = (await db.collection('audit_logs').where('bookingId', '==', id).get()).docs.map((d) => d.data()).filter((a) => a.action === 'trip_status_changed');
-  assert.equal(audits.length, 3);
+  assert.deepEqual(audits.map((a) => a.next.tripSubStatus).sort(), ['Reached Pickup', 'Trip Ended', 'Trip Started']);
   // A finished trip cannot be moved again.
   await assert.rejects(advance(id, 'Reached Pickup'), /completed/);
   await assert.rejects(call(ops.assignDriver, 'ops', { bookingId: id, driverId: 'drvB', reason: 'oops' }), /completed|cannot|started/i);
 });
 
+test('trip: photos taken before leaving also count; the OTP is still required at the pickup', async () => {
+  const id = await assigned();
+  await verify(id);
+  await advance(id, 'Reached Pickup');
+  await assert.rejects(advance(id, 'Trip Started'), /boarding OTP/);
+  const otp = (await db.doc(`booking_secrets/${id}`).get()).data().otp;
+  await call(verifyBoarding, 'drvA', { bookingId: id, otp });
+  assert.equal((await advance(id, 'Trip Started')).stage, 'Trip Started');
+});
+
 test('trip: five wrong boarding OTPs lock the check for ten minutes and raise a security event', async () => {
   const id = await assigned();
-  await db.doc(`bookings/${id}`).update({ status: 'Ongoing', tripSubStatus: 'Reached Pickup', tripStage: 'Reached Pickup', tripStartedAt: new Date() });
+  await advance(id, 'Reached Pickup');
   const otp = (await db.doc(`booking_secrets/${id}`).get()).data().otp;
   const wrong = otp === '0000' ? '1111' : '0000';
   for (let i = 1; i <= 4; i++) await assert.rejects(call(verifyBoarding, 'drvA', { bookingId: id, otp: wrong }), new RegExp(`${5 - i} attempt`));
@@ -257,19 +285,26 @@ test('trip: five wrong boarding OTPs lock the check for ten minutes and raise a 
   // The lock lifts once it has expired.
   await db.doc(`bookings/${id}`).update({ 'boardingAttempts.lockedUntil': new Date(Date.now() - 1000) });
   assert.equal((await call(verifyBoarding, 'drvA', { bookingId: id, otp })).ok, true);
-  // Verifying before reaching the pickup is refused.
-  const early = await assigned();
-  await assert.rejects(call(verifyBoarding, 'drvA', { bookingId: early, otp: '1234' }), /reached the pickup first/);
 });
 
-test('trips begun in the older flow can still finish without the new boarding step', async () => {
+test('trips begun in the earlier step order still finish correctly', async () => {
+  // Legacy record without a sub-status, already under way.
   const id = await assigned();
-  // Older bookings carry only the legacy stage fields, no tripSubStatus.
   await db.doc(`bookings/${id}`).update({ status: 'Ongoing', tripStage: 'In Progress', startedAt: new Date(), startOdometer: 500, tripSubStatus: FieldValue.delete() });
-  assert.equal((await booking(id)).tripSubStatus, undefined);
   const r = await advance(id, 'Trip Ended', { endOdometer: 600 });
   assert.equal(r.ok, true);
   assert.equal((await booking(id)).status, 'Completed');
+  // Earlier order: "Trip Started" was recorded while driving to the pickup. The driver
+  // now marks the pickup, verifies the OTP and starts the ride as normal.
+  const enRoute = await assigned();
+  await verify(enRoute);
+  await db.doc(`bookings/${enRoute}`).update({ status: 'Ongoing', tripSubStatus: 'Trip Started', tripStage: 'En Route Pickup', tripStartedAt: new Date() });
+  await assert.rejects(advance(enRoute, 'Trip Ended', { endOdometer: 13000 }), /next step is "Reached Pickup"/);
+  await advance(enRoute, 'Reached Pickup');
+  const otp = (await db.doc(`booking_secrets/${enRoute}`).get()).data().otp;
+  await call(verifyBoarding, 'drvA', { bookingId: enRoute, otp });
+  await advance(enRoute, 'Trip Started');
+  assert.equal((await advance(enRoute, 'Trip Ended', { endOdometer: 13000 })).stage, 'Trip Ended');
 });
 
 test('device integrity: enforcement is off by default; when on, Android needs a fresh passing verdict and web follows its own setting', async () => {
@@ -278,15 +313,15 @@ test('device integrity: enforcement is off by default; when on, Android needs a 
   // Default: nothing is blocked (Play Integrity is not configured yet).
   assert.equal((await sec.securitySettings()).enforceIntegrity, false);
   await db.doc('settings/security').set({ enforceIntegrity: true, allowWebDriverTrips: true });
-  await assert.rejects(advance(id, 'Trip Started'), (e) => /could not be verified as secure/.test(e.message) && e.details.integrity === 'required');
+  await assert.rejects(advance(id, 'Reached Pickup'), (e) => /could not be verified as secure/.test(e.message) && e.details.integrity === 'required');
   await assert.rejects(call(vv.createCaptureSession, 'drvA', { bookingId: id }), /already submitted|could not be verified/);
   // A failed or expired verdict is refused; a passing one lets the trip proceed.
   await db.doc('device_integrity/drvA').set({ status: 'failed', expiresAt: new Date(Date.now() + 3600000), reasons: ['device_not_recognised'] });
-  await assert.rejects(advance(id, 'Trip Started'), /could not be verified/);
+  await assert.rejects(advance(id, 'Reached Pickup'), /could not be verified/);
   await db.doc('device_integrity/drvA').set({ status: 'passed', expiresAt: new Date(Date.now() - 1000) });
-  await assert.rejects(advance(id, 'Trip Started'), /could not be verified/);
+  await assert.rejects(advance(id, 'Reached Pickup'), /could not be verified/);
   await db.doc('device_integrity/drvA').set({ status: 'passed', expiresAt: new Date(Date.now() + 3600000) });
-  assert.equal((await advance(id, 'Trip Started')).stage, 'Trip Started');
+  assert.equal((await advance(id, 'Reached Pickup')).stage, 'Reached Pickup');
   // Web browsers cannot attest: allowed unless the setting says otherwise.
   const webTrip = await assigned('drvB');
   await db.doc('device_integrity/drvB').delete().catch(() => null);

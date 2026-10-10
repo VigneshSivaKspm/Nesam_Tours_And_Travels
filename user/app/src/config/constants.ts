@@ -10,6 +10,7 @@ export const ROUTING_URL = (process.env.EXPO_PUBLIC_ROUTING_URL || 'https://rout
 /** Optional company UPI VPA — enables a "Pay via UPI app" deep link on the receipt. */
 export const COMPANY_UPI_ID: string = process.env.EXPO_PUBLIC_COMPANY_UPI_ID || '';
 export const COMPANY_NAME = 'NESAM Tours & Travels';
+export const COMPANY_LEGAL_NAME = 'NESAM Tours and Travels Private Limited';
 
 // Search results are restricted to India (lon/lat bounding box).
 export const INDIA_BBOX = '68.1,6.5,97.4,35.7';
@@ -27,8 +28,6 @@ export const GST_RATE = 0.05; // passenger transport services (no ITC)
 export const OUTSTATION_THRESHOLD_KM = 40;
 export const NIGHT_START_HOUR = 22;
 export const NIGHT_END_HOUR = 6;
-/** Share of the fare offered to the driver/vendor on the marketplace. */
-export const PARTNER_PAYOUT_SHARE = 0.85;
 
 // ── Dispatch & tracking ─────────────────────────────────────────────────────
 export const NEARBY_RADIUS_KM = 10;

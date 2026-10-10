@@ -113,7 +113,8 @@ export interface PreTripPhotos {
 }
 
 // The three driver steps, advanced only by the server (advanceTrip).
-export type TripSubStatus = 'Not Started' | 'Trip Started' | 'Reached Pickup' | 'Trip Ended';
+/** Driver steps, in order: Reached Pickup → Trip Started → Trip Ended. */
+export type TripSubStatus = 'Not Started' | 'Reached Pickup' | 'Trip Started' | 'Trip Ended';
 
 // Legacy driver-reported progress, still stored on the booking as `tripStage`.
 export type TripStage =
@@ -170,6 +171,8 @@ export interface TripDetails {
   fareAmount: number;
   /** Agreed payout for this driver (independent trips); null when not recorded or a fleet trip. */
   driverEarnings: number | null;
+  /** true once NESAM finance finalized the trip; driverEarnings is then the finalized amount. */
+  payoutFinalized: boolean;
   /** Assigned through a fleet vendor, who settles the driver's pay. */
   fleetTrip: boolean;
   tollCharges: number;

@@ -74,7 +74,7 @@ export function ProfileScreen() {
             <Text style={type.h2}>{driver.name}</Text>
             <Text style={type.small}>{driver.phone}</Text>
             <Text style={type.small}>
-              ★ {driver.rating.toFixed(1)} • {completedTrips.length} trips • since {driver.joiningDate}
+              {driver.rating != null ? `★ ${driver.rating.toFixed(1)}` : 'No ratings yet'} • {completedTrips.length} trips • since {driver.joiningDate}
             </Text>
             {driver.vendorName ? <Text style={type.small}>Fleet: {driver.vendorName}</Text> : null}
             <View style={styles.badges}>

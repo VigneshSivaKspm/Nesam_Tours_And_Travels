@@ -5,20 +5,24 @@ import { FlatList, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useDriverData } from '../context/DriverData';
 import { Card, EmptyState } from '../components/ui';
-import { last7Days, tripTotal } from '../utils/earnings';
+import { last7Days } from '../utils/ledger';
+import { payoutText } from '../utils/earnings';
 import { formatINR } from '../utils/format';
+import { formatDate } from '../utils/time';
 import { colors, radius, space, type } from '../theme';
 
 export function EarningsScreen() {
-  const { earnings, completedTrips } = useDriverData();
-  const days = useMemo(() => last7Days(completedTrips), [completedTrips]);
+  const { earnings, completedTrips, ledger } = useDriverData();
+  const days = useMemo(() => last7Days(ledger), [ledger]);
   const max = Math.max(1, ...days.map((d) => d.amount));
   const weekAvg = Math.round(days.reduce((s, d) => s + d.amount, 0) / 7);
 
   const header = (
     <View>
       <Text style={type.h1}>Earnings</Text>
-      <Text style={[type.small, { marginBottom: space.md }]}>Payout per trip is shown before you accept it. Toll and parking receipts are reimbursed in full.</Text>
+      <Text style={[type.small, { marginBottom: space.md }]}>
+        Totals are what NESAM has credited to your ledger. Approved toll receipts on non-cash trips are reimbursed.
+      </Text>
       <View style={styles.grid}>
         {[
           { label: 'Today', value: earnings.todayEarnings, color: colors.primary },
@@ -75,11 +79,11 @@ export function EarningsScreen() {
               <Text style={type.small} numberOfLines={1}>
                 {t.pickup.address} → {t.drop.address}
               </Text>
-              <Text style={type.tiny}>{t.completedAt?.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) ?? t.scheduledDate}</Text>
+              <Text style={type.tiny}>{t.completedAt ? formatDate(t.completedAt) : t.scheduledDate}</Text>
             </View>
             <View style={{ alignItems: 'flex-end' }}>
-              <Text style={styles.total}>{formatINR(tripTotal(t))}</Text>
-              {t.tollCharges ? <Text style={type.tiny}>incl. {formatINR(t.tollCharges)} tolls</Text> : null}
+              <Text style={[styles.total, !t.payoutRecorded && styles.totalMuted]}>{payoutText(t)}</Text>
+              {t.payoutRecorded && t.tollCharges ? <Text style={type.tiny}>+ {formatINR(t.tollCharges)} tolls claimed</Text> : null}
             </View>
           </View>
         )}
@@ -111,4 +115,5 @@ const styles = StyleSheet.create({
   },
   code: { fontSize: 13, fontWeight: '800', color: colors.ink },
   total: { fontSize: 16, fontWeight: '900', color: colors.primary },
+  totalMuted: { fontSize: 13, fontWeight: '700', color: colors.muted },
 });

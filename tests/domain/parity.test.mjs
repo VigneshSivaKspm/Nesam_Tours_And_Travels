@@ -18,8 +18,10 @@ test('trip sub-status mapping agrees, including legacy stages', () => {
   for (const tripStage of stages) for (const status of ['Assigned', 'Ongoing', 'Completed']) {
     assert.equal(client.tripSubStatusOf({ tripStage, status }), server.tripSubStatusOf({ tripStage, status }), `${tripStage}/${status}`);
   }
-  for (const tripSubStatus of ['Not Started', 'Trip Started', 'Reached Pickup', 'Trip Ended']) {
+  for (const tripSubStatus of ['Not Started', 'Reached Pickup', 'Trip Started', 'Trip Ended']) {
     assert.equal(client.tripSubStatusOf({ tripSubStatus }), server.tripSubStatusOf({ tripSubStatus }));
+    // Includes trips recorded under the earlier step order.
+    for (const tripStage of stages) assert.equal(client.tripSubStatusOf({ tripSubStatus, tripStage }), server.tripSubStatusOf({ tripSubStatus, tripStage }), tripSubStatus + '/' + tripStage);
   }
 });
 

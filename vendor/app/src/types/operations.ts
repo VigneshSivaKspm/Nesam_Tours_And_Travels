@@ -49,9 +49,12 @@ export interface VendorBooking {
   driverPhone: string;
   vehicleNumber: string;
   fare: number;
+  /** The agreed fleet payout recorded on the booking; 0 when none is recorded (see payoutRecorded). */
   vendorPayout: number;
+  payoutRecorded: boolean;
+  /** true once NESAM finance finalized the trip; vendorPayout is then the finalized amount. */
+  payoutFinalized: boolean;
   tollCharges: number;
-  withdrawableAmount: number;
   paymentMethod: string;
   confirmedAt: Date | null;
   completedAt: Date | null;
@@ -121,12 +124,27 @@ export interface VendorPayoutRequest {
   createdMs: number;
 }
 
-export interface WalletTransaction {
+/** wallets/vendor_{uid}, written only by the server (functions/src/ledger.ts). */
+export interface WalletDetails {
+  /** Withdrawable now; negative when cash collected exceeds earnings. */
+  available: number;
+  /** Earnings on trips whose customer payment is not verified yet. */
+  pending: number;
+  /** Held for open payout requests. */
+  reserved: number;
+  paidOut: number;
+  cashCollected: number;
+  tripEarnings: number;
+  tollReimbursements: number;
+}
+
+/** wallet_ledger entry (schema 2) for this vendor. */
+export interface LedgerRecord {
   id: string;
-  kind: 'credit' | 'debit';
-  title: string;
-  subtitle: string;
+  type: string;
+  direction: 'credit' | 'debit';
   amount: number;
   status: string;
-  atMs: number;
+  bookingCode: string;
+  createdAt: Date | null;
 }

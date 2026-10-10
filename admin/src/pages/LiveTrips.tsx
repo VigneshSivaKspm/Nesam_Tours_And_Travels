@@ -10,6 +10,7 @@ import {
 import { toDate } from "../services/paymentService";
 import { ConfirmDialog, ErrorBanner, Toast, useToast } from "../components/Feedback";
 import { cancelBooking } from "../services/bookingOpsService";
+import { tripSubStatusOf } from "../domain/bookingFlow";
 
 const when = (v: unknown) =>
   formatShortDateTime12(toDate(v)) || null;
@@ -27,7 +28,7 @@ const statusConfig: Record<string, { color: string; bg: string; dot: string }> =
       bg: "#FFFBEB",
       dot: "bg-yellow-500",
     },
-    "En Route to Pickup": {
+    "Going to Pickup": {
       color: "#3B82F6",
       bg: "#EFF6FF",
       dot: "bg-blue-500",
@@ -62,12 +63,12 @@ export default function LiveTrips({ onOpenBooking }: { onOpenBooking?: (id: stri
           b.status === "Assigned",
       );
       if (active.length > 0) {
-        const STAGE_LABELS: Record<string, string> = {
-          "En Route Pickup": "En Route to Pickup",
+        // Driver steps: Reached Pickup → Trip Started → Trip Ended (tripSubStatusOf also reads older records).
+        const SUB_LABELS: Record<string, string> = {
+          "Not Started": "Going to Pickup",
           "Reached Pickup": "Waiting at Pickup",
-          "In Progress": "Trip in Progress",
-          "Arrived Destination": "Arrived",
           "Trip Started": "Trip Started",
+          "Trip Ended": "Completed",
         };
         setLiveTripsList(
           active.map((a: any) => ({
@@ -78,15 +79,11 @@ export default function LiveTrips({ onOpenBooking }: { onOpenBooking?: (id: stri
             pickup: a.pickup || a.pickupAddress || "—",
             drop: a.drop || a.dropAddress || "—",
             customerPhone: a.phone || a.customerPhone || "",
-            status:
-              (a.tripSubStatus === "Trip Started" ? "Trip Started" : a.tripSubStatus === "Reached Pickup" ? "Waiting at Pickup" : "") ||
-              STAGE_LABELS[a.tripStage] ||
-              a.tripStage ||
-              (a.status === "Ongoing" ? "Trip Started" : a.status),
+            status: a.status === "Assigned" && !a.assignedDriverId ? "Assigned" : SUB_LABELS[tripSubStatusOf(a)],
             startedAt: when(a.tripStartedAt ?? a.startedAt) ?? (a.status === "Ongoing" ? "Time not recorded" : "Not started"),
-            // Only a position the driver app actually reported (at pickup); no continuous GPS feed yet.
+            // The position the driver app last shared (on the way, at the pickup and on the trip).
             location: coords(a.driverLocation),
-            locationAt: when(a.reachedPickupAt),
+            locationAt: when(a.driverLocation?.updatedAt ?? a.driverLocation?.at) ?? when(a.reachedPickupAt),
             boardingOTPVerified: !!a.boardingVerifiedAt || (a.status === "Ongoing" && !a.tripStartedAt),
             fare:
               a.fare === undefined || a.fare === null || a.fare === ""
@@ -149,9 +146,9 @@ export default function LiveTrips({ onOpenBooking }: { onOpenBooking?: (id: stri
             color: "#E21B23",
           },
           {
-            label: "En Route to Pickup",
+            label: "Going to Pickup",
             value: liveTripsList.filter(
-              (t) => t.status === "En Route to Pickup",
+              (t) => t.status === "Going to Pickup",
             ).length,
             color: "#3B82F6",
           },

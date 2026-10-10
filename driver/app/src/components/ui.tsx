@@ -174,7 +174,7 @@ export function TextField({
       ) : null}
       <View style={[styles.inputWrap, !!error && styles.inputError, input.editable === false && styles.inputDisabled]}>
         {prefix ? <Text style={styles.prefix}>{prefix}</Text> : null}
-        <TextInput placeholderTextColor={colors.faint} style={styles.input} {...input} />
+        <TextInput placeholderTextColor={colors.faint} style={styles.input} accessibilityLabel={label} {...input} />
       </View>
       {error ? <Text style={styles.errorText}>{error}</Text> : hint ? <Text style={styles.hint}>{hint}</Text> : null}
     </View>

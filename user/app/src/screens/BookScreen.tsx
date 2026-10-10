@@ -1,85 +1,37 @@
-// Ride booking: pickup/destination, ride type, timing, fare, promo, payment.
-// Native port of user/web/src/screens/RideBookingScreen.tsx. The fare engine,
-// coupon validation, scheduling limits and booking payload are the Web's.
+// Booking home — step 1 of 3: trip type, pickup, destination and when.
+// "Find a Cab" opens Choose your ride; pricing and booking happen in the next
+// steps (ChooseRideScreen, ConfirmBookingScreen) from the shared BookingDraft.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
-import { Badge, Button, Card, Chip, Notice, Screen, SectionTitle, Segmented } from '../components/ui';
-import { FareLines } from '../components/FareLines';
+import { Notice, Screen } from '../components/ui';
+import { BrandHeader, IconButton, SupportBanner } from '../components/brand';
 import { PlaceSearchModal } from '../components/PlaceSearchModal';
-import { RideMap } from '../components/RideMap';
 import { useCustomerData } from '../context/CustomerData';
+import { useBookingDraft } from '../context/BookingDraft';
 import { useDeviceLocation } from '../hooks/useDeviceLocation';
 import { useNetworkStatus } from '../hooks/useNetworkStatus';
-import { getRoute, LOCATION_ERROR_TEXT, reverseGeocode } from '../services/geoService';
-import { calculateFare, isOutstation, serviceName, subscribeToCoupons, subscribeToRideCategories, validateCoupon } from '../services/pricingService';
-import { createRideRequest } from '../services/rideService';
-import { savePlace } from '../services/userService';
-import { SCHEDULE_MAX_DAYS, SCHEDULE_MIN_LEAD_MIN } from '../config/constants';
-import type { AppliedCoupon, Coupon, FareBreakdown, GeoPlace, LatLng, PaymentMethod, RideCategory, RouteInfo, TripType } from '../types';
-import { formatDateTime, formatDistance, formatDuration, formatINR } from '../utils/format';
+import { LOCATION_ERROR_TEXT, reverseGeocode } from '../services/geoService';
+import { SCHEDULE_MAX_DAYS, SCHEDULE_MIN_LEAD_MIN, SUPPORT_PHONE, SUPPORT_PHONE_DISPLAY } from '../config/constants';
+import { scheduleProblem } from '../utils/bookingRules';
+import type { GeoPlace, LatLng, LocationItem } from '../types';
+import { formatDate, formatTime } from '../utils/format';
 import { haversineKm, isValidLatLng } from '../utils/geo';
-import { describeError } from '../utils/retry';
-import { colors, radius, space, type } from '../theme';
+import { colors, radius, space } from '../theme';
 
-const PAYMENT_OPTIONS: { id: PaymentMethod; label: string; hint: string }[] = [
-  { id: 'Cash', label: 'Cash', hint: 'Pay the driver at drop' },
-  { id: 'UPI', label: 'UPI', hint: 'GPay / PhonePe / Paytm at drop' },
-  { id: 'Wallet', label: 'NESAM Wallet', hint: '' },
-];
-
-type PickerTarget = 'pickup' | 'drop' | null;
+type PickerTarget = { field: 'pickup' | 'drop'; query?: string } | null;
 
 export function BookScreen() {
   const navigation = useNavigation();
   const { profile, trips, liveRide, savedPlaces } = useCustomerData();
+  const { draft, update } = useBookingDraft();
+  const { pickup, drop, tripType, scheduledAt } = draft;
   const { position, error: locError, permission, locating, locate } = useDeviceLocation(true);
   const { online } = useNetworkStatus();
-
-  const [pickup, setPickup] = useState<GeoPlace | null>(null);
-  const [drop, setDrop] = useState<GeoPlace | null>(null);
   const [picker, setPicker] = useState<PickerTarget>(null);
-  // A route is tagged with the endpoints it was computed for; a result for
-  // older endpoints is simply not shown (no reset needed when they change).
-  const [routeState, setRouteState] = useState<{ key: string; info: RouteInfo } | null>(null);
-
-  const [categories, setCategories] = useState<RideCategory[]>([]);
-  const [categoryId, setCategoryId] = useState('');
-  const [coupons, setCoupons] = useState<Coupon[]>([]);
-
-  const [tripType, setTripType] = useState<TripType>('One Way');
-  const [timing, setTiming] = useState<'now' | 'schedule'>('now');
-  const [scheduledAt, setScheduledAt] = useState<Date | null>(null);
-  const [payment, setPayment] = useState<PaymentMethod>('Cash');
-  const [promoInput, setPromoInput] = useState('');
-  // The code the rider applied; its discount is re-derived on every fare change.
-  const [appliedCode, setAppliedCode] = useState<string | null>(null);
-  const [promoError, setPromoError] = useState('');
-  const [notes, setNotes] = useState('');
-  const [showBreakdown, setShowBreakdown] = useState(false);
-
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState('');
-  const [savedMsg, setSavedMsg] = useState('');
-  const [now, setNow] = useState(() => Date.now());
-  const submittingRef = useRef(false);
-
-  // Live data.
-  useEffect(
-    () =>
-      subscribeToRideCategories((cats) => {
-        setCategories(cats);
-        setCategoryId((cur) => (cats.some((c) => c.id === cur) ? cur : (cats[Math.min(1, cats.length - 1)]?.id ?? '')));
-      }),
-    [],
-  );
-  useEffect(() => subscribeToCoupons(setCoupons), []);
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 30000);
-    return () => clearInterval(t);
-  }, []);
+  const [problem, setProblem] = useState('');
 
   // First GPS fix becomes the pickup (unless the rider already chose one).
   const pickupFromGps = useRef(false);
@@ -94,39 +46,11 @@ export function BookScreen() {
     if (!position || pickupFromGps.current || pickup) return;
     pickupFromGps.current = true;
     void reverseGeocode(position).then((p) => {
-      if (mounted.current) setPickup((cur) => cur ?? { ...p, type: 'current' });
+      // Never replaces a pickup the rider chose while the address was loading.
+      if (mounted.current) update((d) => (d.pickup ? {} : { pickup: { ...p, type: 'current' } }));
     });
-  }, [position, pickup]);
+  }, [position, pickup, update]);
 
-  // Route whenever both ends are known.
-  const routeKey = pickup && drop ? `${pickup.lat},${pickup.lng}>${drop.lat},${drop.lng}` : '';
-  const route = routeKey && routeState?.key === routeKey ? routeState.info : null;
-  const routeLoading = !!routeKey && !route;
-  useEffect(() => {
-    if (!pickup || !drop) return undefined;
-    const key = `${pickup.lat},${pickup.lng}>${drop.lat},${drop.lng}`;
-    const controller = new AbortController();
-    getRoute(pickup, drop, controller.signal)
-      .then((r) => !controller.signal.aborted && setRouteState({ key, info: r }))
-      .catch(() => undefined);
-    return () => controller.abort();
-  }, [routeKey]); // eslint-disable-line react-hooks/exhaustive-deps -- routeKey encodes both endpoints
-
-  // ── Derived ───────────────────────────────────────────────────────────────
-  const category = categories.find((c) => c.id === categoryId) ?? null;
-  const scheduleError = useMemo(() => {
-    if (timing !== 'schedule') return '';
-    if (!scheduledAt) return 'Choose a pickup date and time.';
-    const lead = (scheduledAt.getTime() - now) / 60000;
-    if (lead < SCHEDULE_MIN_LEAD_MIN) return `Scheduled rides need at least ${SCHEDULE_MIN_LEAD_MIN} minutes’ notice.`;
-    if (lead > SCHEDULE_MAX_DAYS * 1440) return `You can schedule up to ${SCHEDULE_MAX_DAYS} days ahead.`;
-    return '';
-  }, [timing, scheduledAt, now]);
-  const pickupTime = timing === 'schedule' && scheduledAt ? scheduledAt : new Date(now);
-  const pickupTimeMs = pickupTime.getTime();
-
-  const history = useMemo(() => trips.filter((t) => t.status !== 'Cancelled'), [trips]);
-  const isFirstBooking = history.length === 0;
   const recentPlaces = useMemo(() => {
     const seen = new Set<string>();
     const out: GeoPlace[] = [];
@@ -140,210 +64,106 @@ export function BookScreen() {
     return out.slice(0, 6);
   }, [trips]);
 
-  /** Validates a promo code against the current, undiscounted fare. */
-  const checkCoupon = (code: string) => {
-    if (!route || !category || !pickup || !drop) return null;
-    const base = calculateFare({ category, route, tripType, pickupTime: new Date(pickupTimeMs) });
-    return validateCoupon(coupons, code, {
-      subtotal: base.subtotal,
-      categoryId: category.id,
-      service: serviceName(pickup, drop, route.distanceKm),
-      isFirstBooking,
-      customerUses: history.filter((t) => t.couponCode.toUpperCase() === code.trim().toUpperCase()).length,
-    });
-  };
-
-  // The applied code is re-validated whenever the priced inputs change, so a
-  // discount can never outlive the fare it was granted on.
-  const couponCheck = appliedCode ? checkCoupon(appliedCode) : null;
-  const coupon: AppliedCoupon | null = couponCheck?.ok ? couponCheck.coupon : null;
-  const promoMsg: { ok: boolean; text: string } | null = couponCheck
-    ? couponCheck.ok
-      ? { ok: true, text: couponCheck.coupon.message }
-      : { ok: false, text: `Promo not applied: ${couponCheck.message}` }
-    : promoError
-      ? { ok: false, text: promoError }
-      : null;
-
-  const applyPromo = () => {
-    const res = checkCoupon(promoInput);
-    if (!res) return setPromoError('Set your pickup and destination first.');
-    if (res.ok) {
-      setAppliedCode(res.coupon.code);
-      setPromoError('');
-    } else {
-      setAppliedCode(null);
-      setPromoError(res.message);
-    }
-    return undefined;
-  };
-  const clearPromo = () => {
-    setAppliedCode(null);
-    setPromoError('');
-    setPromoInput('');
-  };
-
-  // Cheap (one quote per category) and recomputed from derived inputs; the
-  // React Compiler memoizes it, so no manual useMemo.
-  const [serverQuote, setServerQuote] = useState<{ key: string; fare: FareBreakdown } | null>(null);
-  const priceKey = JSON.stringify([pickup?.lat, pickup?.lng, drop?.lat, drop?.lng, categoryId, tripType, scheduledAt?.toISOString(), coupon?.code]);
-  const quotes = new Map<string, FareBreakdown>();
-  if (route) {
-    for (const c of categories) {
-      quotes.set(c.id, calculateFare({ category: c, route, tripType, pickupTime: new Date(pickupTimeMs), discount: c.id === categoryId ? (coupon?.discount ?? 0) : 0 }));
-    }
-  }
-
-  const quote = serverQuote?.key === priceKey ? serverQuote.fare : category ? (quotes.get(category.id) ?? null) : null;
-  const walletShort = payment === 'Wallet' && quote ? quote.total > profile.walletBalance : false;
-  const tooClose = pickup && drop ? haversineKm(pickup, drop) < 0.2 : false;
-  const tooFar = route ? route.distanceKm > 1500 : false;
-
-  const blocker = !online
-    ? 'You’re offline. Reconnect to request a ride.'
-    : liveRide
-      ? 'You already have a ride in progress.'
-      : !pickup
-        ? 'Set your pickup point.'
-        : !drop
-          ? 'Where are you going?'
-          : tooClose
-            ? 'Pickup and destination are too close together.'
-            : tooFar
-              ? 'That trip is too long to book online — please call support.'
-              : routeLoading || !route
-                ? 'Calculating route…'
-                : !category || !quote
-                  ? 'Choose a ride type.'
-                  : scheduleError || (walletShort ? 'Wallet balance is too low for this fare.' : '');
-
-  const submit = async () => {
-    if (blocker || submittingRef.current || !pickup || !drop || !route || !category || !quote) return;
-    submittingRef.current = true;
-    setSubmitting(true);
-    setSubmitError('');
-    try {
-      const res = await createRideRequest({
-        profile,
-        pickup,
-        drop,
-        category,
-        route,
-        fare: quote,
-        tripType,
-        paymentMethod: payment,
-        couponCode: coupon?.code ?? '',
-        notes,
-        scheduledAt: timing === 'schedule' ? scheduledAt : null,
-      });
-      // Reset the form for the next booking; the ride screen takes over.
-      setDrop(null);
-      clearPromo();
-      setNotes('');
-      setTiming('now');
-      setScheduledAt(null);
-      navigation.navigate('ActiveRide', { bookingId: res.id, unconfirmed: res.unconfirmed });
-    } catch (e) {
-      const currentFare = (e as { details?: { fare?: FareBreakdown } }).details?.fare;
-      if (currentFare && Number.isFinite(currentFare.total)) setServerQuote({ key: priceKey, fare: currentFare });
-      setSubmitError(currentFare ? `Fare updated to ₹${currentFare.total}. Review it and tap Book again to confirm.` : describeError(e, 'We couldn’t place your ride request. Please try again.'));
-    } finally {
-      submittingRef.current = false;
-      setSubmitting(false);
-    }
-  };
-
   const locateMe = async () => {
     const p = await locate();
     if (!p) return;
     const place = await reverseGeocode(p);
     if (mounted.current) {
       pickupFromGps.current = true;
-      setPickup({ ...place, type: 'current' });
+      update({ pickup: { ...place, type: 'current' } });
     }
-  };
-
-  const swap = () => {
-    if (!pickup || !drop) return;
-    setPickup(drop);
-    setDrop(pickup);
-  };
-
-  const saveDrop = async () => {
-    if (!drop) return;
-    try {
-      await savePlace({ ...drop, id: '', type: 'favorite' }, profile.uid);
-      setSavedMsg('Saved to favourites');
-    } catch (e) {
-      setSavedMsg(describeError(e, 'Couldn’t save this place.'));
-    }
-    setTimeout(() => mounted.current && setSavedMsg(''), 2500);
   };
 
   const openSchedulePicker = () => {
     const min = new Date(Date.now() + SCHEDULE_MIN_LEAD_MIN * 60000);
     const max = new Date(Date.now() + SCHEDULE_MAX_DAYS * 86400000);
     const initial = scheduledAt ?? new Date(Date.now() + 60 * 60000);
-    DateTimePickerAndroid.open({
-      value: initial,
-      mode: 'date',
-      minimumDate: min,
-      maximumDate: max,
-      onChange: (event, date) => {
-        if (event.type !== 'set' || !date) return;
-        DateTimePickerAndroid.open({
-          value: initial,
-          mode: 'time',
-          is24Hour: false,
-          onChange: (e2, time) => {
-            if (e2.type !== 'set' || !time) return;
-            const d = new Date(date);
-            d.setHours(time.getHours(), time.getMinutes(), 0, 0);
-            setScheduledAt(d);
-          },
-        });
-      },
-    });
+    try {
+      DateTimePickerAndroid.open({
+        value: initial,
+        mode: 'date',
+        minimumDate: min,
+        maximumDate: max,
+        onChange: (event, date) => {
+          if (event.type !== 'set' || !date) return;
+          DateTimePickerAndroid.open({
+            value: initial,
+            mode: 'time',
+            is24Hour: false,
+            onChange: (e2, time) => {
+              if (e2.type !== 'set' || !time) return;
+              const d = new Date(date);
+              d.setHours(time.getHours(), time.getMinutes(), 0, 0);
+              update({ scheduledAt: d });
+              setProblem(scheduleProblem(d));
+            },
+          });
+        },
+      });
+    } catch {
+      setProblem('The date picker is not available on this device.');
+    }
+  };
+
+  const callForRental = () =>
+    Alert.alert('Local rental', `Hourly local rentals are booked through NESAM support. Call ${SUPPORT_PHONE_DISPLAY}?`, [
+      { text: 'Not now', style: 'cancel' },
+      { text: 'Call', onPress: () => void Linking.openURL(`tel:${SUPPORT_PHONE}`) },
+    ]);
+
+  const findCab = () => {
+    const reason = !online
+      ? 'You’re offline. Reconnect to book a ride.'
+      : liveRide
+        ? 'You already have a ride in progress. Open it from the banner above.'
+        : !pickup
+          ? 'Set your pickup point.'
+          : !drop
+            ? 'Where are you going? Set the destination.'
+            : haversineKm(pickup, drop) < 0.2
+              ? 'Pickup and destination are too close together.'
+              : scheduleProblem(scheduledAt);
+    setProblem(reason);
+    if (!reason) navigation.navigate('ChooseRide');
   };
 
   const home = savedPlaces.find((p) => p.type === 'home');
   const work = savedPlaces.find((p) => p.type === 'work');
+  const goToSaved = (p: LocationItem | undefined) => {
+    if (p && isValidLatLng(p as Partial<LatLng>)) {
+      update({ drop: p as GeoPlace });
+      setProblem('');
+    } else navigation.navigate('SavedPlaces');
+  };
+  const airport = pickup?.type === 'airport' || drop?.type === 'airport';
   const locationHint = locError ? LOCATION_ERROR_TEXT[locError.kind] : permission === 'prompt' && !position ? 'Allow location access to set your pickup automatically.' : '';
-  const outstation = route ? isOutstation(route.distanceKm) : false;
+  const firstName = profile.name.split(' ')[0] || 'there';
 
   return (
-    <Screen
-      footer={
-        pickup && drop ? (
-          <Button
-            title={submitting ? 'Requesting…' : blocker || `${timing === 'schedule' ? 'Schedule' : 'Request'} ${category?.name ?? ''} · ${quote ? formatINR(quote.total) : ''}`}
-            loading={submitting}
-            disabled={!!blocker}
-            onPress={() => void submit()}
-          />
-        ) : undefined
-      }
-    >
+    <Screen bg={colors.page}>
       <PlaceSearchModal
         visible={picker !== null}
-        title={picker === 'pickup' ? 'Set pickup' : 'Where to?'}
+        title={picker?.field === 'pickup' ? 'Set pickup' : 'Where to?'}
+        initialQuery={picker?.query}
         onClose={() => setPicker(null)}
         onSelect={(p) => {
-          if (picker === 'pickup') {
+          if (picker?.field === 'pickup') {
             pickupFromGps.current = true;
-            setPickup(p);
-          } else {
-            setDrop(p);
-          }
+            update({ pickup: p });
+          } else update({ drop: p });
+          setProblem('');
         }}
         savedPlaces={savedPlaces}
         recentPlaces={recentPlaces}
-        near={picker === 'drop' ? (pickup ?? position) : position}
-        onUseCurrentLocation={picker === 'pickup' ? () => void locateMe() : undefined}
+        near={picker?.field === 'drop' ? (pickup ?? position) : position}
+        onUseCurrentLocation={picker?.field === 'pickup' ? () => void locateMe() : undefined}
       />
 
-      <Text style={type.h1}>Hi {profile.name.split(' ')[0] || 'there'} 👋</Text>
-      <Text style={[type.small, { marginBottom: space.lg }]}>Where would you like to go today?</Text>
+      <BrandHeader right={<IconButton icon="headset-outline" label="Help and support" onPress={() => navigation.navigate('Support')} />} />
+      <Text style={styles.welcome}>Welcome, {firstName}</Text>
+      <Text style={styles.headline} accessibilityRole="header">
+        Plan your next journey
+      </Text>
 
       {liveRide ? (
         <Pressable style={styles.liveBanner} onPress={() => navigation.navigate('ActiveRide', { bookingId: liveRide.id })} accessibilityRole="button">
@@ -355,324 +175,231 @@ export function BookScreen() {
         </Pressable>
       ) : null}
 
-      <Card>
-        <Pressable style={styles.placeRow} onPress={() => setPicker('pickup')} accessibilityRole="button" accessibilityLabel="Set pickup">
-          <View style={[styles.dot, { backgroundColor: colors.success }]} />
-          <View style={{ flex: 1 }}>
-            <Text style={type.tiny}>PICKUP</Text>
+      <View style={styles.tiles} accessibilityRole="radiogroup">
+        <Tile icon="car" label="One Way" active={tripType === 'One Way'} onPress={() => update({ tripType: 'One Way' })} />
+        <Tile icon="sync" label="Round Trip" active={tripType === 'Round Trip'} onPress={() => update({ tripType: 'Round Trip' })} />
+        <Tile icon="time-outline" label="Local Rental" hint="Call to book" onPress={callForRental} />
+        <Tile icon="airplane" label="Airport" hint={airport ? 'Airport trip' : undefined} active={airport} onPress={() => setPicker({ field: 'drop', query: 'airport' })} />
+      </View>
+
+      <View style={styles.routeCard}>
+        <View style={styles.placeRow}>
+          <View style={styles.dotCol}>
+            <View style={[styles.dot, { backgroundColor: colors.success }]} />
+            <View style={styles.dash} />
+          </View>
+          <Pressable style={{ flex: 1 }} onPress={() => setPicker({ field: 'pickup' })} accessibilityRole="button" accessibilityLabel={`Pickup: ${pickup?.name ?? 'not set'}`}>
+            <Text style={styles.placeLabel}>PICKUP</Text>
             <Text style={styles.placeName} numberOfLines={1}>
               {pickup?.name ?? (locating ? 'Finding your location…' : 'Set pickup location')}
             </Text>
-            {pickup ? (
-              <Text style={type.small} numberOfLines={1}>
+            {pickup && pickup.address !== pickup.name ? (
+              <Text style={styles.placeAddr} numberOfLines={1}>
                 {pickup.address}
               </Text>
             ) : null}
-          </View>
-          <Pressable onPress={() => void locateMe()} hitSlop={10} accessibilityLabel="Use my current location" accessibilityRole="button">
-            <Ionicons name="locate" size={22} color={colors.info} />
           </Pressable>
-        </Pressable>
-        <View style={styles.placeDivider}>
-          <View style={styles.connector} />
-          {pickup && drop ? (
-            <Pressable onPress={swap} style={styles.swap} accessibilityLabel="Swap pickup and destination" accessibilityRole="button">
-              <Ionicons name="swap-vertical" size={18} color={colors.ink} />
-            </Pressable>
-          ) : null}
+          <Pressable onPress={() => void locateMe()} hitSlop={10} accessibilityRole="button" accessibilityLabel="Use my current location" style={styles.pinBtn}>
+            <Ionicons name="locate-outline" size={24} color={colors.slate} />
+          </Pressable>
         </View>
-        <Pressable style={styles.placeRow} onPress={() => setPicker('drop')} accessibilityRole="button" accessibilityLabel="Set destination">
-          <View style={[styles.dot, { backgroundColor: colors.primary, borderRadius: 2 }]} />
-          <View style={{ flex: 1 }}>
-            <Text style={type.tiny}>DESTINATION</Text>
-            <Text style={[styles.placeName, !drop && { color: colors.muted }]} numberOfLines={1}>
+        <Pressable
+          onPress={() => pickup && drop && update({ pickup: drop, drop: pickup })}
+          disabled={!pickup || !drop}
+          style={[styles.swap, (!pickup || !drop) && { opacity: 0.4 }]}
+          accessibilityRole="button"
+          accessibilityLabel="Swap pickup and destination"
+        >
+          <Ionicons name="swap-vertical" size={22} color={colors.ink} />
+        </Pressable>
+        <View style={styles.placeRow}>
+          <View style={styles.dotCol}>
+            <View style={[styles.dot, { backgroundColor: colors.primary }]} />
+          </View>
+          <Pressable style={{ flex: 1 }} onPress={() => setPicker({ field: 'drop' })} accessibilityRole="button" accessibilityLabel={`Destination: ${drop?.name ?? 'not set'}`}>
+            <Text style={styles.placeLabel}>DESTINATION</Text>
+            <Text style={[styles.placeName, !drop && { color: colors.slate }]} numberOfLines={1}>
               {drop?.name ?? 'Where to?'}
             </Text>
-            {drop ? (
-              <Text style={type.small} numberOfLines={1}>
+            {drop && drop.address !== drop.name ? (
+              <Text style={styles.placeAddr} numberOfLines={1}>
                 {drop.address}
               </Text>
             ) : null}
-          </View>
+          </Pressable>
           {drop ? (
-            <Pressable
-              onPress={() => {
-                setDrop(null);
-                clearPromo();
-              }}
-              hitSlop={10}
-              accessibilityLabel="Clear destination"
-              accessibilityRole="button"
-            >
-              <Ionicons name="close-circle" size={22} color={colors.faint} />
+            <Pressable onPress={() => update({ drop: null })} hitSlop={10} accessibilityRole="button" accessibilityLabel="Clear destination" style={styles.pinBtn}>
+              <Ionicons name="close-circle" size={24} color={colors.faint} />
             </Pressable>
-          ) : null}
-        </Pressable>
-      </Card>
+          ) : (
+            <Pressable onPress={() => setPicker({ field: 'drop' })} hitSlop={10} accessibilityRole="button" accessibilityLabel="Search destination" style={styles.pinBtn}>
+              <Ionicons name="location-outline" size={24} color={colors.slate} />
+            </Pressable>
+          )}
+        </View>
 
-      {locationHint && !pickup ? <Notice tone="warning" message={locationHint} /> : null}
-
-      <View style={styles.chips}>
-        {[home, work].map((p) =>
-          p ? (
-            <Chip
-              key={p.id}
-              label={p.type === 'home' ? 'Home' : 'Work'}
-              onPress={() => {
-                if (isValidLatLng(p as Partial<LatLng>)) setDrop(p as GeoPlace);
-              }}
-            />
-          ) : null,
-        )}
-        <Chip label="Saved places" onPress={() => navigation.navigate('SavedPlaces')} />
-        <Chip label="Offers" onPress={() => navigation.navigate('Offers')} />
-        {drop ? <Chip label="☆ Save destination" onPress={() => void saveDrop()} /> : null}
-      </View>
-      {savedMsg ? <Text style={type.small}>{savedMsg}</Text> : null}
-
-      {pickup && drop ? (
-        <>
-          <RideMap pickup={pickup} drop={drop} route={route && !route.estimated ? route.path : null} userLocation={null} height={200} />
-          <View style={styles.routeRow}>
-            <Text style={type.small}>
-              {routeLoading || !route ? (
-                'Calculating route…'
-              ) : (
-                <>
-                  <Text style={styles.strong}>{formatDistance(route.distanceKm)}</Text> · about{' '}
-                  <Text style={styles.strong}>{formatDuration(route.durationMin)}</Text>
-                  {route.estimated ? ' · estimated' : ''}
-                </>
-              )}
-            </Text>
-            {outstation ? <Badge label="Outstation" tone="brand" /> : null}
-          </View>
-
-          <SectionTitle>Trip</SectionTitle>
-          <Segmented
-            options={[
-              { value: 'One Way', label: 'One way' },
-              { value: 'Round Trip', label: 'Round trip' },
-            ]}
-            value={tripType}
-            onChange={setTripType}
-          />
-          <View style={{ height: space.sm }} />
-          <Segmented
-            options={[
-              { value: 'now', label: 'Ride now' },
-              { value: 'schedule', label: 'Schedule' },
-            ]}
-            value={timing}
-            onChange={(v) => {
-              setTiming(v);
-              if (v === 'schedule' && !scheduledAt) openSchedulePicker();
+        <View style={styles.whenRow}>
+          <Pressable style={styles.whenBox} onPress={openSchedulePicker} accessibilityRole="button" accessibilityLabel={`Pickup date: ${scheduledAt ? formatDate(scheduledAt) : 'today'}. Change`}>
+            <Ionicons name="calendar-outline" size={26} color={colors.ink} />
+            <View>
+              <Text style={styles.whenLabel}>Date</Text>
+              <Text style={styles.whenValue}>{scheduledAt ? formatDate(scheduledAt) : 'Today'}</Text>
+            </View>
+          </Pressable>
+          <Pressable style={styles.whenBox} onPress={openSchedulePicker} accessibilityRole="button" accessibilityLabel={`Pickup time: ${scheduledAt ? formatTime(scheduledAt) : 'now'}. Change`}>
+            <Ionicons name="time-outline" size={26} color={colors.ink} />
+            <View>
+              <Text style={styles.whenLabel}>Time</Text>
+              <Text style={styles.whenValue}>{scheduledAt ? formatTime(scheduledAt) : 'Now'}</Text>
+            </View>
+          </Pressable>
+        </View>
+        {scheduledAt ? (
+          <Text
+            style={styles.rideNow}
+            onPress={() => {
+              update({ scheduledAt: null });
+              setProblem('');
             }}
-          />
-          {timing === 'schedule' ? (
-            <Pressable style={styles.scheduleBox} onPress={openSchedulePicker} accessibilityRole="button">
-              <Ionicons name="calendar-outline" size={18} color={colors.ink} />
-              <Text style={[styles.strong, { flex: 1 }]}>{scheduledAt ? formatDateTime(scheduledAt) : 'Choose pickup date & time'}</Text>
-              <Text style={styles.change}>Change</Text>
-            </Pressable>
-          ) : null}
-          {scheduleError ? <Text style={styles.err}>{scheduleError}</Text> : null}
-
-          <SectionTitle>Choose a ride</SectionTitle>
-          {categories.map((c) => {
-            const q = quotes.get(c.id);
-            const selected = c.id === categoryId;
-            return (
-              <Pressable
-                key={c.id}
-                onPress={() => setCategoryId(c.id)}
-                style={[styles.cat, selected && styles.catOn]}
-                accessibilityRole="radio"
-                accessibilityState={{ selected }}
-              >
-                <Ionicons name="car" size={26} color={selected ? colors.primary : colors.muted} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.catName}>
-                    {c.name} <Text style={type.small}>· {c.seats} seats</Text>
-                  </Text>
-                  <Text style={type.small} numberOfLines={1}>
-                    {timing === 'schedule' ? 'Driver assigned before pickup' : c.description || 'Partner dispatch'}
-                  </Text>
-                </View>
-                <View style={{ alignItems: 'flex-end' }}>
-                  <Text style={styles.catFare}>{q ? formatINR(q.total) : '—'}</Text>
-                  {selected && q && q.discount > 0 ? <Text style={styles.promoSave}>−{formatINR(q.discount)} promo</Text> : null}
-                </View>
-              </Pressable>
-            );
-          })}
-
-          {quote ? (
-            <Card>
-              <Pressable onPress={() => setShowBreakdown((s) => !s)} style={styles.breakdownHead} accessibilityRole="button">
-                <Text style={type.h3}>Fare breakdown</Text>
-                <Ionicons name={showBreakdown ? 'chevron-up' : 'chevron-down'} size={18} color={colors.muted} />
-              </Pressable>
-              {showBreakdown ? (
-                <>
-                  <FareLines fare={quote} />
-                  <Text style={[type.tiny, { marginTop: space.sm }]}>Tolls, parking and state permits paid by the driver are added at the end of the trip.</Text>
-                </>
-              ) : null}
-            </Card>
-          ) : null}
-
-          <SectionTitle>Payment</SectionTitle>
-          <View style={styles.payGrid}>
-            {PAYMENT_OPTIONS.map((p) => {
-              const disabled = p.id === 'Wallet';
-              const hint = p.id === 'Wallet' ? 'Coming soon' : p.hint;
-              const on = payment === p.id;
-              return (
-                <Pressable
-                  key={p.id}
-                  disabled={disabled}
-                  onPress={() => setPayment(p.id)}
-                  style={[styles.pay, on && styles.catOn, disabled && { opacity: 0.45 }]}
-                  accessibilityRole="radio"
-                  accessibilityState={{ selected: on, disabled }}
-                >
-                  <Text style={styles.strong}>{p.label}</Text>
-                  <Text style={type.tiny}>{hint}</Text>
-                </Pressable>
-              );
-            })}
-          </View>
-
-          <SectionTitle>Promo code & note</SectionTitle>
-          <View style={styles.promoRow}>
-            <TextInput
-              value={promoInput}
-              onChangeText={(v) => setPromoInput(v.toUpperCase())}
-              placeholder="Promo code"
-              placeholderTextColor={colors.faint}
-              autoCapitalize="characters"
-              style={styles.promoInput}
-              editable={!appliedCode}
-            />
-            {appliedCode ? (
-              <Button
-                small
-                variant="secondary"
-                title="Remove"
-                onPress={clearPromo}
-              />
-            ) : (
-              <Button small variant="dark" title="Apply" disabled={!promoInput.trim()} onPress={applyPromo} />
-            )}
-          </View>
-          {promoMsg ? <Text style={[styles.promoMsg, { color: promoMsg.ok ? colors.success : colors.primaryDark }]}>{promoMsg.text}</Text> : null}
-          <TextInput
-            value={notes}
-            onChangeText={(v) => setNotes(v.slice(0, 300))}
-            placeholder="Note for driver (gate number, landmark, luggage)"
-            placeholderTextColor={colors.faint}
-            multiline
-            style={styles.notes}
-          />
-          <Text style={[type.tiny, { textAlign: 'right' }]}>{notes.length}/300</Text>
-          <Notice message={submitError} onRetry={() => void submit()} />
-        </>
-      ) : (
-        <Card>
-          <Text style={type.h3}>Airport · Local · Outstation</Text>
-          <Text style={[type.small, { marginTop: 4 }]}>
-            Set your pickup and destination to see fares for every NESAM ride type. Trips over 40 km are priced as outstation with driver
-            allowance; airport trips are detected automatically.
+            accessibilityRole="button"
+          >
+            Ride now instead
           </Text>
-        </Card>
-      )}
+        ) : null}
+
+        {problem ? <Notice message={problem} style={{ marginTop: space.md, marginBottom: 0 }} /> : null}
+        <Pressable onPress={findCab} style={({ pressed }) => [styles.findBtn, pressed && { backgroundColor: colors.primaryDark }]} accessibilityRole="button">
+          <Text style={styles.findText}>Find a Cab</Text>
+          <Ionicons name="arrow-forward" size={24} color={colors.white} />
+        </Pressable>
+      </View>
+
+      {locationHint && !pickup ? <Notice tone="warning" message={locationHint} style={{ marginTop: space.md }} /> : null}
+
+      <View style={styles.savedHead}>
+        <Text style={styles.sectionTitle}>Saved places</Text>
+        <Text style={styles.viewAll} onPress={() => navigation.navigate('SavedPlaces')} accessibilityRole="link">
+          View all
+        </Text>
+      </View>
+      <View style={styles.savedRow}>
+        <SavedCard icon="home-outline" label="Home" place={home} onPress={() => goToSaved(home)} />
+        <SavedCard icon="briefcase-outline" label="Office" place={work} onPress={() => goToSaved(work)} />
+      </View>
+
+      <SupportBanner />
     </Screen>
   );
 }
 
+function Tile({ icon, label, hint, active, onPress }: { icon: keyof typeof Ionicons.glyphMap; label: string; hint?: string; active?: boolean; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.tile, active && styles.tileOn, pressed && { opacity: 0.85 }]}
+      accessibilityRole="button"
+      accessibilityState={{ selected: !!active }}
+      accessibilityLabel={hint ? `${label}, ${hint}` : label}
+    >
+      <Ionicons name={icon} size={30} color={active ? colors.primary : colors.ink} />
+      <Text style={[styles.tileText, active && { color: colors.primary }]}>{label}</Text>
+      {hint ? <Text style={[styles.tileHint, active && { color: colors.primary }]}>{hint}</Text> : null}
+    </Pressable>
+  );
+}
+
+function SavedCard({ icon, label, place, onPress }: { icon: keyof typeof Ionicons.glyphMap; label: string; place?: LocationItem; onPress: () => void }) {
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.saved, pressed && { opacity: 0.85 }]} accessibilityRole="button" accessibilityLabel={place ? `Go to ${label}: ${place.name}` : `Add ${label} address`}>
+      <Ionicons name={icon} size={28} color={colors.ink} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.savedLabel}>{label}</Text>
+        <Text style={styles.savedSub} numberOfLines={1}>
+          {place ? (place.name && place.name.toLowerCase() !== label.toLowerCase() ? place.name : place.address) : 'Add address'}
+        </Text>
+      </View>
+      <Ionicons name="chevron-forward" size={20} color={colors.slate} />
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
-  liveBanner: {
-    flexDirection: 'row',
+  welcome: { fontSize: 18, color: colors.slate },
+  headline: { fontSize: 28, fontWeight: '900', color: colors.ink, marginBottom: space.lg },
+  liveBanner: { flexDirection: 'row', alignItems: 'center', gap: space.sm, backgroundColor: colors.ink, borderRadius: radius.md, padding: space.md, marginBottom: space.md },
+  liveText: { color: colors.white, fontWeight: '700', fontSize: 14, flexShrink: 1 },
+  tiles: { flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginBottom: space.md },
+  tile: {
+    flexBasis: '47%',
+    flexGrow: 1,
+    minHeight: 104,
     alignItems: 'center',
-    gap: space.sm,
-    backgroundColor: colors.ink,
-    borderRadius: radius.md,
-    padding: space.md,
-    marginBottom: space.md,
-  },
-  liveText: { color: colors.white, fontWeight: '700', fontSize: 13, flexShrink: 1 },
-  placeRow: { flexDirection: 'row', alignItems: 'center', gap: space.md, minHeight: 52 },
-  placeName: { fontSize: 15, fontWeight: '700', color: colors.ink },
-  dot: { width: 12, height: 12, borderRadius: 6 },
-  placeDivider: { flexDirection: 'row', alignItems: 'center', height: 24 },
-  connector: { width: 2, height: 24, backgroundColor: colors.border, marginLeft: 5 },
-  swap: { marginLeft: 'auto', padding: 6, borderRadius: radius.pill, backgroundColor: colors.bg, borderWidth: 1, borderColor: colors.border },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: space.sm },
-  routeRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: space.sm },
-  strong: { fontWeight: '800', color: colors.ink, fontSize: 14 },
-  scheduleBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.sm,
-    marginTop: space.sm,
-    padding: space.md,
-    borderRadius: radius.md,
-    borderWidth: 1,
+    justifyContent: 'center',
+    gap: space.xs,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
     borderColor: colors.border,
     backgroundColor: colors.card,
+    padding: space.md,
   },
-  change: { color: colors.primary, fontWeight: '700' },
-  err: { color: colors.primaryDark, fontSize: 12, marginTop: 4 },
-  cat: {
+  tileOn: { borderColor: colors.primary, backgroundColor: colors.primarySoft },
+  tileText: { fontSize: 17, fontWeight: '700', color: colors.ink },
+  tileHint: { fontSize: 12, color: colors.slate, fontWeight: '600' },
+  routeCard: { borderRadius: radius.lg, borderWidth: 1.5, borderColor: colors.border, backgroundColor: colors.card, padding: space.lg },
+  placeRow: { flexDirection: 'row', alignItems: 'flex-start', gap: space.md, minHeight: 64 },
+  dotCol: { width: 18, alignItems: 'center', paddingTop: 26 },
+  dot: { width: 16, height: 16, borderRadius: 8 },
+  dash: { width: 0, flex: 1, minHeight: 44, borderLeftWidth: 2, borderStyle: 'dashed', borderColor: colors.faint, marginTop: 6 },
+  placeLabel: { fontSize: 13, color: colors.slate, fontWeight: '600', letterSpacing: 0.5 },
+  placeName: { fontSize: 20, fontWeight: '800', color: colors.ink, marginTop: 2 },
+  placeAddr: { fontSize: 13, color: colors.slate, marginTop: 2 },
+  pinBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', marginTop: 12 },
+  swap: {
+    alignSelf: 'flex-end',
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginVertical: -8,
+    zIndex: 1,
+  },
+  whenRow: { flexDirection: 'row', gap: space.md, marginTop: space.lg },
+  whenBox: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: space.md, borderRadius: radius.md, borderWidth: 1.5, borderColor: colors.border, padding: space.md },
+  whenLabel: { fontSize: 13, color: colors.slate },
+  whenValue: { fontSize: 18, fontWeight: '800', color: colors.ink },
+  rideNow: { color: colors.primary, fontWeight: '700', fontSize: 14, marginTop: space.sm, alignSelf: 'flex-end', paddingVertical: 4 },
+  findBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: space.md,
+    backgroundColor: colors.primary,
+    borderRadius: radius.md,
+    minHeight: 58,
+    marginTop: space.lg,
+  },
+  findText: { color: colors.white, fontSize: 20, fontWeight: '800' },
+  savedHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: space.xl, marginBottom: space.md },
+  sectionTitle: { fontSize: 20, fontWeight: '800', color: colors.ink },
+  viewAll: { fontSize: 15, color: colors.slate, fontWeight: '600', padding: 4 },
+  savedRow: { flexDirection: 'row', gap: space.md, flexWrap: 'wrap' },
+  saved: {
+    flexBasis: '47%',
+    flexGrow: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: space.md,
-    padding: space.md,
     borderRadius: radius.lg,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: colors.border,
     backgroundColor: colors.card,
-    marginBottom: space.sm,
-  },
-  catOn: { borderColor: colors.primary, backgroundColor: colors.primarySoft },
-  catName: { fontSize: 15, fontWeight: '800', color: colors.ink },
-  catFare: { fontSize: 16, fontWeight: '900', color: colors.ink },
-  promoSave: { fontSize: 11, color: colors.success, fontWeight: '700' },
-  breakdownHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  payGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
-  pay: {
-    flexGrow: 1,
-    flexBasis: '30%',
     padding: space.md,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.card,
+    minHeight: 76,
   },
-  promoRow: { flexDirection: 'row', gap: space.sm, alignItems: 'center' },
-  promoInput: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    paddingHorizontal: space.md,
-    minHeight: 44,
-    fontWeight: '800',
-    letterSpacing: 1,
-    color: colors.ink,
-    backgroundColor: colors.card,
-  },
-  promoMsg: { fontSize: 12, marginTop: 4, fontWeight: '600' },
-  notes: {
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.md,
-    padding: space.md,
-    minHeight: 64,
-    textAlignVertical: 'top',
-    color: colors.ink,
-    backgroundColor: colors.card,
-    marginTop: space.md,
-  },
+  savedLabel: { fontSize: 17, fontWeight: '700', color: colors.ink },
+  savedSub: { fontSize: 13, color: colors.slate, marginTop: 2 },
 });

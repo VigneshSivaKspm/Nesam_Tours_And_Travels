@@ -29,8 +29,11 @@ export function Screen({
   padded = true,
   footer,
   refreshControl,
+  bg,
 }: {
   children: React.ReactNode;
+  /** Page background (defaults to the app grey). */
+  bg?: string;
   scroll?: boolean;
   edges?: Edge[];
   padded?: boolean;
@@ -49,7 +52,7 @@ export function Screen({
     <View style={[{ flex: 1 }, padded && styles.padded]}>{children}</View>
   );
   return (
-    <SafeAreaView style={styles.screen} edges={edges}>
+    <SafeAreaView style={[styles.screen, bg ? { backgroundColor: bg } : null]} edges={edges}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         {body}
         {footer ? <View style={styles.footer}>{footer}</View> : null}
@@ -174,7 +177,7 @@ export function TextField({
       ) : null}
       <View style={[styles.inputWrap, !!error && styles.inputError, input.editable === false && styles.inputDisabled]}>
         {prefix ? <Text style={styles.prefix}>{prefix}</Text> : null}
-        <TextInput placeholderTextColor={colors.faint} style={styles.input} {...input} />
+        <TextInput placeholderTextColor={colors.faint} style={styles.input} accessibilityLabel={label} {...input} />
       </View>
       {error ? <Text style={styles.errorText}>{error}</Text> : hint ? <Text style={styles.hint}>{hint}</Text> : null}
     </View>
@@ -392,7 +395,7 @@ const styles = StyleSheet.create({
   btnText: { fontSize: 15, fontWeight: '700' },
   btnTextSmall: { fontSize: 13 },
   link: { color: colors.primary, fontWeight: '700', fontSize: 13 },
-  fieldLabel: { ...type.label, marginBottom: 6 },
+  fieldLabel: { fontSize: 14, fontWeight: '700', color: colors.ink, marginBottom: 6 },
   inputWrap: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -403,12 +406,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.md,
     minHeight: 48,
   },
-  inputError: { borderColor: colors.primary },
+  // Red only when the field actually has an error (set by the caller).
+  inputError: { borderColor: colors.danger, backgroundColor: '#FFFBFB' },
   inputDisabled: { backgroundColor: '#F3F4F6' },
-  prefix: { color: colors.primary, fontWeight: '800', marginRight: space.sm, fontSize: 15 },
-  input: { flex: 1, fontSize: 15, color: colors.ink, paddingVertical: 10 },
-  errorText: { color: colors.primaryDark, fontSize: 12, marginTop: 4 },
-  hint: { color: colors.muted, fontSize: 12, marginTop: 4 },
+  prefix: { color: colors.ink, fontWeight: '800', marginRight: space.sm, fontSize: 16 },
+  input: { flex: 1, fontSize: 16, fontWeight: '500', color: colors.ink, paddingVertical: 10 },
+  errorText: { color: colors.primaryDark, fontSize: 13, fontWeight: '600', marginTop: 4 },
+  hint: { color: colors.text, fontSize: 13, marginTop: 4 },
   segment: { flexDirection: 'row', backgroundColor: '#EEEEEE', borderRadius: radius.md, padding: 3 },
   segmentItem: { flex: 1, paddingVertical: 9, alignItems: 'center', borderRadius: radius.sm },
   segmentOn: { backgroundColor: colors.card, elevation: 1 },

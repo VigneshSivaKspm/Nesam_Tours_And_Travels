@@ -121,7 +121,7 @@ export interface Booking {
     overpaid: number;
     transactions: number;
   } | null;
-  /** Trip steps: Not Started → Trip Started → Reached Pickup → Trip Ended. */
+  /** Trip steps: Not Started → Reached Pickup → Trip Started → Trip Ended. */
   tripSubStatus?: string;
   tripStartedAt?: any;
   reachedPickupAt?: any;

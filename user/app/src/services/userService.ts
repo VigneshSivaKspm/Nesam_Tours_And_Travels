@@ -44,7 +44,7 @@ export function mapProfile(uid: string, d: DocumentData): UserProfile {
     walletBalance: num(d.walletBalance),
     emergencyContact: str(d.emergencyContact),
     language: str(d.language) || 'English',
-    status: str(d.status) || 'Approved',
+    status: str(d.status),
   };
 }
 

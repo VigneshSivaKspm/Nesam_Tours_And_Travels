@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect } from 'react';
+import React, { createContext, useContext, useEffect, useState } from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
@@ -14,6 +14,11 @@ import { PreTripScreen } from '../screens/PreTripScreen';
 import { NotificationsScreen } from '../screens/NotificationsScreen';
 import { UpdateDocumentsScreen } from '../screens/UpdateDocumentsScreen';
 import { useTripLocationSharing } from '../hooks/useTripLocationSharing';
+import { NotificationPopups } from '../components/NotificationPopups';
+import { PenaltyAckModal } from '../components/PenaltyAckModal';
+import { markNotificationRead } from '../services/driverService';
+import { onPushOpened } from '../services/notificationService';
+import type { DriverNotification } from '../types/driver';
 import { colors } from '../theme';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -74,6 +79,44 @@ function TripAutoFocus() {
   return null;
 }
 
+/** Where a notification's call-to-action leads. */
+function openPage(page: string) {
+  if (!navigationRef.isReady()) return;
+  switch (page) {
+    case 'dashboard':
+      return navigationRef.navigate('Tabs', { screen: 'Home' });
+    case 'trip':
+    case 'booking-detail':
+      return navigationRef.navigate('Tabs', { screen: 'Trip' });
+    case 'wallet':
+      return navigationRef.navigate('Tabs', { screen: 'Wallet' });
+    case 'profile':
+      return navigationRef.navigate('Tabs', { screen: 'Profile' });
+    default:
+      return navigationRef.navigate('Notifications');
+  }
+}
+
+/** Popups with tones for new events, the penalty acknowledgement that cannot be skipped, and push taps. */
+function WorkspaceOverlays() {
+  const { notifications, penalties } = useDriverData();
+  const [doneIds, setDoneIds] = useState<string[]>([]);
+  const pending = penalties.find((p) => p.status === 'Pending' && !p.acknowledged && !doneIds.includes(p.id));
+  useEffect(() => onPushOpened((d) => openPage(d.page)), []);
+  return (
+    <>
+      <NotificationPopups
+        notifications={notifications}
+        onOpen={(n: DriverNotification) => openPage(n.ctaPage)}
+        onRead={(n) => {
+          if (!n.read) markNotificationRead(n.id).catch(() => undefined);
+        }}
+      />
+      {pending ? <PenaltyAckModal key={pending.id} penalty={pending} onDone={() => setDoneIds((ids) => [...ids, pending.id])} /> : null}
+    </>
+  );
+}
+
 /** Shares the driver's live position with the customer during a trip. */
 function LocationSharing() {
   const { activeTrip } = useDriverData();
@@ -92,6 +135,7 @@ export function MainNavigator({ onSignOut }: { onSignOut: () => void }) {
       </Stack.Navigator>
       <TripAutoFocus />
       <LocationSharing />
+      <WorkspaceOverlays />
     </SignOutCtx.Provider>
   );
 }

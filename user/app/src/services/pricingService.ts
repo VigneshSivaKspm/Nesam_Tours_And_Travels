@@ -4,17 +4,16 @@
 // The fare shown here is the upfront price written to the booking; tolls the
 // driver pays en route are added to the final receipt.
 
-import { collection, onSnapshot, query, where, type DocumentData } from 'firebase/firestore';
+import { collection, doc, onSnapshot, query, where, type DocumentData } from 'firebase/firestore';
 import { db } from '../config/firebase';
-import {
-  DEFAULT_RIDE_CATEGORIES,
-  GST_RATE,
-  NIGHT_END_HOUR,
-  NIGHT_START_HOUR,
-  OUTSTATION_THRESHOLD_KM,
-} from '../config/constants';
-import { AppliedCoupon, Coupon, FareBreakdown, GeoPlace, RideCategory, RouteInfo, TripType } from '../types';
-import { num, str } from '../utils/format';
+import { GST_RATE, NIGHT_END_HOUR, NIGHT_START_HOUR, OUTSTATION_THRESHOLD_KM } from '../config/constants';
+import type { AppliedCoupon, Coupon, DiscountDetail, FareBreakdown, GeoPlace, RideCategory, RouteInfo, TripType } from '../types';
+
+// Same coercion as the booking server (functions/src/domain/pricing.ts): a
+// value stored with the wrong type counts as missing and is never parsed, so
+// the app never offers a category or coupon the server would refuse.
+const num = (v: unknown, fallback = 0): number => (typeof v === 'number' && Number.isFinite(v) ? v : fallback);
+const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
 // ── Categories ──────────────────────────────────────────────────────────────
 
@@ -36,7 +35,8 @@ function vehicleTypeAliases(...labels: string[]): string[] {
   return [...out];
 }
 
-function mapCategory(id: string, d: DocumentData): RideCategory | null {
+/** Exported for the server-parity test. */
+export function mapCategory(id: string, d: DocumentData): RideCategory | null {
   const f = d.fare && typeof d.fare === 'object' ? d.fare : {};
   const perKmRate = num(f.perKmRate);
   if (!str(d.name) || perKmRate <= 0) return null; // unpriceable — skip
@@ -57,17 +57,30 @@ function mapCategory(id: string, d: DocumentData): RideCategory | null {
       nightCharge: num(f.nightAllowance),
       driverAllowance: num(f.outstationDriverBattaPerDay) || num(f.driverAllowance),
       outstationPerKmRate: num(f.outstationPerKmRate) || undefined,
+      extras: {
+        waitingPerHour,
+        extraKmRate: num(f.extraKmCharge) || perKmRate,
+        // Absent flags mean "not included": the customer pays at actuals.
+        tollIncluded: f.tollIncluded === true,
+        parkingIncluded: f.parkingIncluded === true,
+        permitCharge: num(f.permitCharge),
+        carrierCharge: num(f.carrierCharge),
+      },
     },
     displayOrder: num(d.displayOrder, 99),
   };
 }
 
+/** 'unavailable' = no active category has fares configured; 'error' = the list couldn't be read. */
+export type RideCategoryStatus = 'loading' | 'ready' | 'unavailable' | 'error';
+
 /**
- * Live list of bookable categories. Emits the built-in defaults while
- * loading, if the collection is empty, or if it can't be read.
+ * Live list of bookable categories — exactly the ones the booking server can
+ * price (active, named, per-km rate set). Nothing is shown or priced from
+ * built-in rates: an empty or unreadable list is reported as such.
  */
-export function subscribeToRideCategories(cb: (cats: RideCategory[], fromAdmin: boolean) => void): () => void {
-  cb(DEFAULT_RIDE_CATEGORIES, false);
+export function subscribeToRideCategories(cb: (cats: RideCategory[], status: RideCategoryStatus) => void): () => void {
+  cb([], 'loading');
   return onSnapshot(
     query(collection(db, 'vehicle_categories'), where('status', '==', 'Active')),
     (snap) => {
@@ -75,11 +88,9 @@ export function subscribeToRideCategories(cb: (cats: RideCategory[], fromAdmin: 
         .map((d) => mapCategory(d.id, d.data()))
         .filter((c): c is RideCategory => !!c)
         .sort((a, b) => a.displayOrder - b.displayOrder || a.name.localeCompare(b.name));
-      if (cats.length) cb(cats, true);
-      else cb(DEFAULT_RIDE_CATEGORIES, false);
+      cb(cats, cats.length ? 'ready' : 'unavailable');
     },
-    // Unreadable → keep quoting with the built-in defaults.
-    () => cb(DEFAULT_RIDE_CATEGORIES, false),
+    () => cb([], 'error'),
   );
 }
 
@@ -98,12 +109,21 @@ export function serviceName(pickup: GeoPlace, drop: GeoPlace, oneWayKm: number):
   return isOutstation(oneWayKm) ? 'Outstation' : 'Local';
 }
 
+/** Night pickup in India time — the server's rule, whatever the browser's time zone. */
 export function isNightTime(d: Date): boolean {
-  const h = d.getHours();
+  const h = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', hourCycle: 'h23' }).format(d));
   return h >= NIGHT_START_HOUR || h < NIGHT_END_HOUR;
 }
 
 // ── Fare engine ─────────────────────────────────────────────────────────────
+
+/** The global percentage adjustment currently in force (festival pricing, a promotion…). */
+export interface FareAdjustment {
+  id: string;
+  name: string;
+  direction: 'increase' | 'decrease';
+  percent: number;
+}
 
 export interface FareInput {
   category: RideCategory;
@@ -111,9 +131,10 @@ export interface FareInput {
   tripType: TripType;
   pickupTime: Date;
   discount?: number;
+  adjustment?: FareAdjustment | null;
 }
 
-export function calculateFare({ category, route, tripType, pickupTime, discount = 0 }: FareInput): FareBreakdown {
+export function calculateFare({ category, route, tripType, pickupTime, discount = 0, adjustment = null }: FareInput): FareBreakdown {
   const f = category.fare;
   const legs = tripType === 'Round Trip' ? 2 : 1;
   const km = route.distanceKm * legs;
@@ -133,12 +154,25 @@ export function calculateFare({ category, route, tripType, pickupTime, discount 
 
   const raw = baseFare + distanceFare + timeFare + nightCharge + driverAllowance;
   const minimumFareAdjustment = Math.max(0, Math.round(f.minimumFare) - raw);
-  const subtotal = raw + minimumFareAdjustment;
-  const appliedDiscount = Math.min(Math.max(0, Math.round(discount)), subtotal);
+  const subtotalBeforeAdjustment = raw + minimumFareAdjustment;
+  // One percentage of the pre-adjustment total — never applied on top of itself.
+  const percent = adjustment ? Math.min(100, Math.max(0, adjustment.percent)) : 0;
+  const adjustmentAmount = adjustment && percent > 0 ? (adjustment.direction === 'decrease' ? -1 : 1) * Math.round((subtotalBeforeAdjustment * percent) / 100) : 0;
+  const subtotal = Math.max(0, subtotalBeforeAdjustment + adjustmentAmount);
+  const globalAdjustment = adjustment && percent > 0
+    ? { id: adjustment.id, name: adjustment.name, direction: adjustment.direction, percent, amount: adjustmentAmount }
+    : null;
+  const requested = Math.max(0, Math.round(discount));
+  const discountDetail: DiscountDetail | null = requested > 0 ? { type: 'coupon', value: requested, amount: 0, source: 'coupon', reason: '' } : null;
+  const appliedDiscount = Math.min(requested, subtotal);
+  if (discountDetail) discountDetail.amount = appliedDiscount;
   const taxableAmount = subtotal - appliedDiscount;
   const gst = Math.round(taxableAmount * GST_RATE);
 
   return {
+    subtotalBeforeAdjustment,
+    globalAdjustment,
+    discountDetail,
     baseFare,
     distanceFare,
     timeFare,
@@ -156,6 +190,26 @@ export function calculateFare({ category, route, tripType, pickupTime, discount 
     perKmRate,
     perMinuteRate,
   };
+}
+
+/** Effective today on the India calendar, like the server decides it. */
+function adjustmentInForce(d: DocumentData | undefined, now = new Date()): FareAdjustment | null {
+  if (!d || d.enabled !== true) return null;
+  const percent = typeof d.percent === 'number' && Number.isFinite(d.percent) ? d.percent : 0;
+  if (!(percent > 0) || (d.direction !== 'increase' && d.direction !== 'decrease')) return null;
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+  if (typeof d.startDate === 'string' && d.startDate && today < d.startDate) return null;
+  if (typeof d.endDate === 'string' && d.endDate && today > d.endDate) return null;
+  return { id: `global_v${typeof d.version === 'number' ? d.version : 0}`, name: typeof d.name === 'string' && d.name ? d.name : 'Fare adjustment', direction: d.direction, percent };
+}
+
+/** Live global fare adjustment (public_config/fare_adjustment); null when none applies. */
+export function subscribeToFareAdjustment(cb: (a: FareAdjustment | null) => void): () => void {
+  return onSnapshot(
+    doc(db, 'public_config', 'fare_adjustment'),
+    (snap) => cb(adjustmentInForce(snap.exists() ? snap.data() : undefined)),
+    () => cb(null),
+  );
 }
 
 // ── Coupons ─────────────────────────────────────────────────────────────────
@@ -188,11 +242,9 @@ export function normalizeCode(code: string): string {
   return (code || '').trim().toUpperCase().replace(/\s+/g, '');
 }
 
+/** Today's date in India (coupon validity dates are Indian calendar dates, as on the server). */
 function todayIso(now: Date): string {
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
 }
 
 export function isCouponLive(c: Coupon, now = new Date()): boolean {

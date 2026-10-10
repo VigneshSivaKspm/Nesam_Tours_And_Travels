@@ -492,8 +492,11 @@ function mapBooking(id: string, data: Record<string, any>): TripDetails {
 
   // The agreed payout is recorded when the trip is claimed or assigned; a fleet
   // trip is paid by the vendor, so the driver has no NESAM payout on it.
-  const fleetTrip = Boolean(data.assignedVendorId);
-  const payout = !fleetTrip && typeof data.driverPayout === 'number' && data.driverPayout > 0 ? data.driverPayout : null;
+  // Once finance finalizes the trip, its snapshot (bookings/{id}.finance) is the amount that counts.
+  const fin = data.finance && typeof data.finance === 'object' && data.finance.schema === 1 ? data.finance : null;
+  const fleetTrip = Boolean(data.assignedVendorId) || fin?.partnerType === 'vendor';
+  const finalized = !fleetTrip && fin?.partnerType === 'driver' && typeof fin.partnerPayout === 'number' && Number.isFinite(fin.partnerPayout);
+  const payout = finalized ? (fin.partnerPayout as number) : !fleetTrip && typeof data.driverPayout === 'number' && data.driverPayout > 0 ? data.driverPayout : null;
   const preTrip = data.preTrip && typeof data.preTrip === 'object' ? data.preTrip : undefined;
   const summary = data.paymentSummary && typeof data.paymentSummary === 'object' ? data.paymentSummary : null;
 
@@ -509,6 +512,7 @@ function mapBooking(id: string, data: Record<string, any>): TripDetails {
     serviceType: str(data.service),
     fareAmount: fare,
     driverEarnings: payout,
+    payoutFinalized: finalized,
     fleetTrip,
     tollCharges: parseAmount(data.tollCharges),
     tollsApproved: data.tollsApproved === true,

@@ -14,6 +14,11 @@ export type RootStackParamList = {
   Offers: undefined;
   Support: { bookingId?: string } | undefined;
   EditProfile: undefined;
+  /** Booking step 2 and 3; both read the shared BookingDraft. */
+  ChooseRide: undefined;
+  ConfirmBooking: undefined;
+  PaymentHistory: undefined;
+  LegalDocuments: undefined;
 };
 
 declare global {

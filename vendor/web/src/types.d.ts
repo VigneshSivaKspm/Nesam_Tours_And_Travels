@@ -111,7 +111,7 @@ export interface VendorTrip {
   vendorPayout: number | null;
   status: string;
   tripStage: string;
-  /** Not Started / Trip Started / Reached Pickup / Trip Ended (blank on older trips). */
+  /** Not Started / Reached Pickup / Trip Started / Trip Ended (blank on older trips). */
   tripSubStatus: string;
   /** The driver has submitted the three vehicle photos for this trip. */
   verificationSubmitted: boolean;

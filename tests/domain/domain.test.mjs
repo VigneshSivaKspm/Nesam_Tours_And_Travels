@@ -133,17 +133,24 @@ test('booking state machine: the main path and the blocked jumps', () => {
   assert.equal(flow.isMarketplaceVisible('Approved'), true);
 });
 
-test('trip stages: only Trip Started → Reached Pickup → Trip Ended', () => {
-  assert.equal(flow.tripStageBlocker('Not Started', 'Trip Started'), '');
-  assert.equal(flow.tripStageBlocker('Trip Started', 'Reached Pickup'), '');
-  assert.equal(flow.tripStageBlocker('Reached Pickup', 'Trip Ended'), '');
-  assert.match(flow.tripStageBlocker('Not Started', 'Trip Ended'), /next step is "Trip Started"/);
-  assert.match(flow.tripStageBlocker('Not Started', 'Reached Pickup'), /next step is "Trip Started"/);
-  assert.match(flow.tripStageBlocker('Trip Started', 'Trip Ended'), /next step is "Reached Pickup"/);
-  assert.match(flow.tripStageBlocker('Trip Started', 'Trip Started'), /already/);
-  assert.match(flow.tripStageBlocker('Trip Ended', 'Reached Pickup'), /already ended/);
+test('trip stages: only Reached Pickup → Trip Started → Trip Ended', () => {
+  assert.equal(flow.tripStageBlocker('Not Started', 'Reached Pickup'), '');
+  assert.equal(flow.tripStageBlocker('Reached Pickup', 'Trip Started'), '');
+  assert.equal(flow.tripStageBlocker('Trip Started', 'Trip Ended'), '');
+  assert.match(flow.tripStageBlocker('Not Started', 'Trip Started'), /next step is "Reached Pickup"/);
+  assert.match(flow.tripStageBlocker('Not Started', 'Trip Ended'), /next step is "Reached Pickup"/);
+  assert.match(flow.tripStageBlocker('Reached Pickup', 'Trip Ended'), /next step is "Trip Started"/);
+  assert.match(flow.tripStageBlocker('Reached Pickup', 'Reached Pickup'), /already/);
+  assert.match(flow.tripStageBlocker('Trip Ended', 'Trip Started'), /already ended/);
+  assert.equal(flow.nextTripStep('Not Started'), 'Reached Pickup');
+  assert.equal(flow.nextTripStep('Trip Ended'), null);
+  assert.deepEqual(flow.LEGACY_STAGE_FOR, { 'Not Started': 'Assigned', 'Reached Pickup': 'Reached Pickup', 'Trip Started': 'In Progress', 'Trip Ended': 'Completed' });
+  // A trip begun under the earlier order (driver still driving to the pickup) has not reached it yet.
+  assert.equal(flow.tripSubStatusOf({ tripSubStatus: 'Trip Started', tripStage: 'En Route Pickup', status: 'Ongoing' }), 'Not Started');
+  assert.equal(flow.tripSubStatusOf({ tripSubStatus: 'Trip Started', tripStage: 'In Progress', status: 'Ongoing' }), 'Trip Started');
   // Old records keep loading.
-  assert.equal(flow.tripSubStatusOf({ tripStage: 'In Progress' }), 'Reached Pickup');
+  assert.equal(flow.tripSubStatusOf({ tripStage: 'En Route Pickup' }), 'Not Started');
+  assert.equal(flow.tripSubStatusOf({ tripStage: 'In Progress' }), 'Trip Started');
   assert.equal(flow.tripSubStatusOf({ status: 'Completed' }), 'Trip Ended');
   assert.equal(flow.tripSubStatusOf({}), 'Not Started');
 });

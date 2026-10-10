@@ -201,7 +201,7 @@ function featureToPlace(f: PhotonFeature): GeoPlace | null {
     p.state,
     p.postcode,
   ].filter((x, i, arr): x is string => !!x && x !== name && arr.indexOf(x) === i);
-  const type: PlaceType = p.osm_value === 'aerodrome' || /airport/i.test(name) ? 'airport' : 'other';
+  const type: PlaceType = isAirportPlace(name, p.osm_key, p.osm_value) ? 'airport' : 'other';
   return {
     id: `osm-${p.osm_type ?? 'x'}${p.osm_id ?? `${lat.toFixed(5)},${lng.toFixed(5)}`}`,
     name,
@@ -213,6 +213,16 @@ function featureToPlace(f: PhotonFeature): GeoPlace | null {
 }
 
 const searchCache = new LruCache<GeoPlace[]>(60);
+
+/**
+ * An airport, not just something named after one: OpenStreetMap's aerodrome tag, or
+ * an "airport" name that is not a road, street or neighbourhood ("Airport Road").
+ */
+export function isAirportPlace(name: string, osmKey?: string, osmValue?: string): boolean {
+  if (osmValue === 'aerodrome' || osmValue === 'terminal') return true;
+  if (osmKey === 'highway' || osmKey === 'place') return false;
+  return /\bairport\b/i.test(name) && !/\b(road|rd|street|st|salai|nagar|colony|layout|junction|bus stop)\b/i.test(name);
+}
 
 export async function searchPlaces(query: string, near?: LatLng | null, signal?: AbortSignal): Promise<GeoPlace[]> {
   const q = query.trim();

@@ -7,11 +7,12 @@ import {
   mapFleetDriver,
   mapMarketTrip,
   mapVendorBooking,
+  tripStageLabel,
   validateCounterRate,
   validateVendorPayout,
 } from '../src/services/vendorService';
 import { buildOnboardingPath, validateUploadFile } from '../src/services/storageService';
-import { commissionOf, daysUntil, netPayout, summarizeVendorWallet, walletTransactions } from '../src/utils/wallet';
+import { daysUntil, mapLedgerEntry, mapWallet, monthEarnings, payoutText } from '../src/utils/wallet';
 import {
   validateAadhaar,
   validateAccountNumber,
@@ -23,7 +24,6 @@ import {
   validatePincode,
   validateUpi,
 } from '../src/utils/validation';
-import type { VendorPayoutRequest } from '../src/types/operations';
 
 const vendor = { id: 'v1', companyName: 'Sri Balaji Travels', phone: '+919800000001' };
 
@@ -124,35 +124,36 @@ describe('bids & payouts', () => {
   });
 });
 
-describe('wallet', () => {
+describe('wallet (server ledger)', () => {
   const now = new Date(2026, 8, 28, 12);
-  const b = (id: string, over: Record<string, unknown>) => mapVendorBooking(id, { bookingId: id, status: 'Completed', ...over });
-  const bookings = [
-    b('a', { fare: 1000, vendorPayout: 850, tollCharges: 100, completedAt: new Date(2026, 8, 28, 9) }),
-    b('b', { fare: 2000, completedAt: new Date(2026, 7, 10) }),
-    b('c', { fare: 999, status: 'Assigned' }),
-  ];
-  const p = (amount: number, status: string): VendorPayoutRequest => ({ id: status + amount, amount, method: 'UPI', details: '', status, requestedAt: '', utr: '', processedAt: '', createdMs: 1 });
+  const e = (id: string, type: string, amount: number, at: Date, over: Record<string, unknown> = {}) =>
+    mapLedgerEntry(id, { schema: 2, type, direction: 'credit', netAmount: amount, status: 'available', createdAt: at, ...over })!;
 
-  it('uses the accepted payout, else the commission rate', () => {
-    expect(netPayout(bookings[0]!, 0.15)).toBe(850);
-    expect(netPayout(bookings[1]!, 0.15)).toBe(1700);
-    expect(commissionOf(bookings[1]!, 0.2)).toBe(400);
+  it('shows the recorded payout and never estimates one', () => {
+    const b = (over: Record<string, unknown>) => mapVendorBooking('a', { bookingId: 'a', status: 'Completed', fare: 1000, ...over });
+    expect(payoutText(b({ vendorPayout: 850 }))).toMatch(/850/);
+    expect(b({}).payoutRecorded).toBe(false);
+    expect(payoutText(b({}))).toBe('Not recorded');
+    const fin = b({ vendorPayout: 850, finance: { schema: 1, partnerType: 'vendor', partnerPayout: 820 } });
+    expect(fin).toMatchObject({ vendorPayout: 820, payoutFinalized: true });
+    expect(payoutText(fin)).toMatch(/820.*finalized/);
+    expect(tripStageLabel(b({ status: 'Assigned', tripStage: 'Reached Pickup' }))).toBe('Driver at pickup');
+    expect(tripStageLabel(b({ status: 'Ongoing', tripStage: 'In Progress' }))).toBe('On trip');
   });
-  it('derives the available balance', () => {
-    const w = summarizeVendorWallet(bookings, [p(500, 'Paid'), p(300, 'Pending'), p(700, 'Rejected')], 0.15, now);
-    expect(w.completedTrips).toBe(2);
-    expect(w.grossFares).toBe(3000);
-    expect(w.commission).toBe(450);
-    expect(w.netEarnings).toBe(2550);
-    expect(w.tolls).toBe(100);
-    expect(w.available).toBe(0);
-    expect(w.todayNet).toBe(850);
+  it('reads the wallet as the server wrote it, including a negative balance', () => {
+    expect(mapWallet(undefined).available).toBe(0);
+    expect(mapWallet({ available: -400, reserved: 300, paidOut: 500, pending: '12' })).toMatchObject({ available: -400, reserved: 300, paidOut: 500, pending: 0 });
   });
-  it('lists credits and debits newest first', () => {
-    const t = walletTransactions(bookings, [p(500, 'Paid')], 0.15);
-    expect(t.filter((x) => x.kind === 'credit')).toHaveLength(2);
-    expect(t.find((x) => x.id === 'trip-a')?.amount).toBe(950);
+  it('sums only credited earnings for the month', () => {
+    const ledger = [
+      e('a', 'trip_earning', 850, new Date(2026, 8, 28, 9)),
+      e('t', 'toll_reimbursement', 100, new Date(2026, 8, 20)),
+      e('old', 'trip_earning', 1700, new Date(2026, 7, 10)),
+      e('cash', 'cash_collected', 1000, new Date(2026, 8, 27), { direction: 'debit' }),
+      e('x', 'trip_earning', 999, new Date(2026, 8, 27), { status: 'cancelled' }),
+    ];
+    expect(monthEarnings(ledger, now)).toBe(950);
+    expect(mapLedgerEntry('legacy', { type: 'trip_earning', netAmount: 5 })).toBeNull();
   });
   it('computes days until expiry', () => {
     expect(daysUntil('2026-09-30', now)).toBe(2);
@@ -177,13 +178,3 @@ describe('mapping & storage', () => {
   });
 });
 
-
-describe('settled fleet balance', () => {
-  it('includes verified non-cash payouts and holds Deferred requests', () => {
-    const trip = mapVendorBooking('settled', { status: 'Completed', fare: 1000, vendorPayout: 850, fareVerified: true, payment: 'Paid', paymentMethod: 'UPI' });
-    expect(trip.withdrawableAmount).toBe(850);
-    const payout: VendorPayoutRequest = { id: 'p', amount: 500, method: 'UPI', details: '', status: 'Deferred', requestedAt: '', utr: '', processedAt: '', createdMs: 0 };
-    expect(summarizeVendorWallet([trip], [payout], 0.15).available).toBe(350);
-    expect(mapVendorBooking('cash', { ...trip, paymentMethod: 'Cash' }).withdrawableAmount).toBe(0);
-  });
-});

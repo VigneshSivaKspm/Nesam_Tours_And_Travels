@@ -1,0 +1,9 @@
+{
+  "name": "nesam-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Browser checks of the NESAM apps against the local Firebase emulators (project demo-nesam).",
+  "dependencies": {
+    "playwright-core": "^1.56.0"
+  }
+}

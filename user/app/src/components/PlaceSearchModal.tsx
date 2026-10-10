@@ -19,6 +19,8 @@ interface Props {
   recentPlaces?: GeoPlace[];
   near?: LatLng | null;
   onUseCurrentLocation?: () => void;
+  /** Text to search for as soon as the picker opens (e.g. “airport”). */
+  initialQuery?: string;
 }
 
 type Row =
@@ -51,8 +53,8 @@ interface SearchState {
   error: string;
 }
 
-function PlaceSearchBody({ title, onClose, onSelect, savedPlaces = [], recentPlaces = [], near, onUseCurrentLocation }: Props) {
-  const [text, setText] = useState('');
+function PlaceSearchBody({ title, onClose, onSelect, savedPlaces = [], recentPlaces = [], near, onUseCurrentLocation, initialQuery = '' }: Props) {
+  const [text, setText] = useState(initialQuery);
   // Results are tagged with the query they answer; anything else is stale.
   const [search, setSearch] = useState<SearchState>({ query: '', results: [], error: '' });
   const q = text.trim();

@@ -4,7 +4,7 @@
 // Bookings follow the platform-wide lifecycle enforced by firestore.rules:
 //   status:    Pending → Confirmed (vendor accepted) → Assigned (driver set)
 //              → Ongoing (boarding OTP verified) → Completed | Cancelled
-//   tripStage: Assigned → En Route Pickup → Reached Pickup → In Progress
+//   tripStage: Assigned → Reached Pickup → In Progress (legacy: En Route Pickup)
 //              → Arrived Destination → Completed   (driver-reported detail)
 // ─────────────────────────────────────────────────────────────────────────────
 

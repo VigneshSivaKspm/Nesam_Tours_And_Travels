@@ -32,14 +32,17 @@ import type {
   DriverInviteRecord,
   FleetDriver,
   FleetVehicle,
+  LedgerRecord,
   MarketTrip,
   VendorBid,
   VendorBooking,
   VendorPayoutRequest,
   VehicleStatus,
+  WalletDetails,
 } from '../types/operations';
 import { num, str, toDate } from '../utils/format';
 import { withTimeout } from '../utils/retry';
+import { mapLedgerEntry, mapWallet } from '../utils/wallet';
 
 export const MIN_PAYOUT = 500;
 export const DEFAULT_COMMISSION_RATE = 0.15;
@@ -235,10 +238,10 @@ export function mapVendorBooking(id: string, d: DocumentData): VendorBooking {
     driverPhone: str(d.driverPhone),
     vehicleNumber: str(d.assignedVehicleNumber),
     fare: num(d.fare),
-    vendorPayout: num(d.vendorPayout),
+    // The server records the payout; the app never estimates one. Once finance has
+    // finalized the trip, its snapshot (bookings/{id}.finance) is the amount that counts.
+    ...vendorPayoutOf(d),
     tollCharges: num(d.tollCharges),
-    withdrawableAmount: d.status === 'Completed' && d.fareVerified === true && d.payment === 'Paid' && d.paymentMethod !== 'Cash'
-      ? Math.max(0, num(d.vendorPayout)) + (d.tollsApproved === true ? Math.max(0, num(d.tollCharges)) : 0) : 0,
     paymentMethod: str(d.paymentMethod),
     confirmedAt: toDate(d.confirmedAt),
     completedAt: toDate(d.completedAt),
@@ -254,6 +257,24 @@ export function subscribeToVendorBookings(vendorId: string, cb: (b: VendorBookin
 }
 
 export const isActiveBooking = (b: VendorBooking) => b.status === 'Confirmed' || b.status === 'Assigned' || b.status === 'Ongoing';
+function vendorPayoutOf(d: DocumentData): { vendorPayout: number; payoutRecorded: boolean; payoutFinalized: boolean } {
+  const fin = d.finance && typeof d.finance === 'object' && d.finance.schema === 1 ? d.finance : null;
+  if (fin && fin.partnerType === 'vendor' && typeof fin.partnerPayout === 'number' && Number.isFinite(fin.partnerPayout)) {
+    return { vendorPayout: fin.partnerPayout, payoutRecorded: true, payoutFinalized: true };
+  }
+  const recorded = typeof d.vendorPayout === 'number' && Number.isFinite(d.vendorPayout);
+  return { vendorPayout: recorded ? d.vendorPayout : 0, payoutRecorded: recorded, payoutFinalized: false };
+}
+
+/** Driver progress in words (steps: Reached Pickup → Trip Started → Trip Ended; tripStage mirrors them). */
+export function tripStageLabel(b: Pick<VendorBooking, 'status' | 'tripStage'>): string {
+  if (b.status === 'Completed') return 'Completed';
+  if (b.status === 'Ongoing' || b.tripStage === 'In Progress' || b.tripStage === 'Arrived Destination') return 'On trip';
+  if (b.tripStage === 'Reached Pickup') return 'Driver at pickup';
+  if (b.tripStage === 'En Route Pickup') return 'Driver on the way';
+  return b.status === 'Assigned' ? 'Driver assigned' : b.status;
+}
+
 export const canDispatch = (b: VendorBooking) => b.status === 'Confirmed' || (b.status === 'Assigned' && (!b.tripStage || b.tripStage === 'Assigned'));
 
 /** Booking fields written when dispatching a driver (vendorDispatchOk allow-list). */
@@ -372,6 +393,8 @@ export async function setVehicleStatus(id: string, status: VehicleStatus): Promi
 
 export async function deleteVehicle(v: FleetVehicle): Promise<void> {
   if (v.assignedDriverId) throw new VendorActionError('assigned', `Unassign ${v.assignedDriverName || 'the driver'} before removing this vehicle.`);
+  // firestore.rules: approved vehicles are kept for trip history; they can only be deactivated.
+  if (v.docStatus === 'Approved') throw new VendorActionError('approved', 'Approved vehicles can’t be removed. Set the vehicle to Inactive instead.');
   await withTimeout(deleteDoc(doc(db, 'vehicles', v.id)), 15000);
 }
 
@@ -490,6 +513,31 @@ export async function revokeInvite(phone: string): Promise<void> {
 
 // ── Payouts ────────────────────────────────────────────────────────────────
 
+/** The server-computed wallet (wallets/vendor_{uid}); a missing document is an empty wallet. */
+export function subscribeToVendorWallet(vendorId: string, cb: (w: WalletDetails) => void, onError?: (e: unknown) => void): () => void {
+  return onSnapshot(
+    doc(db, 'wallets', `vendor_${vendorId}`),
+    (snap) => cb(mapWallet(snap.exists() ? snap.data() : undefined)),
+    (err) => onError?.(err),
+  );
+}
+
+/** This vendor's ledger entries (schema 2), newest first. */
+export function subscribeToVendorLedger(vendorId: string, cb: (entries: LedgerRecord[]) => void, onError?: (e: unknown) => void): () => void {
+  return onSnapshot(
+    query(collection(db, 'wallet_ledger'), where('vendorId', '==', vendorId)),
+    (snap) => {
+      const rows = snap.docs.map((d) => mapLedgerEntry(d.id, d.data())).filter((e): e is LedgerRecord => e !== null);
+      rows.sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+      cb(rows);
+    },
+    (err) => {
+      cb([]);
+      onError?.(err);
+    },
+  );
+}
+
 export function subscribeToVendorPayouts(vendorId: string, cb: (p: VendorPayoutRequest[]) => void): () => void {
   return onSnapshot(
     query(collection(db, 'payout_requests'), where('vendorId', '==', vendorId)),
@@ -524,7 +572,8 @@ export function validateVendorPayout(amount: number, available: number): string 
   return '';
 }
 
-export async function requestVendorPayout(vendor: VendorIdentity, amount: number, available: number, method: 'UPI' | 'Bank Transfer', details: string): Promise<void> {
+/** The server re-checks the ledger balance, reserves the amount and pays to the account in the vendor's KYC. */
+export async function requestVendorPayout(amount: number, available: number, method: 'UPI' | 'Bank Transfer'): Promise<void> {
   const invalid = validateVendorPayout(amount, available);
   if (invalid) throw new VendorActionError('invalid-amount', invalid);
   const ref = doc(collection(db, 'payout_requests'));

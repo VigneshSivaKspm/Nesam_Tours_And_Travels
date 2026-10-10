@@ -122,7 +122,7 @@ You provide transport services as an independent driver or as part of a fleet op
 You must hold a valid licence, vehicle documents, insurance, permit and fitness certificate, and keep them current.
 
 3. Trips
-Accept only trips you can complete. Follow the trip steps in the app in order: Trip Started, Reached Pickup, Trip End. Do not share a customer's details or use them for any other purpose.
+Accept only trips you can complete. Follow the trip steps in the app in order: Reached Pickup, Trip Started (after the customer's boarding OTP), Trip End. Do not share a customer's details or use them for any other purpose.
 
 4. Vehicle verification
 Before each trip you capture photos of the vehicle front, rear and interior using the in-app camera. Photos from the gallery are not accepted. Submitting a reused, edited or misleading photo is a serious breach.

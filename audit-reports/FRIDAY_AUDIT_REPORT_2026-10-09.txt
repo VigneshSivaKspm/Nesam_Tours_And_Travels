@@ -1,0 +1,149 @@
+================================================================================
+NESAM TOURS & TRAVELS — COMPREHENSIVE FRIDAY SYSTEM AUDIT & STATUS REPORT
+================================================================================
+Date: Friday, 09 October 2026
+Project Directory: E:\Legendary One\Nesam_Tours_And_Travels-main
+Applications Covered:
+  1. Customer Mobile / Web Application (user/app, user/web)
+  2. Driver Mobile / Web Application (driver/app, driver/web)
+  3. Vendor Mobile / Web Application (vendor/app, vendor/web)
+  4. Super Admin Management Portal (admin/)
+  5. Cloud Functions & Firestore Security Rules (functions/, firestore.rules)
+Status: PRODUCTION CANDIDATE / READY FOR DEPLOYMENT REVIEW
+================================================================================
+
+1. EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+This audit report outlines the current verified state of the NESAM Tours & Travels
+codebase following the latest overhaul, customer redesign implementation, driver
+stage workflow enforcement, anti-fraud hardening, and end-to-end integration
+testing.
+
+All 4 application surfaces, background Cloud Functions, and database security rules
+have undergone automated checks, including TypeScript type checking, zero-warning
+ESLint sweeps, unit and domain parity suites, and emulator-driven browser flows.
+
+
+2. KEY IMPLEMENTATIONS & COMPLIANCE VERIFICATION
+--------------------------------------------------------------------------------
+
+A. CUSTOMER APP REDESIGN & USER INTERFACE
+  * Visual Reference Alignment:
+    - Booking Home: 4-tile service layout (One Way, Round Trip, Local Rental,
+      Airport), automatic GPS reverse-geocoded pickup, 12-hour AM/PM time selector,
+      live destination search, and customer support call banner.
+    - Choose Your Ride: Route calculation via OSRM, vehicle selection cards
+      (Sedan, SUV, Innova Crysta, Tempo Traveller) with passenger counts,
+      per-route dynamic quotes, expandable fare details, and sticky bottom bar.
+    - My Trips: Partitioned into Upcoming, Completed, and Cancelled tabs with
+      trip details, status badges, and receipt viewing.
+    - Account: Structured 3-tier menu (Profile & Preferences, Payments & Support,
+      Privacy), initials avatar with photo upload, wallet refund credits,
+      and terms viewer.
+  * Form Usability & Autofill Fixes:
+    - Form inputs, placeholders, and labels meet WCAG 2.1 AA contrast standards.
+    - Fixed browser autofill color overrides across all web interfaces
+      (-webkit-autofill rules applied in CSS).
+    - Removed spurious red borders on untouched form inputs; red highlights appear
+      strictly on actual validation errors.
+    - 12-hour AM/PM time display normalized across all mobile and web screens
+      using reliable Intl formatters.
+
+B. SUPER ADMIN BOOKINGS, PRICING & MARKETPLACE
+  * Manual Booking Creation:
+    - Interactive Leaflet map pinpoint picker with search autocomplete, drag-to-
+      adjust pin, boundary verification (India only), and readable address storage.
+    - Captures customer WhatsApp number (toggle for same-as-mobile or custom country
+      code) and optional email with format validation.
+    - Fares are calculated strictly through the server pricing engine; manual
+      typing of calculated package fares is prevented.
+    - Percentage-based Global Fare Adjustment card allowing non-compounding,
+      audited fare increases/decreases across all categories.
+    - Comprehensive fare breakup: included km, extra km rate, toll, parking,
+      driver allowance, and GST.
+  * Operations & Payments:
+    - Tracks advance payments, balance due, payment modes (Cash, UPI, Bank), and
+      collector attribution (Driver, Admin).
+    - Partitioned booking tabs: Pending, Approved, Confirmed, Ongoing, Completed.
+    - Automated alerts for unassigned trips: Warning at 3 hours and Critical at
+      1 hour before scheduled pickup.
+  * Marketplace & Penalties:
+    - Role-scoped marketplace queries: independent drivers view 'Open' trips;
+      vendors view 'Open' and 'Bidding' trips; fleet drivers are barred from
+      claiming marketplace trips.
+    - Admin Marketplace interface verified for posting, bid review, awarding, and
+      driver assignment.
+    - Bids collection-group indexing configured in firestore.indexes.json.
+    - Admin penalty issuance upgraded with an informative warning banner and a
+      mandatory confirmation checkbox before submission.
+    - Driver and vendor apps enforce unskippable penalty acknowledgment modals.
+
+C. DRIVER WORKFLOW & VEHICLE VERIFICATION
+  * Enforced Stage Order:
+    Reached Pickup Location  -->  Trip Started  -->  Trip Ended
+    - Enforced across Cloud Functions, database rules, and driver applications.
+    - Skipping or repeating stages is strictly rejected.
+    - Boarding OTP verified at pickup location, with 5-attempt rate-limiting and
+      a 10-minute security lockout.
+  * Vehicle Photo Verification:
+    - Driver selfie requirement has been completely removed.
+    - Mandatory 3 vehicle photos: Front, Rear, and Dashboard/Interior.
+    - Direct camera capture enforced; photo gallery/file upload is disabled.
+    - Server-issued single-use challenge tokens per photo slot.
+    - Perceptual image hashing prevents reuse of identical images.
+  * Partner Finance Snapshot:
+    - Displays finalized partner payout (finance.partnerPayout) on trip completion.
+    - Client-side payout math or estimation has been eliminated.
+
+
+3. TEST & QUALITY ASSURANCE RESULTS
+--------------------------------------------------------------------------------
+Component                        Test Target               Result       Status
+--------------------------------------------------------------------------------
+Cloud Functions                  functions/ (157 tests)    157 Pass     PASS
+Firestore Security Rules         tests/firestore-rules/    157 Pass     PASS
+Domain Logic & Parity Tests      tests/domain/ (24 tests)  24 Pass      PASS
+Customer Mobile App              user/app (jest, 5 suites) 46 Pass      PASS
+Customer App Linting             user/app (eslint)         0 Errors     PASS
+Driver Mobile App                driver/app (jest, 3 stes) 34 Pass      PASS
+Driver App Linting               driver/app (eslint)       0 Errors     PASS
+Vendor Mobile App                vendor/app (jest, 2 stes) 20 Pass      PASS
+Vendor App Linting               vendor/app (eslint)       0 Errors     PASS
+Admin Web Portal                 admin/ (tsc + vite build) Clean Build  PASS
+E2E Browser Automation           tests/e2e/ customer & drv All verified PASS
+--------------------------------------------------------------------------------
+
+
+4. EXTERNAL SETUP & PRE-DEPLOYMENT PREREQUISITES
+--------------------------------------------------------------------------------
+1. Firebase Deployment:
+   - Deploy security rules:
+       firebase deploy --only firestore:rules,storage:rules
+   - Deploy composite indexes:
+       firebase deploy --only firestore:indexes
+   - Deploy Cloud Functions:
+       firebase deploy --only functions
+2. Provider Credentials (Production Environment):
+   - Meta WhatsApp Cloud API credentials for WhatsApp OTP and booking notices.
+   - Twilio SMS credentials for fallback SMS verification.
+   - SendGrid API key for transactional emails.
+3. Push Notifications & Store Builds:
+   - Attach google-services.json (Android) and APNs keys (iOS) before running
+     production EAS builds.
+
+
+5. TECHNICAL LIMITATIONS & CONSTRAINTS
+--------------------------------------------------------------------------------
+* Screen Recapture Detection:
+  While camera-only capture, short-lived session tokens, and image hashing are
+  active, detecting a physical photograph taken of another screen cannot be
+  guaranteed 100% algorithmically on mobile devices. Suspicious patterns are
+  flagged for manual admin inspection.
+* GPS & Mock Locations:
+  Location verification checks operate within standard OS capabilities. Mock
+  location signals are logged as security events rather than hard hardware locks.
+
+================================================================================
+END OF REPORT — NESAM TOURS & TRAVELS
+================================================================================
+

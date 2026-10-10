@@ -61,6 +61,15 @@ export interface FareConfig {
   driverAllowance: number;
   /** Per-km rate for outstation trips, when the admin configured one. */
   outstationPerKmRate?: number;
+  /** Charges the booking breakup lists separately (waiting, extra km, toll/parking/permit/carrier). */
+  extras?: {
+    waitingPerHour: number;
+    extraKmRate: number;
+    tollIncluded: boolean;
+    parkingIncluded: boolean;
+    permitCharge: number;
+    carrierCharge: number;
+  };
 }
 
 export interface RideCategory {
@@ -75,13 +84,27 @@ export interface RideCategory {
   displayOrder: number;
 }
 
+export interface DiscountDetail {
+  type: 'percentage' | 'fixed' | 'coupon';
+  value: number;
+  amount: number;
+  source: 'admin' | 'coupon';
+  reason: string;
+}
+
 export interface FareBreakdown {
+  /** Package total before the global % adjustment. */
+  subtotalBeforeAdjustment?: number;
+  globalAdjustment?: { id: string; name: string; direction: 'increase' | 'decrease'; percent: number; amount: number } | null;
+  discountDetail?: DiscountDetail | null;
   baseFare: number;
   distanceFare: number;
   timeFare: number;
   nightCharge: number;
   driverAllowance: number;
   minimumFareAdjustment: number;
+  /** Pre-GST difference when NESAM agreed a different fare (set only by the booking server). */
+  adminAdjustment?: number;
   subtotal: number;
   discount: number;
   taxableAmount: number;
@@ -97,7 +120,17 @@ export interface FareBreakdown {
 export type PaymentMethod = 'Cash' | 'UPI' | 'Wallet' | 'Card';
 export type TripType = 'One Way' | 'Round Trip';
 
-export type BookingStatus = 'Pending' | 'Confirmed' | 'Assigned' | 'Ongoing' | 'Completed' | 'Cancelled';
+export type BookingStatus = 'Pending' | 'Approved' | 'Confirmed' | 'Assigned' | 'Ongoing' | 'Completed' | 'Cancelled' | 'Rejected';
+
+/** One line of the fare breakup the booking server stores (functions/src/domain/fareBreakup.ts). */
+export interface FareLine {
+  key: string;
+  label: string;
+  /** Rupees; negative for reductions; null = billed at actuals / rate only. */
+  amount: number | null;
+  treatment: 'included' | 'extra' | 'not_applicable';
+  detail: string;
+}
 export type TripStage =
   | 'Assigned'
   | 'En Route Pickup'
@@ -161,6 +194,12 @@ export interface TripRecord {
   phase: RidePhase;
   fare: number;
   fareBreakdown: FareBreakdown | null;
+  /** The server's breakup (included / extra lines); empty on bookings made before it existed. */
+  fareLines: FareLine[];
+  /** Server-derived payment picture; null on bookings from before payments were recorded one by one. */
+  paid: { totalPaid: number; balanceDue: number; status: string } | null;
+  /** Refund recorded on a cancelled booking (status Pending / Processing / Completed …). */
+  refund: { status: string; amount: number } | null;
   tollCharges: number;
   couponCode: string;
   paymentMethod: PaymentMethod | string;
@@ -171,6 +210,8 @@ export interface TripRecord {
   isScheduled: boolean;
   scheduledAt: Date | null;
   createdAt: Date | null;
+  /** When NESAM approved the booking (it then becomes visible to partners). */
+  approvedAt: Date | null;
   assignedAt: Date | null;
   startedAt: Date | null;
   completedAt: Date | null;

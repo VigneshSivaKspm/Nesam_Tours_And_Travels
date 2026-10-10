@@ -111,19 +111,21 @@ export function ActiveRideScreen({ route, navigation }: Props) {
     return () => controller.abort();
   }, [driverLoc?.lat, driverLoc?.lng, trip?.phase]); // eslint-disable-line react-hooks/exhaustive-deps -- throttled on position/phase
 
-  // Searching: withdraw an instant request nobody accepted.
-  const searchingFor = trip?.createdAt ? now - trip.createdAt.getTime() : 0;
+  // Searching: withdraw an instant request no partner accepted. The clock starts
+  // at NESAM's approval — a booking still under review is never withdrawn.
+  const searchStart = trip?.status === 'Approved' ? trip.approvedAt : null;
+  const searchingFor = searchStart ? now - searchStart.getTime() : 0;
   const slow = trip?.phase === 'searching' && !trip.isScheduled && searchingFor > SEARCH_SLOW_AFTER_MS;
   const gaveUp = useRef(false);
   useEffect(() => {
-    if (!trip || trip.phase !== 'searching' || trip.isScheduled || pending || gaveUp.current) return;
+    if (!trip || trip.phase !== 'searching' || !searchStart || trip.isScheduled || pending || gaveUp.current) return;
     if (searchingFor < SEARCH_GIVE_UP_AFTER_MS || !online) return;
     gaveUp.current = true;
     cancelRide(trip, 'No driver found').catch((e: unknown) => {
       gaveUp.current = false;
       setAutoCancelError(describeError(e, 'We couldn’t withdraw your request automatically.'));
     });
-  }, [searchingFor, trip, pending, online]);
+  }, [searchingFor, searchStart, trip, pending, online]);
 
   const etaTarget = trip?.phase === 'in_trip' ? 'drop' : 'pickup';
   const eta = driverLoc && etaState?.target === etaTarget ? etaState.info : null;
@@ -153,7 +155,7 @@ export function ActiveRideScreen({ route, navigation }: Props) {
   if (!trip) return <FullScreenLoader label={pending ? 'Sending your ride request…' : 'Loading your ride…'} />;
 
   const phase = trip.phase;
-  const canCancel = ['Pending', 'Confirmed', 'Assigned'].includes(trip.status);
+  const canCancel = ['Pending', 'Approved', 'Confirmed', 'Assigned'].includes(trip.status);
   const minutesAway = eta ? Math.max(1, Math.round(eta.durationMin)) : null;
   const straightKm = driverLoc && isValidLatLng(trip.pickup) ? haversineKm(driverLoc, trip.pickup) : null;
   const sharePoint: LatLng | null = phase === 'in_trip' && driverLoc ? driverLoc : position;
@@ -166,7 +168,7 @@ export function ActiveRideScreen({ route, navigation }: Props) {
 
       <View style={styles.head}>
         <View style={{ flex: 1 }}>
-          <Text style={type.h1}>{PHASE_TITLE[phase]}</Text>
+          <Text style={type.h1}>{trip.status === 'Pending' ? 'Booking under review' : trip.status === 'Rejected' ? 'Booking not accepted' : PHASE_TITLE[phase]}</Text>
           <Text style={type.small}>
             Booking {trip.bookingId}
             {pending ? ' · sending…' : ''}
@@ -193,7 +195,9 @@ export function ActiveRideScreen({ route, navigation }: Props) {
               ? `Scheduled for ${formatDateTime(trip.scheduledAt)}. We’ll assign a driver before your pickup and update you here.`
               : pending
                 ? 'Sending your request…'
-                : 'Contacting drivers near your pickup. This usually takes under a minute.'}
+                : trip.status === 'Pending'
+                  ? 'NESAM is reviewing your booking. You’ll be notified as soon as it’s approved.'
+                  : 'Approved — contacting drivers near your pickup.'}
           </Text>
           {slow ? (
             <Notice

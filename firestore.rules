@@ -38,9 +38,10 @@ rules_version = '2';
 //
 // Booking lifecycle (shared by all four panels):
 //   status:    Pending → Approved (admin) → Confirmed (vendor accepted) →
-//              Assigned (driver set) → Ongoing (driver started) → Completed
+//              Assigned (driver set) → Ongoing (trip started at the pickup) → Completed
 //              | Cancelled | Rejected.  Partners see and claim only Approved trips.
-//   trip:      tripSubStatus Not Started → Trip Started → Reached Pickup → Trip Ended,
+//   trip:      tripSubStatus Not Started → Reached Pickup → Trip Started (boarding
+//              OTP + vehicle photos verified) → Trip Ended,
 //              advanced ONLY by the advanceTrip function (clients cannot write
 //              status or stage fields). Legacy tripStage values still read.
 // ─────────────────────────────────────────────────────────────────────────────

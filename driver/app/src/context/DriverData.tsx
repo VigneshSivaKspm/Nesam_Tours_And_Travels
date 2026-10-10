@@ -2,16 +2,31 @@
 // driver/web/src/DriverWorkspace.tsx). Screens read from here; every listener
 // is torn down on sign-out because the provider is keyed by uid.
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import type { DriverAccount, DriverEarningsSummary, DriverNotification, MarketplaceOffer, PayoutRequest, TripDetails } from '../types/driver';
+import type {
+  DriverAccount,
+  DriverEarningsSummary,
+  DriverNotification,
+  DriverPenalty,
+  DriverWallet,
+  LedgerEntry,
+  MarketplaceOffer,
+  PayoutRequest,
+  TripDetails,
+} from '../types/driver';
 import {
   setDriverPresence,
   subscribeToDriverBookings,
+  subscribeToDriverLedger,
   subscribeToDriverNotifications,
+  subscribeToDriverPenalties,
+  subscribeToDriverWallet,
   subscribeToOpenMarketplace,
   subscribeToPayoutRequests,
 } from '../services/driverService';
-import { summarizeEarnings, summarizeWallet, type WalletSummary } from '../utils/earnings';
+import { EMPTY_WALLET, summarizeEarnings } from '../utils/ledger';
 import { describeError } from '../utils/retry';
+import { describeSignals, runDeviceChecks } from '../services/deviceSecurity';
+import { registerForPush } from '../services/notificationService';
 
 interface DriverDataValue {
   account: DriverAccount;
@@ -24,9 +39,16 @@ interface DriverDataValue {
   offersError: string;
   payouts: PayoutRequest[];
   notifications: DriverNotification[];
+  penalties: DriverPenalty[];
+  /** Plain-language warning when this phone shows signs of being unsafe for trips; empty otherwise. */
+  deviceWarning: string;
   unreadCount: number;
+  /** Earnings the server has credited (wallet_ledger). */
   earnings: DriverEarningsSummary;
-  wallet: WalletSummary;
+  /** The server wallet (wallets/driver_{uid}); the app never computes a balance. */
+  wallet: DriverWallet;
+  ledger: LedgerEntry[];
+  walletError: string;
 }
 
 const Ctx = createContext<DriverDataValue | null>(null);
@@ -47,6 +69,11 @@ export function DriverDataProvider({ account, children }: { account: DriverAccou
   const [offersError, setOffersError] = useState('');
   const [payouts, setPayouts] = useState<PayoutRequest[]>([]);
   const [notifications, setNotifications] = useState<DriverNotification[]>([]);
+  const [penalties, setPenalties] = useState<DriverPenalty[]>([]);
+  const [deviceWarning, setDeviceWarning] = useState('');
+  const [wallet, setWallet] = useState<DriverWallet>(EMPTY_WALLET);
+  const [ledger, setLedger] = useState<LedgerEntry[]>([]);
+  const [walletError, setWalletError] = useState('');
 
   useEffect(
     () =>
@@ -65,12 +92,35 @@ export function DriverDataProvider({ account, children }: { account: DriverAccou
     [driverId],
   );
   useEffect(() => subscribeToPayoutRequests(driverId, setPayouts), [driverId]);
+  useEffect(
+    () =>
+      subscribeToDriverWallet(
+        driverId,
+        (w) => {
+          setWallet(w);
+          setWalletError('');
+        },
+        (e) => setWalletError(describeError(e, 'We couldn’t load your wallet.')),
+      ),
+    [driverId],
+  );
+  useEffect(() => subscribeToDriverLedger(driverId, setLedger, (e) => setWalletError(describeError(e, 'We couldn’t load your earnings.'))), [driverId]);
   useEffect(() => subscribeToDriverNotifications(driverId, setNotifications), [driverId]);
+  useEffect(() => subscribeToDriverPenalties(driverId, setPenalties), [driverId]);
+
+  // Once per session: register this phone for push, log device signals, refresh the Play Integrity verdict.
+  useEffect(() => {
+    void registerForPush(driverId, 'driver');
+    void runDeviceChecks()
+      .then((r) => setDeviceWarning(describeSignals(r.signals) || (r.integrity === 'failed' ? 'This phone or app could not be verified as secure. Install NESAM Driver from Google Play on an unmodified phone.' : '')))
+      .catch(() => undefined);
+  }, [driverId]);
 
   const activeTrip = useMemo(() => bookings.find((b) => b.status === 'Assigned' || b.status === 'Ongoing') ?? null, [bookings]);
 
   // The marketplace is only listened to while the driver can take a trip.
-  const canBrowse = presence === 'Online' && !activeTrip;
+  // Fleet drivers get trips from their vendor; the rules refuse them the marketplace.
+  const canBrowse = presence === 'Online' && !activeTrip && !account.driver.vendorId;
   useEffect(() => {
     if (!canBrowse) return undefined;
     return subscribeToOpenMarketplace(
@@ -100,7 +150,7 @@ export function DriverDataProvider({ account, children }: { account: DriverAccou
     const completedTrips = bookings
       .filter((b) => b.status === 'Completed')
       .sort((a, b) => (b.completedAt?.getTime() ?? 0) - (a.completedAt?.getTime() ?? 0));
-    const earnings = summarizeEarnings(completedTrips);
+    const earnings = summarizeEarnings(ledger);
     return {
       account,
       bookings,
@@ -112,11 +162,15 @@ export function DriverDataProvider({ account, children }: { account: DriverAccou
       offersError: canBrowse ? offersError : '',
       payouts,
       notifications,
+      penalties,
+      deviceWarning,
       unreadCount: notifications.filter((n) => !n.read).length,
       earnings,
-      wallet: summarizeWallet(completedTrips.reduce((sum, trip) => sum + trip.withdrawableAmount, 0), payouts),
+      wallet,
+      ledger,
+      walletError,
     };
-  }, [account, bookings, bookingsLoaded, bookingsError, activeTrip, canBrowse, offers, offersError, payouts, notifications]);
+  }, [account, bookings, bookingsLoaded, bookingsError, activeTrip, canBrowse, offers, offersError, payouts, notifications, penalties, deviceWarning, wallet, ledger, walletError]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

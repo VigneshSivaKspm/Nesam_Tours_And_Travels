@@ -14,6 +14,15 @@ import { SavedPlacesScreen } from '../screens/SavedPlacesScreen';
 import { OffersScreen } from '../screens/OffersScreen';
 import { SupportScreen } from '../screens/SupportScreen';
 import { EditProfileScreen } from '../screens/EditProfileScreen';
+import { ChooseRideScreen } from '../screens/ChooseRideScreen';
+import { ConfirmBookingScreen } from '../screens/ConfirmBookingScreen';
+import { PaymentHistoryScreen } from '../screens/PaymentHistoryScreen';
+import { LegalDocumentsScreen } from '../screens/LegalDocumentsScreen';
+import { BookingDraftProvider } from '../context/BookingDraft';
+import { NotificationPopups } from '../components/NotificationPopups';
+import { useInbox } from '../context/Inbox';
+import { markNotificationRead } from '../services/partnerNotifications';
+import { onPushOpened } from '../services/notificationService';
 import { colors } from '../theme';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -28,29 +37,61 @@ const RideFocusCtx = createContext<RideFocus>({ dismiss: () => undefined, undism
 export const useRideFocus = () => useContext(RideFocusCtx);
 
 const TAB_ICONS: Record<keyof TabParamList, keyof typeof Ionicons.glyphMap> = {
-  Book: 'car-sport',
+  Book: 'car-outline',
   Trips: 'receipt-outline',
   Alerts: 'notifications-outline',
   Account: 'person-circle-outline',
 };
 
 function Tabs() {
-  const { unreadCount } = useCustomerData();
+  const { unreadCount } = useInbox();
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
         headerShown: false,
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.muted,
-        tabBarLabelStyle: { fontSize: 11, fontWeight: '700' },
+        tabBarLabelStyle: { fontSize: 13, fontWeight: '700' },
+        tabBarStyle: { minHeight: 64, paddingTop: 6, borderTopColor: colors.border },
         tabBarIcon: ({ color, size }) => <Ionicons name={TAB_ICONS[route.name]} color={color} size={size} />,
       })}
     >
       <Tab.Screen name="Book" component={BookScreen} options={{ title: 'Book' }} />
       <Tab.Screen name="Trips" component={TripsScreen} options={{ title: 'My Trips' }} />
       <Tab.Screen name="Alerts" component={NotificationsScreen} options={{ title: 'Alerts', tabBarBadge: unreadCount > 0 ? unreadCount : undefined }} />
-      <Tab.Screen name="Account" component={AccountScreen} />
+      <Tab.Screen name="Account" component={AccountScreen} options={{ title: 'Account' }} />
     </Tab.Navigator>
+  );
+}
+
+/** Where a notification's call-to-action (or a tapped push) leads. */
+function openPage(page: string) {
+  if (!navigationRef.isReady()) return;
+  switch (page) {
+    case 'trips':
+    case 'booking-detail':
+      return navigationRef.navigate('Tabs', { screen: 'Trips' });
+    case 'book':
+      return navigationRef.navigate('Tabs', { screen: 'Book' });
+    case 'support':
+      return navigationRef.navigate('Support');
+    default:
+      return navigationRef.navigate('Tabs', { screen: 'Alerts' });
+  }
+}
+
+/** Colour-coded popups with a tone per type for new events, and push-tap routing. */
+function InboxOverlays() {
+  const { notifications } = useInbox();
+  useEffect(() => onPushOpened((d) => openPage(d.page)), []);
+  return (
+    <NotificationPopups
+      notifications={notifications}
+      onOpen={(n) => openPage(n.ctaPage)}
+      onRead={(n) => {
+        if (!n.read) markNotificationRead(n.id).catch(() => undefined);
+      }}
+    />
   );
 }
 
@@ -89,15 +130,22 @@ export function MainNavigator() {
 
   return (
     <RideFocusCtx.Provider value={focus}>
-      <Stack.Navigator screenOptions={{ headerTintColor: colors.ink, headerTitleStyle: { fontWeight: '800' }, headerShadowVisible: false }}>
+      <BookingDraftProvider>
+      <Stack.Navigator screenOptions={{ headerTintColor: colors.ink, headerTitleStyle: { fontWeight: '800' }, headerShadowVisible: false, headerBackTitle: 'Back' }}>
         <Stack.Screen name="Tabs" component={Tabs} options={{ headerShown: false }} />
         <Stack.Screen name="ActiveRide" component={ActiveRideScreen} options={{ title: 'Your ride' }} />
         <Stack.Screen name="SavedPlaces" component={SavedPlacesScreen} options={{ title: 'Saved places' }} />
         <Stack.Screen name="Offers" component={OffersScreen} options={{ title: 'Offers' }} />
         <Stack.Screen name="Support" component={SupportScreen} options={{ title: 'Help & support' }} />
         <Stack.Screen name="EditProfile" component={EditProfileScreen} options={{ title: 'Edit profile' }} />
+        <Stack.Screen name="ChooseRide" component={ChooseRideScreen} options={{ headerShown: false }} />
+        <Stack.Screen name="ConfirmBooking" component={ConfirmBookingScreen} options={{ headerShown: false }} />
+        <Stack.Screen name="PaymentHistory" component={PaymentHistoryScreen} options={{ title: 'Payment history' }} />
+        <Stack.Screen name="LegalDocuments" component={LegalDocumentsScreen} options={{ title: 'Privacy & terms' }} />
       </Stack.Navigator>
       <RideAutoFocus dismissed={dismissed} />
+      <InboxOverlays />
+      </BookingDraftProvider>
     </RideFocusCtx.Provider>
   );
 }

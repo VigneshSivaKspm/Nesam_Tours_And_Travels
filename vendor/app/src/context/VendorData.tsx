@@ -3,7 +3,17 @@
 // because the provider is keyed by uid.
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import type { VendorProfile, VendorRecord } from '../types/vendor';
-import type { DriverInviteRecord, FleetDriver, FleetVehicle, MarketTrip, VendorBid, VendorBooking, VendorPayoutRequest } from '../types/operations';
+import type {
+  DriverInviteRecord,
+  FleetDriver,
+  FleetVehicle,
+  LedgerRecord,
+  MarketTrip,
+  VendorBid,
+  VendorBooking,
+  VendorPayoutRequest,
+  WalletDetails,
+} from '../types/operations';
 import {
   subscribeToFleetDrivers,
   subscribeToFleetVehicles,
@@ -11,11 +21,13 @@ import {
   subscribeToMarketplace,
   subscribeToMyBids,
   subscribeToVendorBookings,
+  subscribeToVendorLedger,
   subscribeToVendorPayouts,
+  subscribeToVendorWallet,
   isActiveBooking,
   type VendorIdentity,
 } from '../services/vendorService';
-import { summarizeVendorWallet, type VendorWallet } from '../utils/wallet';
+import { EMPTY_WALLET, monthEarnings } from '../utils/wallet';
 import { describeDataError } from '../utils/retry';
 
 interface VendorDataValue {
@@ -31,8 +43,12 @@ interface VendorDataValue {
   bids: VendorBid[];
   invites: DriverInviteRecord[];
   payouts: VendorPayoutRequest[];
-  wallet: VendorWallet;
-  errors: { bookings: string; market: string; bids: string };
+  /** The server wallet (wallets/vendor_{uid}); the app never computes a balance. */
+  wallet: WalletDetails;
+  ledger: LedgerRecord[];
+  /** Earnings the server credited this month. */
+  monthEarnings: number;
+  errors: { bookings: string; market: string; bids: string; wallet: string };
 }
 
 const Ctx = createContext<VendorDataValue | null>(null);
@@ -52,7 +68,9 @@ export function VendorDataProvider({ profile, record, children }: { profile: Ven
   const [bids, setBids] = useState<VendorBid[]>([]);
   const [invites, setInvites] = useState<DriverInviteRecord[]>([]);
   const [payouts, setPayouts] = useState<VendorPayoutRequest[]>([]);
-  const [errors, setErrors] = useState({ bookings: '', market: '', bids: '' });
+  const [wallet, setWallet] = useState<WalletDetails>(EMPTY_WALLET);
+  const [ledger, setLedger] = useState<LedgerRecord[]>([]);
+  const [errors, setErrors] = useState({ bookings: '', market: '', bids: '', wallet: '' });
 
   useEffect(() => subscribeToFleetVehicles(vendorId, setVehicles), [vendorId]);
   useEffect(() => subscribeToFleetDrivers(vendorId, setDrivers), [vendorId]);
@@ -93,6 +111,19 @@ export function VendorDataProvider({ profile, record, children }: { profile: Ven
   );
   useEffect(() => subscribeToInvites(vendorId, setInvites), [vendorId]);
   useEffect(() => subscribeToVendorPayouts(vendorId, setPayouts), [vendorId]);
+  useEffect(
+    () =>
+      subscribeToVendorWallet(
+        vendorId,
+        (w) => {
+          setWallet(w);
+          setErrors((e) => ({ ...e, wallet: '' }));
+        },
+        (err) => setErrors((e) => ({ ...e, wallet: describeDataError(err) })),
+      ),
+    [vendorId],
+  );
+  useEffect(() => subscribeToVendorLedger(vendorId, setLedger, (err) => setErrors((e) => ({ ...e, wallet: describeDataError(err) }))), [vendorId]);
 
   const value = useMemo<VendorDataValue>(() => {
     const sorted = [...bookings].sort((a, b) => (b.confirmedAt?.getTime() ?? 0) - (a.confirmedAt?.getTime() ?? 0));
@@ -110,10 +141,12 @@ export function VendorDataProvider({ profile, record, children }: { profile: Ven
       bids,
       invites,
       payouts,
-      wallet: summarizeVendorWallet(sorted, payouts, profile.commissionRate),
+      wallet,
+      ledger,
+      monthEarnings: monthEarnings(ledger),
       errors,
     };
-  }, [profile, record, vehicles, drivers, bookings, marketTrips, bids, invites, payouts, errors]);
+  }, [profile, record, vehicles, drivers, bookings, marketTrips, bids, invites, payouts, wallet, ledger, errors]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

@@ -117,9 +117,10 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
     }
   }, [activeTrip, presence, driver.id]);
 
-  // Leave the verification screen if the trip moved on, was cancelled or was reassigned.
+  // Leave the verification screen if the trip started, was cancelled or was reassigned
+  // (photos can be taken before leaving or at the pickup).
   useEffect(() => {
-    if (inPreTrip && (!activeTrip || activeTrip.subStatus !== 'Not Started')) setInPreTrip(false);
+    if (inPreTrip && (!activeTrip || (activeTrip.subStatus !== 'Not Started' && activeTrip.subStatus !== 'Reached Pickup'))) setInPreTrip(false);
   }, [inPreTrip, activeTrip]);
 
   // A penalty must be acknowledged (or disputed) before the driver carries on.
@@ -155,7 +156,7 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
     setAcceptingId(offer.id);
     try {
       await acceptMarketplaceTrip(driver, account.vehicle.vehicleNumber, offer);
-      notify('ok', 'Trip accepted! Complete the pre-trip check before heading to pickup.');
+      notify('ok', 'Trip accepted! Drive to the pickup; take the vehicle photos before you start the trip.');
       setActiveTab('dashboard');
     } catch (err) {
       notify('error', err instanceof Error && !(err as { code?: string }).code
@@ -169,7 +170,7 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
   const handleVerified = () => {
     setInPreTrip(false);
     setActiveTab('trip');
-    notify('ok', 'Vehicle verification submitted. You can now start the trip.');
+    notify('ok', 'Vehicle photos submitted. Start the trip at the pickup once the boarding OTP is verified.');
   };
 
   const handleTripStart = async (requestId: string) => {

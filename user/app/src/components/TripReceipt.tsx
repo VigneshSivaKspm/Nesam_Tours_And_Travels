@@ -6,7 +6,7 @@ import { Linking, StyleSheet, Text, View } from 'react-native';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import type { TripRecord } from '../types';
-import { FareLines, fareRows } from './FareLines';
+import { FareLines, tripFareLines } from './FareLines';
 import { COMPANY_NAME, COMPANY_UPI_ID, GST_RATE } from '../config/constants';
 import { escapeHtml, formatDateTime, formatDistance, formatDuration, formatINR } from '../utils/format';
 import { Button, Card, Notice } from './ui';
@@ -17,11 +17,16 @@ export function payableAmount(trip: TripRecord): number {
   return Math.round(base + trip.tollCharges);
 }
 
+/** What is still owed: the server's balance once payments are recorded, else the full amount. */
+export function amountDue(trip: TripRecord): number {
+  return trip.paid ? Math.max(0, Math.round(trip.paid.balanceDue)) : payableAmount(trip);
+}
+
 export function upiLink(trip: TripRecord): string {
   const params = [
     ['pa', COMPANY_UPI_ID],
     ['pn', COMPANY_NAME],
-    ['am', payableAmount(trip).toFixed(2)],
+    ['am', amountDue(trip).toFixed(2)],
     ['cu', 'INR'],
     ['tn', `Ride ${trip.bookingId}`],
   ]
@@ -34,9 +39,20 @@ export function upiLink(trip: TripRecord): string {
 export function receiptHtml(trip: TripRecord, customerName: string): string {
   const f = trip.fareBreakdown;
   const money = (n: number) => `${n < 0 ? '−' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
-  const rows = (f ? fareRows(f, trip.tollCharges) : [['Ride fare', trip.fare] as [string, number], ...(trip.tollCharges ? [['Tolls & parking', trip.tollCharges] as [string, number]] : [])])
+  const lines = tripFareLines(trip);
+  const rows = [
+    ...lines.filter((l) => l.treatment === 'included' && l.amount !== null).map((l) => [l.label, l.amount ?? 0] as [string, number]),
+    ...(trip.tollCharges ? [['Tolls & parking', trip.tollCharges] as [string, number]] : []),
+  ]
     .map(([label, amount]) => `<tr><td>${escapeHtml(label)}</td><td class="r">${escapeHtml(money(amount))}</td></tr>`)
     .join('');
+  const extras = lines.filter((l) => l.treatment === 'extra');
+  const paidRows = trip.paid
+    ? `<table style="margin-top:8px"><tr><td>Paid so far</td><td class="r">${escapeHtml(money(trip.paid.totalPaid))}</td></tr><tr><td>Balance due</td><td class="r">${escapeHtml(money(trip.paid.balanceDue))}</td></tr></table>`
+    : '';
+  const extrasBox = extras.length
+    ? `<div class="box"><b>Not included in the fare — payable separately:</b><br>${extras.map((e) => `${escapeHtml(e.label)} ${e.amount ? escapeHtml(money(e.amount)) : '(at actuals)'} — ${escapeHtml(e.detail)}`).join('<br>')}</div>`
+    : '';
   const gstNote = f ? `GST @ ${Math.round(f.gstRate * 100)}% on taxable value ${escapeHtml(money(f.taxableAmount))}.` : `Fare inclusive of GST @ ${Math.round(GST_RATE * 100)}%.`;
   return `<!doctype html><html><head><meta charset="utf-8"><title>Receipt ${escapeHtml(trip.bookingId)}</title>
 <style>
@@ -54,6 +70,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td{padding:6px 0;border
 ${trip.driver ? `<b>Driver:</b> ${escapeHtml(trip.driver.name)} · ${escapeHtml(trip.driver.vehicleNumber)}<br>` : ''}
 <b>Payment:</b> ${escapeHtml(trip.paymentMethod)} (${escapeHtml(trip.paymentStatus)})</div>
 <table>${rows}<tr class="total"><td>Total</td><td class="r">${escapeHtml(money(payableAmount(trip)))}</td></tr></table>
+${paidRows}${extrasBox}
 <p class="muted">${gstNote} Upfront fare based on ${escapeHtml(formatDistance(trip.distanceKm))} / ${escapeHtml(formatDuration(trip.durationMin))} estimated. Thank you for riding with NESAM.</p>
 </body></html>`;
 }
@@ -61,8 +78,9 @@ ${trip.driver ? `<b>Driver:</b> ${escapeHtml(trip.driver.name)} · ${escapeHtml(
 export function TripReceipt({ trip, customerName }: { trip: TripRecord; customerName: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const amount = payableAmount(trip);
-  const paid = trip.paymentStatus === 'Paid';
+  const total = payableAmount(trip);
+  const amount = amountDue(trip);
+  const paid = trip.paymentStatus === 'Paid' || (trip.paid !== null && trip.paid.totalPaid > 0 && amount === 0);
 
   const share = async () => {
     setBusy(true);
@@ -88,14 +106,13 @@ export function TripReceipt({ trip, customerName }: { trip: TripRecord; customer
           <Text style={type.h3}>Receipt</Text>
           <Text style={type.small}>{trip.bookingId}</Text>
         </View>
-        {trip.fareBreakdown ? (
-          <FareLines fare={trip.fareBreakdown} tolls={trip.tollCharges} />
-        ) : (
-          <View style={styles.head}>
-            <Text style={type.h3}>Total</Text>
-            <Text style={type.h3}>{formatINR(amount)}</Text>
+        <FareLines lines={tripFareLines(trip)} total={trip.fareBreakdown?.total ?? trip.fare} tolls={trip.tollCharges} />
+        {trip.paid && trip.paid.totalPaid > 0 ? (
+          <View style={[styles.head, { marginTop: space.sm }]}>
+            <Text style={type.small}>Paid so far {formatINR(trip.paid.totalPaid)}</Text>
+            <Text style={type.small}>Balance {formatINR(trip.paid.balanceDue)}</Text>
           </View>
-        )}
+        ) : null}
         <Notice message={error} style={{ marginTop: space.md }} />
         <Button title={busy ? 'Preparing PDF…' : 'Download / share receipt (PDF)'} variant="secondary" loading={busy} onPress={() => void share()} style={{ marginTop: space.md }} />
       </Card>
@@ -103,7 +120,7 @@ export function TripReceipt({ trip, customerName }: { trip: TripRecord; customer
       <Card style={paid ? styles.paid : styles.due}>
         {paid ? (
           <Text style={[type.h3, { color: colors.success }]}>
-            Paid {formatINR(amount)} via {trip.paymentMethod}. Thank you!
+            Paid {formatINR(trip.paid?.totalPaid || total)} via {trip.paymentMethod}. Thank you!
           </Text>
         ) : (
           <>

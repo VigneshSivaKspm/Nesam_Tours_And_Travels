@@ -22,8 +22,11 @@ export function formatDate(d: Date): string {
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
+/** "06:30 PM" in the device's zone. Built from parts so every JS engine prints the same text. */
 export function formatTime(d: Date): string {
-  return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }).toUpperCase();
+  const parts = new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }).formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return `${get('hour')}:${get('minute')} ${get('dayPeriod').toUpperCase()}`;
 }
 
 export function formatDateTime(d: Date | null): string {

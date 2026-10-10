@@ -412,6 +412,16 @@ export const assignDriver = onCall({ timeoutSeconds: 60 }, async (request) => {
       const toDriver: NotifyInput = { ...toNew, recipientType: 'driver', recipientId: newDriverId, title: 'Trip assigned to you' };
       pushes.push({ id: notifyInTx(tx, toDriver), input: toDriver });
     }
+    // App customers also see it in their inbox (WhatsApp/SMS/email go out after commit).
+    if (text(b.customerId)) {
+      const toCustomer: NotifyInput = {
+        recipientType: 'customer', recipientId: text(b.customerId), category: 'trips', severity: 'success', sound: 'approval',
+        title: action === 'assign' ? 'Driver assigned' : 'Your driver has changed',
+        message: `${text(driver.name)}${vehicleNumber ? ` (${vehicleNumber})` : ''} will pick you up${when ? ` at ${formatDateTime12(when)}` : ''}. Share your boarding OTP only at the pickup.`,
+        bookingId, bookingCode: label, cta: { label: 'Open trip', page: 'trips', bookingId }, push: true, sentBy: admin.uid,
+      };
+      pushes.push({ id: notifyInTx(tx, toCustomer), input: toCustomer });
+    }
     for (const [rid, rtype] of [[oldDriverId, 'driver'], [oldDriver.vendorId && oldDriver.vendorId !== vendorId ? oldDriver.vendorId : '', 'vendor']] as const) {
       if (!rid || rid === newDriverId) continue;
       const n: NotifyInput = { recipientType: rtype, recipientId: rid, category: 'trips', severity: 'warning', sound: 'general', title: 'Trip reassigned', message: `Booking ${label} was reassigned to another driver. ${reason}`, bookingId, bookingCode: label, push: true, sentBy: admin.uid };

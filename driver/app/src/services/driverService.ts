@@ -31,13 +31,16 @@ import type {
   DocumentStatus,
   DriverAccount,
   DriverNotification,
+  DriverPenalty,
   DriverProfile,
   DriverStatus,
+  DriverWallet,
   DrivingLicense,
   IdentityDetails,
+  LedgerEntry,
   MarketplaceOffer,
   PayoutRequest,
-  PreTripPhotos,
+  PenaltyStatus,
   RegistrationData,
   TollReceipt,
   TripDetails,
@@ -46,6 +49,10 @@ import type {
   VehicleDetails,
 } from '../types/driver';
 import { withTimeout } from '../utils/retry';
+import { toDate as toDateTime } from '../utils/time';
+import { tripSubStatusOf } from '../utils/tripFlow';
+import { mapLedgerEntry, mapWallet } from '../utils/ledger';
+import { categoryOf, ctaOf, severityOf, soundOf } from '../utils/notificationModel';
 
 export const BOOKINGS_COLLECTION = 'bookings';
 export const DRIVERS_COLLECTION = 'drivers';
@@ -56,7 +63,6 @@ export const DRIVER_INVITES_COLLECTION = 'driver_invites';
 
 const WRITE_TIMEOUT_MS = 15000;
 /** Share of the fare a driver earns when the booking carries no explicit payout. */
-export const DEFAULT_DRIVER_SHARE = 0.85;
 export const MIN_PAYOUT = 100;
 
 export class DriverActionError extends Error {
@@ -173,10 +179,12 @@ export function mapDriverDoc(uid: string, data: DocumentData): DriverAccount {
     pincode: str(data.pincode),
     emergencyContactName: str(data.emergencyContactName),
     emergencyContact: str(data.emergencyContact),
-    rating: typeof data.rating === 'number' ? data.rating : 5,
+    // Only a rating backed by real customer reviews is shown.
+    rating: typeof data.rating === 'number' && typeof data.ratingCount === 'number' && data.ratingCount > 0 ? data.rating : null,
     joiningDate: created ? created.toLocaleDateString('en-IN', { month: 'short', year: 'numeric' }) : str(data.joiningDate) || 'New Partner',
     vendorId: data.vendorId || undefined,
     vendorName: data.vendorName || undefined,
+    assignedVehicleId: str(data.assignedVehicleId) || undefined,
     approvalStatus: approval,
     docStatus,
     rejectionReason: data.rejectionReason || undefined,
@@ -315,8 +323,6 @@ export function buildNewDriverDoc(uid: string, phoneE164: string, data: Registra
     vendorId: invite?.vendorId || '',
     vendorName: invite?.vendorName || '',
     presenceStatus: 'Offline',
-    rating: 5,
-    totalTrips: 0,
     createdAt: serverTimestamp(),
   };
 }
@@ -404,7 +410,7 @@ export function subscribeToOpenMarketplace(callback: (offers: MarketplaceOffer[]
 }
 
 /** Booking fields an independent driver's claim writes (rules: driverClaimOk). */
-export function buildClaimUpdate(driver: DriverProfile, vehicleNumber: string, offeredPayout: number) {
+export function buildClaimUpdate(driver: DriverProfile, vehicle: { id: string; number: string }, offeredPayout: number) {
   return {
     status: 'Assigned',
     tripStage: 'Assigned',
@@ -412,7 +418,9 @@ export function buildClaimUpdate(driver: DriverProfile, vehicleNumber: string, o
     assignedDriverName: driver.name,
     driver: driver.name,
     driverPhone: driver.phone,
-    assignedVehicleNumber: vehicleNumber,
+    // '' when the driver has no paired vehicle record (rules: must equal drivers/{uid}.assignedVehicleId).
+    assignedVehicleId: vehicle.id,
+    assignedVehicleNumber: vehicle.number,
     driverPayout: offeredPayout,
     assignedAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -424,9 +432,19 @@ export function buildClaimUpdate(driver: DriverProfile, vehicleNumber: string, o
  * offer; if another partner took it first the transaction aborts cleanly, and
  * firestore.rules independently reject any claim of a non-Open trip.
  */
-export async function acceptMarketplaceTrip(driver: DriverProfile, vehicleNumber: string, offer: MarketplaceOffer): Promise<void> {
+export async function acceptMarketplaceTrip(driver: DriverProfile, registeredVehicleNumber: string, offer: MarketplaceOffer): Promise<void> {
+  if (driver.vendorId) throw new DriverActionError('taken', 'Fleet drivers receive trips from their vendor, not the marketplace.');
   const marketRef = doc(db, MARKETPLACE_COLLECTION, offer.id);
   const bookingRef = doc(db, BOOKINGS_COLLECTION, offer.id);
+  // A driver paired with a vehicle record takes the trip in that vehicle (its id
+  // and exact registration number); otherwise the registered number is noted.
+  let vehicle = { id: '', number: registeredVehicleNumber };
+  if (driver.assignedVehicleId) {
+    const v = await getDoc(doc(db, 'vehicles', driver.assignedVehicleId));
+    const number = v.exists() ? str(v.data().vehicleNumber) : '';
+    if (!number) throw new DriverActionError('taken', 'Your paired vehicle record is unavailable. Contact NESAM support.');
+    vehicle = { id: v.id, number };
+  }
   try {
     await withTimeout(
       runTransaction(db, async (tx) => {
@@ -434,7 +452,7 @@ export async function acceptMarketplaceTrip(driver: DriverProfile, vehicleNumber
         if (!snap.exists() || snap.data().status !== 'Open') {
           throw new DriverActionError('taken', 'This trip is no longer available — another partner has taken it.');
         }
-        tx.update(bookingRef, buildClaimUpdate(driver, vehicleNumber, offer.offeredPayout));
+        tx.update(bookingRef, buildClaimUpdate(driver, vehicle, offer.offeredPayout));
         tx.update(marketRef, { status: 'Assigned', assignedDriverId: driver.id, assignedDriverName: driver.name, updatedAt: serverTimestamp() });
       }),
       WRITE_TIMEOUT_MS,
@@ -467,17 +485,24 @@ function readLocation(data: DocumentData, key: 'pickup' | 'drop', fallback: stri
 }
 
 const STAGES: TripStage[] = ['Assigned', 'En Route Pickup', 'Reached Pickup', 'In Progress', 'Arrived Destination', 'Completed'];
-const STATUSES: BookingStatus[] = ['Pending', 'Confirmed', 'Assigned', 'Ongoing', 'Completed', 'Cancelled'];
+const STATUSES: BookingStatus[] = ['Pending', 'Approved', 'Confirmed', 'Assigned', 'Ongoing', 'Completed', 'Cancelled', 'Rejected'];
+const LEGACY_STAGE: Record<string, TripStage> = { 'Not Started': 'Assigned', 'Reached Pickup': 'Reached Pickup', 'Trip Started': 'In Progress', 'Trip Ended': 'Completed' };
 
 export function mapBooking(id: string, data: DocumentData): TripDetails {
   const fare = parseAmount(data.fare);
   const raw = str(data.status);
   const status: BookingStatus = (STATUSES as string[]).includes(raw) ? (raw as BookingStatus) : raw === 'Trip Started' ? 'Ongoing' : 'Pending';
-  let stage: TripStage = STAGES.includes(data.tripStage) ? data.tripStage : 'Assigned';
-  if (status === 'Ongoing' && STAGES.indexOf(stage) < STAGES.indexOf('In Progress')) stage = 'In Progress';
+  const subStatus = tripSubStatusOf(data);
+  // The server mirrors the sub-status into tripStage; trips from before it existed keep their own stage.
+  let stage: TripStage = STAGES.includes(data.tripStage) ? data.tripStage : (LEGACY_STAGE[subStatus] ?? 'Assigned');
   if (status === 'Completed') stage = 'Completed';
 
-  const payout = data.driverPayout != null ? parseAmount(data.driverPayout) : Math.round(fare * DEFAULT_DRIVER_SHARE);
+  // The server records the payout; the app never estimates one. Once finance has
+  // finalized the trip, its snapshot is the amount that counts.
+  const fin = data.finance && typeof data.finance === 'object' && data.finance.schema === 1 ? data.finance : null;
+  const finalized = !!fin && fin.partnerType === 'driver' && typeof fin.partnerPayout === 'number' && Number.isFinite(fin.partnerPayout);
+  const payoutRecorded = finalized || (data.driverPayout != null && data.driverPayout !== '');
+  const payout = finalized ? fin.partnerPayout : payoutRecorded ? parseAmount(data.driverPayout) : 0;
   const preTrip = data.preTrip && typeof data.preTrip === 'object' ? data.preTrip : undefined;
 
   return {
@@ -492,23 +517,30 @@ export function mapBooking(id: string, data: DocumentData): TripDetails {
     serviceType: str(data.service),
     fareAmount: fare,
     driverEarnings: payout,
+    payoutRecorded,
+    payoutFinalized: finalized,
+    fleetTrip: !!str(data.assignedVendorId) || fin?.partnerType === 'vendor',
     tollCharges: parseAmount(data.tollCharges),
     status,
     stage,
+    subStatus: status === 'Completed' ? 'Trip Ended' : subStatus,
+    verificationSubmitted: data.vehicleVerification?.status === 'Submitted',
+    // Trips started under the earliest flow checked the OTP at start and kept no boarding stamp.
+    boardingVerified: !!data.boardingVerifiedAt || (!!data.startedAt && !data.tripStartedAt),
+    balanceDue: typeof data.paymentSummary?.balanceDue === "number" ? data.paymentSummary.balanceDue : undefined,
+    reachedPickupAt: toDateTime(data.reachedPickupAt),
+    pickupAt: toDateTime(data.pickupAt) ?? toDateTime(data.scheduledAt),
     scheduledDate: str(data.date),
     scheduledTime: str(data.time),
     paymentMode: str(data.paymentMethod) || 'Cash',
-    withdrawableAmount: data.status === 'Completed' && data.fareVerified === true && data.payment === 'Paid' && data.paymentMethod !== 'Cash' && !data.assignedVendorId
-      ? Math.max(0, parseAmount(data.driverPayout)) + (data.tollsApproved === true ? Math.max(0, parseAmount(data.tollCharges)) : 0) : 0,
     notes: str(data.notes),
     startOdometer: typeof data.startOdometer === 'number' ? data.startOdometer : undefined,
     endOdometer: typeof data.endOdometer === 'number' ? data.endOdometer : undefined,
     preTrip: preTrip
       ? {
-          selfie: str(preTrip.selfie),
           vehicleFront: str(preTrip.vehicleFront),
-          odometer: str(preTrip.odometer),
-          rearSeat: str(preTrip.rearSeat),
+          vehicleRear: str(preTrip.vehicleRear),
+          vehicleInterior: str(preTrip.vehicleInterior),
           odometerReading: parseAmount(preTrip.odometerReading),
           capturedAt: str(preTrip.capturedAt),
         }
@@ -530,59 +562,6 @@ export function subscribeToDriverBookings(driverId: string, callback: (trips: Tr
   );
 }
 
-export async function submitPreTripVerification(bookingId: string, photos: PreTripPhotos): Promise<void> {
-  await withTimeout(
-    updateDoc(doc(db, BOOKINGS_COLLECTION, bookingId), {
-      preTrip: photos,
-      startOdometer: photos.odometerReading,
-      tripStage: 'En Route Pickup',
-      updatedAt: serverTimestamp(),
-    }),
-    WRITE_TIMEOUT_MS,
-  );
-}
-
-export async function markReachedPickup(bookingId: string, location?: { lat: number; lng: number } | null): Promise<void> {
-  await withTimeout(
-    updateDoc(doc(db, BOOKINGS_COLLECTION, bookingId), {
-      tripStage: 'Reached Pickup',
-      reachedPickupAt: serverTimestamp(),
-      ...(location ? { driverLocation: { lat: location.lat, lng: location.lng, heading: null, updatedAt: serverTimestamp() } } : {}),
-      updatedAt: serverTimestamp(),
-    }),
-    WRITE_TIMEOUT_MS,
-  );
-}
-
-/** Booking fields written to start a trip (rules compare otpAttempt server-side). */
-export function buildStartTripUpdate(otp: string) {
-  return { status: 'Ongoing', tripStage: 'In Progress', otpAttempt: otp, startedAt: serverTimestamp(), updatedAt: serverTimestamp() };
-}
-
-/**
- * Starts the ride. firestore.rules compare `otpAttempt` with
- * booking_secrets/{id}.otp (which the driver cannot read); a wrong code is
- * rejected as permission-denied and surfaced as "incorrect OTP".
- */
-export async function startTripWithOtp(bookingId: string, otp: string): Promise<void> {
-  if (!/^\d{4}$/.test(otp)) throw new DriverActionError('invalid-otp', 'Enter the 4-digit boarding OTP shown in the customer’s app.');
-  try {
-    await withTimeout(updateDoc(doc(db, BOOKINGS_COLLECTION, bookingId), buildStartTripUpdate(otp)), WRITE_TIMEOUT_MS);
-  } catch (err) {
-    if ((err as { code?: string })?.code === 'permission-denied') {
-      throw new DriverActionError('invalid-otp', 'Incorrect OTP. Please check the code with the customer and try again.');
-    }
-    throw err;
-  }
-}
-
-export async function markArrivedDestination(bookingId: string): Promise<void> {
-  await withTimeout(
-    updateDoc(doc(db, BOOKINGS_COLLECTION, bookingId), { tripStage: 'Arrived Destination', arrivedAt: serverTimestamp(), updatedAt: serverTimestamp() }),
-    WRITE_TIMEOUT_MS,
-  );
-}
-
 export function tollTotal(tolls: TollReceipt[]): number {
   return Math.round(tolls.reduce((s, t) => s + (Number.isFinite(t.amount) ? t.amount : 0), 0) * 100) / 100;
 }
@@ -591,21 +570,6 @@ export function tollTotal(tolls: TollReceipt[]): number {
 export async function saveTripTolls(bookingId: string, tolls: TollReceipt[]): Promise<void> {
   await withTimeout(
     updateDoc(doc(db, BOOKINGS_COLLECTION, bookingId), { tolls, tollCharges: tollTotal(tolls), updatedAt: serverTimestamp() }),
-    WRITE_TIMEOUT_MS,
-  );
-}
-
-export async function completeTrip(bookingId: string, endOdometer: number, tolls: TollReceipt[]): Promise<void> {
-  await withTimeout(
-    updateDoc(doc(db, BOOKINGS_COLLECTION, bookingId), {
-      status: 'Completed',
-      tripStage: 'Completed',
-      endOdometer,
-      tolls,
-      tollCharges: tollTotal(tolls),
-      completedAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    }),
     WRITE_TIMEOUT_MS,
   );
 }
@@ -628,18 +592,38 @@ export function validatePayoutAmount(amount: number, available: number): string 
   return '';
 }
 
-export async function requestPayout(
-  driver: DriverProfile,
-  amount: number,
-  available: number,
-  method: 'UPI' | 'Bank Transfer',
-  details: string,
-): Promise<void> {
+/** The server re-checks the ledger balance, reserves the amount and pays to the account saved in the profile. */
+export async function requestPayout(amount: number, available: number, method: 'UPI' | 'Bank Transfer'): Promise<void> {
   const invalid = validatePayoutAmount(amount, available);
   if (invalid) throw new DriverActionError('invalid-amount', invalid);
   const payoutRef = doc(collection(db, PAYOUT_REQUESTS_COLLECTION));
   await httpsCallable(getFunctions(), 'requestPartnerPayout')({ requestId: payoutRef.id, role: 'driver', amount, method });
 }
+/** The server-computed wallet (wallets/driver_{uid}); a missing document is an empty wallet. */
+export function subscribeToDriverWallet(driverId: string, callback: (wallet: DriverWallet) => void, onError?: (e: unknown) => void) {
+  return onSnapshot(
+    doc(db, 'wallets', `driver_${driverId}`),
+    (snap) => callback(mapWallet(snap.exists() ? snap.data() : undefined)),
+    (err) => onError?.(err),
+  );
+}
+
+/** This driver's ledger entries (schema 2), newest first. */
+export function subscribeToDriverLedger(driverId: string, callback: (entries: LedgerEntry[]) => void, onError?: (e: unknown) => void) {
+  return onSnapshot(
+    query(collection(db, 'wallet_ledger'), where('driverId', '==', driverId)),
+    (snap) => {
+      const rows = snap.docs.map((d) => mapLedgerEntry(d.id, d.data())).filter((e): e is LedgerEntry => e !== null);
+      rows.sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+      callback(rows);
+    },
+    (err) => {
+      callback([]);
+      onError?.(err);
+    },
+  );
+}
+
 export function subscribeToPayoutRequests(driverId: string, callback: (requests: PayoutRequest[]) => void, onError?: (e: unknown) => void) {
   return onSnapshot(
     query(collection(db, PAYOUT_REQUESTS_COLLECTION), where('driverId', '==', driverId)),
@@ -675,9 +659,10 @@ export function subscribeToDriverNotifications(recipientId: string, callback: (n
   return onSnapshot(
     query(collection(db, NOTIFICATIONS_COLLECTION), where('recipientId', '==', recipientId)),
     (snap) => {
-      const rows = snap.docs.map((d) => {
+      const rows = snap.docs.map((d): DriverNotification => {
         const data = d.data();
-        const created = toDate(data.createdAt);
+        const created = toDateTime(data.createdAt);
+        const base = { type: str(data.type), category: str(data.category), severity: str(data.severity), priority: str(data.priority), sound: str(data.sound), cta: data.cta, bookingId: str(data.bookingId) };
         return {
           id: d.id,
           title: str(data.title) || 'Notification',
@@ -685,12 +670,57 @@ export function subscribeToDriverNotifications(recipientId: string, callback: (n
           time: formatDateTime(created),
           read: Boolean(data.read),
           createdAtMs: created?.getTime() ?? 0,
+          category: categoryOf(base),
+          severity: severityOf(base),
+          sound: soundOf(base),
+          bookingId: str(data.bookingId),
+          bookingCode: str(data.bookingCode),
+          ...ctaOf(base),
+          popup: data.push !== false,
         };
       });
       rows.sort((a, b) => b.createdAtMs - a.createdAtMs);
       callback(rows);
     },
     () => callback([]),
+  );
+}
+
+const PENALTY_STATUSES: PenaltyStatus[] = ['Pending', 'Acknowledged', 'Paid', 'Deducted', 'Waived', 'Disputed'];
+const LEGACY_PENALTY: Record<string, PenaltyStatus> = { Applied: 'Pending', Recovered: 'Paid', Reversed: 'Waived' };
+
+/** Penalties issued to this driver (read-only here; acknowledging and disputing are server functions). */
+export function subscribeToDriverPenalties(driverId: string, callback: (p: DriverPenalty[]) => void, onError?: (e: unknown) => void) {
+  return onSnapshot(
+    query(collection(db, 'penalties'), where('driverId', '==', driverId)),
+    (snap) => {
+      const rows = snap.docs.map((d): DriverPenalty => {
+        const data = d.data();
+        const raw = str(data.status);
+        return {
+          id: d.id,
+          amount: parseAmount(data.amount),
+          category: str(data.category) || 'Other',
+          reason: str(data.reason),
+          description: str(data.description || data.notes),
+          bookingCode: str(data.bookingCode),
+          bookingId: str(data.bookingDocumentId),
+          incidentDate: str(data.incidentDate),
+          status: PENALTY_STATUSES.includes(raw as PenaltyStatus) ? (raw as PenaltyStatus) : (LEGACY_PENALTY[raw] ?? 'Pending'),
+          acknowledged: data.acknowledged === true,
+          acknowledgedAt: toDateTime(data.acknowledgedAt),
+          disputeNote: str(data.disputeNote),
+          issuedAt: toDateTime(data.issuedAt) ?? toDateTime(data.createdAt),
+          issuedByName: str(data.issuedByName),
+        };
+      });
+      rows.sort((a, b) => (b.issuedAt?.getTime() ?? 0) - (a.issuedAt?.getTime() ?? 0));
+      callback(rows);
+    },
+    (err) => {
+      callback([]);
+      onError?.(err);
+    },
   );
 }
 

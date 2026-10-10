@@ -196,6 +196,8 @@ export interface TripRecord {
   isScheduled: boolean;
   scheduledAt: Date | null;
   createdAt: Date | null;
+  /** When NESAM approved the booking (it then becomes visible to partners). */
+  approvedAt: Date | null;
   assignedAt: Date | null;
   startedAt: Date | null;
   completedAt: Date | null;

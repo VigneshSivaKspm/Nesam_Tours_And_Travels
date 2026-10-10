@@ -170,6 +170,7 @@ export function mapBooking(id: string, d: Record<string, any>): TripRecord {
     isScheduled: d.rideTiming === 'scheduled',
     scheduledAt,
     createdAt,
+    approvedAt: toDate(d.approvedAt),
     assignedAt: toDate(d.assignedAt),
     startedAt: toDate(d.startedAt),
     completedAt: toDate(d.completedAt),

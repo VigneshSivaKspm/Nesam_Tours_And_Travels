@@ -1,10 +1,11 @@
 // Driver trip workflow, validated on the server:
-//   Trip Started  →  Reached Pickup  →  Trip Ended
+//   Reached Pickup Location  →  Trip Started  →  Trip Ended
 // Only the next step is accepted, every step is stamped and (with permission)
 // geo-tagged, a repeated tap is a no-op, and an attempt to skip a step is
-// refused and logged as a security event. The customer's boarding OTP is
-// verified at the pickup (verifyBoarding) and is required before Trip Ended.
-// Clients cannot write status or stage fields directly (firestore.rules).
+// refused and logged as a security event. At the pickup the driver verifies
+// the customer's boarding OTP (verifyBoarding); Trip Started also needs the
+// trip's vehicle photo verification. Clients cannot write status or stage
+// fields directly (firestore.rules).
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { timingSafeEqual } from 'crypto';
@@ -63,7 +64,7 @@ export const advanceTrip = onCall({ timeoutSeconds: 60 }, async (request) => {
   const driver = await activeDriver(request.auth?.uid);
   const bookingId = docId(input.bookingId, 'booking');
   const to = input.to as TripSubStatus;
-  if (!(TRIP_SUB_STATUSES as readonly string[]).includes(to) || to === 'Not Started') throw new HttpsError('invalid-argument', 'Choose Trip Started, Reached Pickup or Trip Ended.');
+  if (!(TRIP_SUB_STATUSES as readonly string[]).includes(to) || to === 'Not Started') throw new HttpsError('invalid-argument', 'Choose Reached Pickup, Trip Started or Trip Ended.');
   const platform = text(input.platform, 12) || 'android';
   const requestId = text(input.requestId, 100);
   const fix = fixOf(input.location);
@@ -93,8 +94,19 @@ export const advanceTrip = onCall({ timeoutSeconds: 60 }, async (request) => {
     let adminMsg = '';
     const label = text(b.bookingId) || bookingId;
 
-    if (to === 'Trip Started') {
-      if (!['Assigned', 'Confirmed'].includes(b.status)) throw new HttpsError('failed-precondition', 'This trip cannot be started in its current state.');
+    if (to === 'Reached Pickup') {
+      // 'Ongoing' only for a trip begun under the earlier order (driver still on the way).
+      if (!['Assigned', 'Confirmed', 'Ongoing'].includes(b.status)) throw new HttpsError('failed-precondition', 'This trip cannot be updated in its current state.');
+      let locationNote = '';
+      if (fix && Number.isFinite(b.pickupLat) && Number.isFinite(b.pickupLng)) {
+        const d = distanceKm(fix, { lat: b.pickupLat, lng: b.pickupLng });
+        if (d > PICKUP_RADIUS_KM) throw new HttpsError('failed-precondition', `You are ${d.toFixed(1)} km from the pickup point. Move within ${PICKUP_RADIUS_KM} km to continue.`, { distanceKm: Math.round(d * 10) / 10 });
+      } else locationNote = 'location_unavailable';
+      update = { ...base, reachedPickupAt: stamp, reachedPickupLocation: geo, ...(locationNote ? { reachedPickupLocationNote: locationNote } : {}) };
+      adminMsg = `${driver.name} reached the pickup for ${label}.`;
+    } else if (to === 'Trip Started') {
+      if (!['Assigned', 'Confirmed', 'Ongoing'].includes(b.status)) throw new HttpsError('failed-precondition', 'This trip cannot be started in its current state.');
+      if (!b.boardingVerifiedAt) throw new HttpsError('failed-precondition', "Verify the customer's boarding OTP before starting the trip.", { boardingRequired: true });
       const v = verification!.data();
       if (!verification!.exists || !v || v.driverId !== driver.uid || v.status !== 'Submitted') {
         throw new HttpsError('failed-precondition', 'Complete the vehicle photo verification before starting the trip.', { verificationRequired: true });
@@ -105,19 +117,8 @@ export const advanceTrip = onCall({ timeoutSeconds: 60 }, async (request) => {
         vehicleVerification: { status: 'Submitted', riskLevel: v.riskLevel ?? 'low', flagged: v.flagged === true, submittedAt: v.submittedAt ?? null },
       };
       adminMsg = `Trip ${label} started by ${driver.name}.`;
-    } else if (to === 'Reached Pickup') {
-      if (b.status !== 'Ongoing') throw new HttpsError('failed-precondition', 'Start the trip first.');
-      let locationNote = '';
-      if (fix && Number.isFinite(b.pickupLat) && Number.isFinite(b.pickupLng)) {
-        const d = distanceKm(fix, { lat: b.pickupLat, lng: b.pickupLng });
-        if (d > PICKUP_RADIUS_KM) throw new HttpsError('failed-precondition', `You are ${d.toFixed(1)} km from the pickup point. Move within ${PICKUP_RADIUS_KM} km to continue.`, { distanceKm: Math.round(d * 10) / 10 });
-      } else locationNote = 'location_unavailable';
-      update = { ...base, reachedPickupAt: stamp, reachedPickupLocation: geo, ...(locationNote ? { reachedPickupLocationNote: locationNote } : {}), boardingVerifiedAt: FieldValue.delete() };
-      adminMsg = `${driver.name} reached the pickup for ${label}.`;
     } else {
       if (b.status !== 'Ongoing') throw new HttpsError('failed-precondition', 'This trip is not in progress.');
-      const legacy = Boolean(b.startedAt) && !b.tripStartedAt; // boarding OTP was checked at start in the older flow
-      if (!b.boardingVerifiedAt && !legacy) throw new HttpsError('failed-precondition', "Verify the customer's boarding OTP before ending the trip.", { boardingRequired: true });
       const end = input.endOdometer;
       const start = typeof b.startOdometer === 'number' ? b.startOdometer : 0;
       if (!Number.isFinite(end) || end <= 0) throw new HttpsError('invalid-argument', 'Enter the ending odometer reading.');
@@ -137,15 +138,19 @@ export const advanceTrip = onCall({ timeoutSeconds: 60 }, async (request) => {
     });
     const admin: NotifyInput = {
       recipientType: 'admin', recipientId: 'admin', category: 'trips', severity: to === 'Trip Ended' ? 'success' : 'info', sound: 'general',
-      title: to === 'Trip Started' ? 'Trip started' : to === 'Reached Pickup' ? 'Driver at pickup' : 'Trip completed', message: `${adminMsg} ${formatDateTime12(new Date())}`,
+      title: to === 'Reached Pickup' ? 'Driver at pickup' : to === 'Trip Started' ? 'Trip started' : 'Trip completed', message: `${adminMsg} ${formatDateTime12(new Date())}`,
       bookingId, bookingCode: label, cta: { label: 'Open trip', page: 'booking-detail', bookingId }, push: to === 'Trip Ended', sentBy: driver.uid,
     };
     pushes.push({ id: notifyInTx(tx, admin), input: admin });
     if (b.customerId) {
       const c: NotifyInput = {
         recipientType: 'customer', recipientId: b.customerId, category: 'trips', severity: 'info', sound: 'general', push: true, sentBy: driver.uid,
-        title: to === 'Trip Started' ? 'Your driver is on the way' : to === 'Reached Pickup' ? 'Your driver has arrived' : 'Trip completed',
-        message: to === 'Trip Started' ? `${driver.name} has started towards your pickup.` : to === 'Reached Pickup' ? `${driver.name} is at your pickup point. Share your boarding OTP.` : `Thank you for travelling with NESAM (${label}).`,
+        title: to === 'Reached Pickup' ? 'Your driver has arrived' : to === 'Trip Started' ? 'Your trip has started' : 'Trip completed',
+        message: to === 'Reached Pickup'
+          ? `${driver.name} is at your pickup point. Share the 4-digit boarding OTP from your NESAM app to start the trip.`
+          : to === 'Trip Started'
+            ? `Your trip ${label} has started. Have a safe journey.`
+            : `Thank you for travelling with NESAM (${label}).`,
         bookingId, bookingCode: label,
       };
       pushes.push({ id: notifyInTx(tx, c), input: c });
@@ -177,7 +182,7 @@ export const verifyBoarding = onCall(async (request) => {
     if (!snap.exists) throw new HttpsError('not-found', 'This trip no longer exists.');
     const b = snap.data()!;
     if (b.assignedDriverId !== driver.uid) throw new HttpsError('permission-denied', 'This trip is not assigned to you.');
-    if (b.status !== 'Ongoing' || tripSubStatusOf(b) !== 'Reached Pickup') throw new HttpsError('failed-precondition', 'Mark that you have reached the pickup first.');
+    if (!['Assigned', 'Confirmed', 'Ongoing'].includes(b.status) || tripSubStatusOf(b) !== 'Reached Pickup') throw new HttpsError('failed-precondition', 'Mark that you have reached the pickup first.');
     if (b.boardingVerifiedAt) return { ok: true, already: true };
     const attempts = b.boardingAttempts ?? { count: 0 };
     const lockedUntil = (attempts.lockedUntil as Timestamp | undefined)?.toMillis?.() ?? 0;

@@ -1,11 +1,11 @@
-// Live data for the signed-in customer, subscribed once for the whole session
+// Live data for the signed-in customer (notifications live in context/Inbox), subscribed once for the whole session
 // (mirrors RiderApp in user/web/src/App.tsx). Every screen reads from here, so
 // there is exactly one listener per query and all of them are torn down on
 // sign-out.
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import type { LocationItem, NotificationItem, TripRecord, UserProfile } from '../types';
+import type { LocationItem, TripRecord, UserProfile } from '../types';
 import { isLiveRide, subscribeToUserBookings } from '../services/rideService';
-import { subscribeToSavedPlaces, subscribeToUserNotifications } from '../services/userService';
+import { subscribeToSavedPlaces } from '../services/userService';
 import { describeError } from '../utils/retry';
 
 /** Completed trips younger than this still prompt for a rating. */
@@ -17,8 +17,6 @@ interface CustomerDataValue {
   tripsLoading: boolean;
   tripsError: string;
   retryTrips: () => void;
-  notifications: NotificationItem[];
-  unreadCount: number;
   savedPlaces: LocationItem[];
   liveRide: TripRecord | null;
   /** A recently completed, unrated trip to prompt for feedback. */
@@ -38,7 +36,6 @@ export function CustomerDataProvider({ profile, children }: { profile: UserProfi
   const [tripsLoading, setTripsLoading] = useState(true);
   const [tripsError, setTripsError] = useState('');
   const [tripsKey, setTripsKey] = useState(0);
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [savedPlaces, setSavedPlaces] = useState<LocationItem[]>([]);
   const [now, setNow] = useState(() => Date.now());
 
@@ -59,7 +56,6 @@ export function CustomerDataProvider({ profile, children }: { profile: UserProfi
     );
   }, [profile.uid, tripsKey]);
 
-  useEffect(() => subscribeToUserNotifications(profile.uid, setNotifications), [profile.uid]);
   useEffect(() => subscribeToSavedPlaces(profile.uid, setSavedPlaces), [profile.uid]);
 
   // Scheduled rides become "live" an hour before pickup without any write.
@@ -86,13 +82,11 @@ export function CustomerDataProvider({ profile, children }: { profile: UserProfi
       tripsLoading,
       tripsError,
       retryTrips,
-      notifications,
-      unreadCount: notifications.filter((n) => !n.read).length,
       savedPlaces,
       liveRide,
       unratedTrip,
     };
-  }, [profile, trips, tripsLoading, tripsError, retryTrips, notifications, savedPlaces, now]);
+  }, [profile, trips, tripsLoading, tripsError, retryTrips, savedPlaces, now]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

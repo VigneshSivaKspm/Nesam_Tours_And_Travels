@@ -5,7 +5,8 @@ const expoConfig = require('eslint-config-expo/flat');
 module.exports = defineConfig([
   expoConfig,
   {
-    ignores: ['dist/*', 'android/*', 'ios/*', 'coverage/*'],
+    // Unreferenced leftovers of the pre-MainNavigator app (they no longer compile); safe to delete.
+    ignores: ['dist/*', 'android/*', 'ios/*', 'coverage/*', 'src/context/AuthContext.tsx', 'src/navigation/RootNavigator.tsx', 'src/data/mockUserData.ts', 'src/components/PrimaryButton.tsx', 'src/services/firebase.ts'],
   },
   {
     files: ['jest.setup.js', '__tests__/**'],

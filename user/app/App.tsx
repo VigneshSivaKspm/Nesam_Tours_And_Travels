@@ -13,6 +13,8 @@ import { AccountHoldScreen, LoadErrorScreen } from './src/screens/auth/AccountSt
 import { MainNavigator } from './src/navigation/MainNavigator';
 import { navigationRef } from './src/navigation/navigationRef';
 import { CustomerDataProvider } from './src/context/CustomerData';
+import { InboxProvider } from './src/context/Inbox';
+import { LegalGate } from './src/components/LegalGate';
 import { signOutUser, subscribeToAuthUser } from './src/services/authService';
 import { subscribeToCustomerProfile } from './src/services/userService';
 import type { UserProfile } from './src/types';
@@ -21,7 +23,8 @@ import { colors } from './src/theme';
 
 void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
-const BLOCKED_STATUSES = ['Blocked', 'Suspended', 'Rejected', 'Inactive'];
+// Same as firestore.rules: only these statuses may use the app (anything else, or none, is on hold).
+const ACTIVE_STATUSES = ['Approved', 'Active'];
 
 const navTheme = {
   ...DefaultTheme,
@@ -71,12 +74,16 @@ function Root() {
   }
   if (profile === undefined) return <FullScreenLoader label="Loading your account…" />;
   if (profile === null) return <ProfileSetupScreen phone={authUser.phoneNumber ?? ''} />;
-  if (BLOCKED_STATUSES.includes(profile.status)) return <AccountHoldScreen status={profile.status} onSignOut={() => void signOutUser()} />;
+  if (!ACTIVE_STATUSES.includes(profile.status)) return <AccountHoldScreen status={profile.status} onSignOut={() => void signOutUser()} />;
 
   return (
-    <CustomerDataProvider key={profile.uid} profile={profile}>
-      <MainNavigator />
-    </CustomerDataProvider>
+    <LegalGate key={profile.uid} role="customer">
+      <InboxProvider userId={profile.uid} role="customer">
+        <CustomerDataProvider profile={profile}>
+          <MainNavigator />
+        </CustomerDataProvider>
+      </InboxProvider>
+    </LegalGate>
   );
 }
 

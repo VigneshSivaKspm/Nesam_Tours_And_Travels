@@ -14,6 +14,8 @@ export type RootStackParamList = {
   Wallet: undefined;
   Documents: undefined;
   Profile: undefined;
+  Notifications: undefined;
+  Penalties: undefined;
 };
 
 declare global {

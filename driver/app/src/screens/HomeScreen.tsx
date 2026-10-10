@@ -9,7 +9,7 @@ import { useDriverData } from '../context/DriverData';
 import { Avatar, Badge, Button, Card, EmptyState, Notice, Sheet } from '../components/ui';
 import { acceptMarketplaceTrip, DriverActionError, setDriverPresence } from '../services/driverService';
 import type { DriverStatus, MarketplaceOffer } from '../types/driver';
-import { categoryMatches } from '../utils/earnings';
+import { categoryMatches, payoutText } from '../utils/earnings';
 import { formatINR } from '../utils/format';
 import { describeError } from '../utils/retry';
 import { EMERGENCY_NUMBER, SUPPORT_PHONE, SUPPORT_PHONE_DISPLAY } from '../config/constants';
@@ -17,7 +17,7 @@ import { colors, radius, space, type } from '../theme';
 
 export function HomeScreen() {
   const navigation = useNavigation();
-  const { account, activeTrip, offers, offersError, earnings, unreadCount, bookingsError } = useDriverData();
+  const { account, activeTrip, completedTrips, offers, offersError, earnings, unreadCount, bookingsError, deviceWarning } = useDriverData();
   const { driver, vehicle } = account;
   const status: DriverStatus = driver.presenceStatus;
   const isOnline = status === 'Online' || status === 'On Trip';
@@ -111,7 +111,7 @@ export function HomeScreen() {
                 {vehicle.make} {vehicle.model} • {vehicle.vehicleNumber} • {vehicle.vehicleType}
               </Text>
               <Text style={type.small}>
-                ★ {driver.rating.toFixed(1)} · {earnings.totalTripsCompleted} trips{driver.vendorName ? ` · ${driver.vendorName}` : ''}
+                {driver.rating != null ? `★ ${driver.rating.toFixed(1)}` : 'No ratings yet'} · {completedTrips.length} trips{driver.vendorName ? ` · ${driver.vendorName}` : ''}
               </Text>
             </View>
           </View>
@@ -139,6 +139,7 @@ export function HomeScreen() {
         </Card>
 
         {message ? <Notice tone={message.tone} message={message.text} /> : null}
+        {deviceWarning ? <Notice tone="warning" message={deviceWarning} /> : null}
         <Notice message={bookingsError} />
         {driver.docStatus === 'Rejected' ? (
           <Notice
@@ -150,15 +151,15 @@ export function HomeScreen() {
         <View style={styles.stats}>
           <Stat label="Today" value={formatINR(earnings.todayEarnings)} accent />
           <Stat label="Last 7 days" value={formatINR(earnings.thisWeekEarnings)} />
-          <Stat label="Trips" value={String(earnings.totalTripsCompleted)} />
-          <Stat label="Rating" value={`★ ${driver.rating.toFixed(1)}`} />
+          <Stat label="Trips" value={String(completedTrips.length)} />
+          <Stat label="Rating" value={driver.rating != null ? `★ ${driver.rating.toFixed(1)}` : '—'} />
         </View>
 
         {activeTrip ? (
           <Card style={styles.activeCard}>
             <View style={styles.activeHead}>
               <Text style={type.h3}>Current trip</Text>
-              <Badge label={activeTrip.stage} tone="brand" />
+              <Badge label={activeTrip.subStatus === 'Not Started' ? 'Go to pickup' : activeTrip.subStatus === 'Reached Pickup' ? 'At pickup' : 'Trip started'} tone="brand" />
             </View>
             <Text style={type.small}>{activeTrip.bookingId}</Text>
             <Text style={[type.body, { marginTop: space.sm }]} numberOfLines={2}>
@@ -169,12 +170,11 @@ export function HomeScreen() {
               <Text style={{ fontWeight: '800' }}>Drop: </Text>
               {activeTrip.drop.address}
             </Text>
-            <Text style={styles.payout}>Your payout {formatINR(activeTrip.driverEarnings)}</Text>
-            {activeTrip.stage === 'Assigned' ? (
-              <Button title="Start pre-trip check" onPress={() => navigation.navigate('PreTrip', { bookingId: activeTrip.id })} />
-            ) : (
-              <Button title="Open trip" variant="dark" onPress={() => navigation.navigate('Tabs', { screen: 'Trip' })} />
-            )}
+            <Text style={styles.payout}>Your payout {payoutText(activeTrip)}</Text>
+            {!activeTrip.verificationSubmitted && activeTrip.subStatus !== 'Trip Started' ? (
+              <Text style={[type.small, { marginBottom: space.sm }]}>Vehicle photos are needed before Trip Started — take them now or at the pickup.</Text>
+            ) : null}
+            <Button title="Open trip" variant="dark" onPress={() => navigation.navigate('Tabs', { screen: 'Trip' })} />
           </Card>
         ) : null}
 
@@ -187,7 +187,9 @@ export function HomeScreen() {
         </View>
         <Notice message={offersError} />
 
-        {!isOnline ? (
+        {driver.vendorId ? (
+          <EmptyState title="Trips come from your fleet" message={`${driver.vendorName || 'Your vendor'} assigns your trips. They appear on this screen as soon as they are assigned.`} />
+        ) : !isOnline ? (
           <EmptyState title="You are offline" message="Go online to see and accept trips." action={<Button title="Go online now" variant="success" loading={presenceBusy} onPress={() => void changePresence('Online')} />} />
         ) : activeTrip ? (
           <EmptyState title="Finish your current trip" message="New trips appear here once you complete it." />

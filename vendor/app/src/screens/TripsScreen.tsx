@@ -7,17 +7,17 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useVendorData } from '../context/VendorData';
 import { Badge, Button, Card, Chip, EmptyState, Notice, Row, Segmented, Sheet } from '../components/ui';
-import { canDispatch, dispatchBlocker, dispatchDriver, VendorActionError } from '../services/vendorService';
+import { canDispatch, dispatchBlocker, dispatchDriver, tripStageLabel, VendorActionError } from '../services/vendorService';
 import type { FleetDriver, VendorBooking } from '../types/operations';
 import { formatINR, formatPhone, localMobile } from '../utils/format';
-import { netPayout } from '../utils/wallet';
+import { payoutText } from '../utils/wallet';
 import { describeDataError } from '../utils/retry';
 import { colors, radius, space, type } from '../theme';
 
 type Tab = 'active' | 'completed';
 
 export function TripsScreen() {
-  const { bookings, activeBookings, profile, errors } = useVendorData();
+  const { bookings, activeBookings, errors } = useVendorData();
   const [tab, setTab] = useState<Tab>('active');
   const [dispatchFor, setDispatchFor] = useState<VendorBooking | null>(null);
   const [message, setMessage] = useState('');
@@ -69,7 +69,7 @@ export function TripsScreen() {
               <View style={styles.rowBetween}>
                 <Text style={type.tiny}>{b.bookingId}</Text>
                 <Badge
-                  label={b.status === 'Completed' ? 'Completed' : needsDriver ? 'Needs driver' : b.status === 'Ongoing' ? 'On trip' : b.tripStage || b.status}
+                  label={needsDriver && b.status !== 'Completed' ? 'Needs driver' : tripStageLabel(b)}
                   tone={b.status === 'Completed' ? 'success' : needsDriver ? 'warning' : 'brand'}
                 />
               </View>
@@ -94,7 +94,7 @@ export function TripsScreen() {
                 </View>
               ) : null}
               <Row label="Fare" value={formatINR(b.fare)} />
-              <Row label="Your payout" value={formatINR(netPayout(b, profile.commissionRate))} bold />
+              <Row label="Your payout" value={payoutText(b)} bold />
               <View style={styles.actions}>
                 {customerPhone && b.status !== 'Completed' ? (
                   <Button small variant="secondary" title={`Call ${formatPhone(customerPhone)}`} onPress={() => void Linking.openURL(`tel:+91${customerPhone}`)} style={{ flex: 1 }} />

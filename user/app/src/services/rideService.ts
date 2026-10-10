@@ -6,13 +6,11 @@ import { getFunctions, httpsCallable } from 'firebase/functions';
 // Customer updates remain constrained by firestore.rules. Live location comes
 // from the assigned driver's driverLocation field on the booking.
 
-import { collection, doc, onSnapshot, query, serverTimestamp, Timestamp, where, writeBatch } from 'firebase/firestore';
-import * as Crypto from 'expo-crypto';
+import { collection, doc, onSnapshot, query, serverTimestamp, where, writeBatch } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import {
   FREE_CANCEL_AFTER_ASSIGN_MS,
   INSTANT_CANCELLATION_FEE,
-  PARTNER_PAYOUT_SHARE,
   SCHEDULED_CANCELLATION_FEE,
   SCHEDULED_FREE_CANCEL_BEFORE_MS,
 } from '../config/constants';
@@ -21,6 +19,7 @@ import type {
   DriverCard,
   DriverLocation,
   FareBreakdown,
+  FareLine,
   GeoPlace,
   LatLng,
   PaymentMethod,
@@ -35,7 +34,6 @@ import type {
 import { formatDate, formatTime, num, str, toDate } from '../utils/format';
 import { isValidLatLng } from '../utils/geo';
 import { withTimeout, errorCode } from '../utils/retry';
-import { serviceName } from './pricingService';
 
 export const BOOKINGS = 'bookings';
 const SECRETS = 'booking_secrets';
@@ -45,7 +43,7 @@ const SOS = 'sos_alerts';
 
 // ── Mapping ─────────────────────────────────────────────────────────────────
 
-const STATUSES: BookingStatus[] = ['Pending', 'Confirmed', 'Assigned', 'Ongoing', 'Completed', 'Cancelled'];
+const STATUSES: BookingStatus[] = ['Pending', 'Approved', 'Confirmed', 'Assigned', 'Ongoing', 'Completed', 'Cancelled', 'Rejected'];
 const STAGES: TripStage[] = ['Assigned', 'En Route Pickup', 'Reached Pickup', 'In Progress', 'Arrived Destination', 'Completed'];
 
 /** Also maps labels written by older builds of the panels. */
@@ -56,13 +54,17 @@ export function normalizeStatus(raw: string): BookingStatus {
   return 'Pending';
 }
 
-export function derivePhase(status: BookingStatus, stage: TripStage | null, hasDriver = true): RidePhase {
+export function derivePhase(status: BookingStatus, stage: TripStage | null, hasDriver = true, boardingVerified = false): RidePhase {
   switch (status) {
     case 'Cancelled':
+    case 'Rejected':
       return 'cancelled';
     case 'Completed':
       return 'completed';
     case 'Ongoing':
+      // The driver starts the trip on the way to the pickup; the ride itself begins once the boarding OTP is verified.
+      if (stage === 'En Route Pickup') return 'driver_en_route';
+      if (stage === 'Reached Pickup') return boardingVerified ? 'in_trip' : 'driver_arrived';
       return 'in_trip';
     case 'Assigned':
       if (!hasDriver) return 'partner_confirmed';
@@ -90,17 +92,45 @@ function place(prefix: 'pickup' | 'drop', d: Record<string, unknown>): GeoPlace 
   };
 }
 
-function mapFareBreakdown(v: unknown): FareBreakdown | null {
+function mapFareBreakdown(v: unknown, adjustment?: unknown): FareBreakdown | null {
   if (!v || typeof v !== 'object') return null;
   const f = v as Record<string, unknown>;
-  const keys: (keyof FareBreakdown)[] = [
-    'baseFare', 'distanceFare', 'timeFare', 'nightCharge', 'driverAllowance', 'minimumFareAdjustment',
+  const keys: Exclude<keyof FareBreakdown, 'subtotalBeforeAdjustment' | 'globalAdjustment' | 'discountDetail'>[] = [
+    'baseFare', 'distanceFare', 'timeFare', 'nightCharge', 'driverAllowance', 'minimumFareAdjustment', 'adminAdjustment',
     'subtotal', 'discount', 'taxableAmount', 'gstRate', 'gst', 'total', 'distanceKm', 'durationMin',
     'perKmRate', 'perMinuteRate',
   ];
   const out = {} as FareBreakdown;
   for (const k of keys) out[k] = num(f[k]);
+  // Older bookings stored the applied % adjustment beside the breakdown only.
+  const a = (f.globalAdjustment ?? adjustment) as Record<string, unknown> | null | undefined;
+  if (a && typeof a === 'object' && typeof a.amount === 'number' && a.amount !== 0) {
+    out.globalAdjustment = {
+      id: str(a.id),
+      name: str(a.name) || 'Fare adjustment',
+      direction: a.direction === 'decrease' ? 'decrease' : 'increase',
+      percent: num(a.percent),
+      amount: a.amount,
+    };
+  }
   return out;
+}
+
+const TREATMENTS: FareLine['treatment'][] = ['included', 'extra', 'not_applicable'];
+
+/** The server's stored fare breakup (fareBreakup.lines), validated line by line. */
+function mapFareLines(v: unknown): FareLine[] {
+  const lines = v && typeof v === 'object' ? (v as { lines?: unknown }).lines : null;
+  if (!Array.isArray(lines)) return [];
+  return lines
+    .filter((l): l is Record<string, unknown> => !!l && typeof l === 'object' && TREATMENTS.includes((l as { treatment?: FareLine['treatment'] }).treatment!))
+    .map((l) => ({
+      key: str(l.key),
+      label: str(l.label),
+      amount: typeof l.amount === 'number' && Number.isFinite(l.amount) ? l.amount : null,
+      treatment: l.treatment as FareLine['treatment'],
+      detail: str(l.detail),
+    }));
 }
 
 function mapDriverLocation(v: unknown): DriverLocation | null {
@@ -142,9 +172,21 @@ export function mapBooking(id: string, d: Record<string, unknown>): TripRecord {
     categoryName: str(d.vehicleCategory || d.vehicle) || 'Cab',
     status,
     tripStage: stage,
-    phase: derivePhase(status, stage, !!driverId),
+    phase: derivePhase(status, stage, !!driverId, !!d.boardingVerifiedAt),
     fare: num(d.fare),
-    fareBreakdown: mapFareBreakdown(d.fareBreakdown),
+    fareBreakdown: mapFareBreakdown(d.fareBreakdown, d.globalAdjustmentApplied),
+    fareLines: mapFareLines(d.fareBreakup),
+    paid:
+      d.paymentSummary && typeof d.paymentSummary === 'object'
+        ? (() => {
+            const p = d.paymentSummary as Record<string, unknown>;
+            return { totalPaid: num(p.totalPaid), balanceDue: num(p.balanceDue), status: str(p.status) };
+          })()
+        : null,
+    refund:
+      d.refund && typeof d.refund === 'object' && str((d.refund as Record<string, unknown>).status) && str((d.refund as Record<string, unknown>).status) !== 'Not Applicable'
+        ? { status: str((d.refund as Record<string, unknown>).status), amount: num((d.refund as Record<string, unknown>).amount) }
+        : null,
     tollCharges: num(d.tollCharges),
     couponCode: str(d.couponCode),
     paymentMethod: str(d.paymentMethod) || 'Cash',
@@ -155,6 +197,7 @@ export function mapBooking(id: string, d: Record<string, unknown>): TripRecord {
     isScheduled: d.rideTiming === 'scheduled',
     scheduledAt,
     createdAt,
+    approvedAt: toDate(d.approvedAt),
     assignedAt: toDate(d.assignedAt),
     startedAt: toDate(d.startedAt),
     completedAt: toDate(d.completedAt),
@@ -173,7 +216,7 @@ export function mapBooking(id: string, d: Record<string, unknown>): TripRecord {
 }
 
 export function isActiveStatus(s: BookingStatus): boolean {
-  return s === 'Pending' || s === 'Confirmed' || s === 'Assigned' || s === 'Ongoing';
+  return s === 'Pending' || s === 'Approved' || s === 'Confirmed' || s === 'Assigned' || s === 'Ongoing';
 }
 
 /**
@@ -238,30 +281,6 @@ export function subscribeToBoardingOtp(id: string, cb: (otp: string | null) => v
 
 // ── Create ──────────────────────────────────────────────────────────────────
 
-function randomUint32(): number {
-  const buf = new Uint32Array(1);
-  Crypto.getRandomValues(buf);
-  return buf[0] ?? 0;
-}
-
-export function generateOtp(rand: () => number = randomUint32): string {
-  return String(1000 + (rand() % 9000));
-}
-
-export function generateBookingCode(now: Date, rand: () => number = randomUint32): string {
-  const yy = String(now.getFullYear()).slice(-2);
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  const dd = String(now.getDate()).padStart(2, '0');
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let tail = '';
-  let n = rand();
-  for (let i = 0; i < 5; i++) {
-    tail += alphabet[n % alphabet.length];
-    n = Math.floor(n / alphabet.length);
-  }
-  return `NT${yy}${mm}${dd}-${tail}`;
-}
-
 export interface RideRequestInput {
   profile: UserProfile;
   pickup: GeoPlace;
@@ -274,85 +293,16 @@ export interface RideRequestInput {
   couponCode: string;
   notes: string;
   scheduledAt: Date | null;
+  /** WhatsApp number for booking updates: same as the mobile number, or a country code and number. */
+  whatsapp?: { sameAsMobile: boolean; countryCode?: string; number?: string };
+  /** Optional email for the confirmation and receipt (the profile email is used when blank). */
+  email?: string;
 }
 
 export interface RideRequestResult {
   id: string;
   /** true when the server hadn't acknowledged within the wait window. */
   unconfirmed: boolean;
-}
-
-/** Document payloads for a new ride request (exported for the rules tests). */
-export function buildRideRequestDocs(input: RideRequestInput, bookingDocId: string, now: Date, otp: string, bookingCode: string) {
-  const { profile, pickup, drop, category, route, fare, tripType, paymentMethod, couponCode, notes, scheduledAt } = input;
-  const when = scheduledAt ?? now;
-  const service = serviceName(pickup, drop, route.distanceKm);
-  const date = formatDate(when);
-  const time = scheduledAt ? formatTime(scheduledAt) : 'Now';
-  return {
-    booking: {
-      id: bookingDocId,
-      bookingId: bookingCode,
-      customerId: profile.uid,
-      customer: profile.name,
-      phone: profile.phone,
-      customerEmail: profile.email,
-      pickup: pickup.name,
-      pickupAddress: pickup.address,
-      pickupLat: pickup.lat,
-      pickupLng: pickup.lng,
-      pickupType: pickup.type,
-      drop: drop.name,
-      dropAddress: drop.address,
-      dropLat: drop.lat,
-      dropLng: drop.lng,
-      dropType: drop.type,
-      service,
-      tripType,
-      vehicle: category.name,
-      vehicleCategory: category.name,
-      vehicleCategoryId: category.id,
-      fare: fare.total,
-      fareBreakdown: fare,
-      distanceKm: fare.distanceKm,
-      durationMin: fare.durationMin,
-      routeEstimated: route.estimated,
-      couponCode: couponCode || '',
-      discount: fare.discount,
-      notes: notes.trim().slice(0, 300),
-      payment: 'Pending',
-      paymentMethod,
-      rideTiming: scheduledAt ? 'scheduled' : 'now',
-      scheduledAt: scheduledAt ? Timestamp.fromDate(scheduledAt) : null,
-      date,
-      time,
-      status: 'Pending',
-      source: 'customer-app',
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    },
-    secret: {
-      customerId: profile.uid,
-      otp,
-      createdAt: serverTimestamp(),
-    },
-    marketplace: {
-      id: bookingDocId,
-      bookingId: bookingCode,
-      route: `${pickup.name} ➔ ${drop.name}`,
-      pickup: { address: pickup.address, city: pickup.name, lat: pickup.lat, lng: pickup.lng, time },
-      drop: { address: drop.address, city: drop.name, lat: drop.lat, lng: drop.lng },
-      travelDate: date,
-      service,
-      tripType,
-      vehicleCategory: category.name,
-      vehicleCategoryId: category.id,
-      distanceKm: fare.distanceKm,
-      offeredPayout: Math.round(fare.total * PARTNER_PAYOUT_SHARE),
-      status: 'Open',
-      createdAt: serverTimestamp(),
-    },
-  };
 }
 
 // Reuse a request ID after an uncertain transport failure; the server deduplicates it.
@@ -365,6 +315,7 @@ export async function createRideRequest(input: RideRequestInput): Promise<RideRe
   await call({ requestId, pickup: input.pickup, drop: input.drop,
     categoryId: input.category.id, tripType: input.tripType, expectedFare: input.fare.total,
     paymentMethod: input.paymentMethod, couponCode: input.couponCode, notes: input.notes,
+    whatsapp: input.whatsapp, email: input.email || undefined,
     scheduledAt: input.scheduledAt?.toISOString() ?? null });
   pendingBookingIds.delete(key);
   return { id: requestId, unconfirmed: false };
@@ -381,7 +332,7 @@ export function cancellationQuote(t: TripRecord, now = Date.now()): Cancellation
   if (t.status === 'Ongoing') {
     return { allowed: false, fee: 0, explanation: 'The trip has started and can no longer be cancelled. Use SOS or call support if you need help.' };
   }
-  if (!['Pending', 'Confirmed', 'Assigned'].includes(t.status)) {
+  if (!['Pending', 'Approved', 'Confirmed', 'Assigned'].includes(t.status)) {
     return { allowed: false, fee: 0, explanation: 'This ride can no longer be cancelled.' };
   }
   if (t.isScheduled && t.scheduledAt) {

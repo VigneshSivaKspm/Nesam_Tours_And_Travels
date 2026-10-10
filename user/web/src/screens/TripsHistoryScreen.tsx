@@ -20,7 +20,8 @@ type Filter = 'All' | 'Upcoming' | 'Completed' | 'Cancelled';
 const PHASE_LABEL: Record<TripRecord['phase'], string> = {
   searching: 'Finding driver',
   partner_confirmed: 'Confirmed',
-  driver_en_route: 'Driver on the way',
+  // Steps: driver assigned → at pickup (boarding OTP) → trip started; a listed trip may be days away.
+  driver_en_route: 'Driver assigned',
   driver_arrived: 'Driver arrived',
   in_trip: 'On trip',
   completed: 'Completed',

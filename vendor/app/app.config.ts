@@ -1,5 +1,9 @@
 import type { ExpoConfig } from 'expo/config';
 
+// Firebase Cloud Messaging needs the app's google-services.json (download it from the Firebase console).
+// Set GOOGLE_SERVICES_JSON to its path (an EAS file secret works); builds without it have no push.
+const googleServicesFile = process.env.GOOGLE_SERVICES_JSON;
+
 const config: ExpoConfig = {
   owner: 'vigneshsivakspm',
   name: 'NESAM Vendor',
@@ -18,6 +22,7 @@ const config: ExpoConfig = {
   android: {
     package: 'com.nesamtours.vendor',
     versionCode: 1,
+    ...(googleServicesFile ? { googleServicesFile } : {}),
     adaptiveIcon: {
       foregroundImage: './assets/adaptive-icon.png',
       backgroundColor: '#FFFFFF',
@@ -53,6 +58,15 @@ const config: ExpoConfig = {
         microphonePermission: false,
       },
     ],
+    [
+      'expo-notifications',
+      {
+        color: '#E31E24',
+        defaultChannel: 'nesam_general',
+        sounds: ['./assets/sounds/new_booking.wav', './assets/sounds/approval.wav', './assets/sounds/general.wav'],
+      },
+    ],
+    ['expo-audio', { microphonePermission: false }],
     '@react-native-community/datetimepicker',
     './plugins/withReleaseSigning',
     [

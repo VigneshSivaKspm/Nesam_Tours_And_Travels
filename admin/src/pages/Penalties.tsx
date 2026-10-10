@@ -224,6 +224,7 @@ function PenaltyDetails({ penalty: p, onClose }: { penalty: Penalty; onClose: ()
 
 function IssuePenaltyModal({ drivers, vendors, bookings, onClose, onSaved }: { drivers: Driver[]; vendors: Vendor[]; bookings: Booking[]; onClose: () => void; onSaved: (m: string) => void }) {
   const [input, setInput] = useState<PenaltyInput>(blankInput);
+  const [adminAck, setAdminAck] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -240,6 +241,7 @@ function IssuePenaltyModal({ drivers, vendors, bookings, onClose, onSaved }: { d
     setSubmitted(true);
     setError(null);
     if (Object.keys(errors).length) return setError("Please fix the highlighted fields.");
+    if (!adminAck) return setError("Please tick the confirmation checkbox to acknowledge and post the penalty.");
     if (busy) return;
     setBusy(true);
     try {
@@ -287,6 +289,19 @@ function IssuePenaltyModal({ drivers, vendors, bookings, onClose, onSaved }: { d
         </Field>
         <Field label="Reason" required error={err("reason")} hint="Shown to the partner."><textarea rows={2} value={input.reason} onChange={(e) => setInput({ ...input, reason: e.target.value })} maxLength={500} className={inputCls} /></Field>
         <Field label="Additional description" hint="Optional — more detail or evidence reference; also shown to the partner."><textarea rows={2} value={input.description} onChange={(e) => setInput({ ...input, description: e.target.value })} maxLength={1000} className={inputCls} /></Field>
+        <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-900 space-y-1">
+          <p className="font-bold">⚠️ Penalty Notice &amp; Audit Policy</p>
+          <p>This penalty will immediately notify the partner ({input.partyName || input.party}) and record an audited deduction against their account. The partner must review and acknowledge or dispute this penalty.</p>
+        </div>
+        <label className="flex items-start gap-2.5 pt-1 text-xs text-[#333] cursor-pointer">
+          <input
+            type="checkbox"
+            checked={adminAck}
+            onChange={(e) => setAdminAck(e.target.checked)}
+            className="w-4 h-4 mt-0.5 accent-[#E21B23]"
+          />
+          <span>I confirm this penalty is accurate, verified with supporting incident records, and ready to be issued to the partner.</span>
+        </label>
       </div>
     </Modal>
   );

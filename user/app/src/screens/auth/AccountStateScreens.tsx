@@ -10,7 +10,7 @@ export function AccountHoldScreen({ status, onSignOut }: { status: string; onSig
       <Card style={styles.card}>
         <Text style={type.h2}>Account on hold</Text>
         <Text style={[type.body, styles.msg]}>
-          Your account is currently {status.toLowerCase()}. Please call {SUPPORT_PHONE_DISPLAY} for help.
+          {status ? `Your account is currently ${status.toLowerCase()}.` : 'Your account is not active yet.'} Please call {SUPPORT_PHONE_DISPLAY} for help.
         </Text>
         <Button title={`Call ${SUPPORT_PHONE_DISPLAY}`} onPress={() => void Linking.openURL(`tel:${SUPPORT_PHONE}`)} />
         <Button title="Sign out" variant="secondary" onPress={onSignOut} style={styles.gap} />

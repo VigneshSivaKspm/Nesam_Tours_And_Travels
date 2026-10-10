@@ -1,31 +1,13 @@
 import {
   buildCancelUpdate,
-  buildRideRequestDocs,
   cancellationQuote,
   derivePhase,
-  generateBookingCode,
-  generateOtp,
   isLiveRide,
   mapBooking,
   normalizeStatus,
 } from '../src/services/rideService';
-import { calculateFare } from '../src/services/pricingService';
-import { DEFAULT_RIDE_CATEGORIES, INSTANT_CANCELLATION_FEE, PARTNER_PAYOUT_SHARE, SCHEDULED_CANCELLATION_FEE } from '../src/config/constants';
-import type { GeoPlace, TripRecord, UserProfile } from '../src/types';
-
-const profile: UserProfile = {
-  uid: 'cust1',
-  name: 'Priya',
-  phone: '+91 9800000001',
-  email: 'p@example.com',
-  photoUrl: '',
-  walletBalance: 0,
-  emergencyContact: '+91 9800000009',
-  language: 'English',
-  status: 'Approved',
-};
-const pickup: GeoPlace = { id: 'a', name: 'Theni Bus Stand', address: 'Theni', type: 'other', lat: 10.01, lng: 77.47 };
-const drop: GeoPlace = { id: 'b', name: 'Madurai Airport', address: 'Madurai', type: 'airport', lat: 9.83, lng: 78.09 };
+import { INSTANT_CANCELLATION_FEE, SCHEDULED_CANCELLATION_FEE } from '../src/config/constants';
+import type { TripRecord } from '../src/types';
 
 function trip(over: Partial<TripRecord>): TripRecord {
   return { ...mapBooking('b1', { customerId: 'cust1', status: 'Pending' }), ...over };
@@ -45,6 +27,12 @@ describe('status mapping', () => {
     expect(derivePhase('Ongoing', 'In Progress')).toBe('in_trip');
     expect(derivePhase('Completed', 'Completed')).toBe('completed');
     expect(derivePhase('Cancelled', null)).toBe('cancelled');
+    expect(derivePhase('Approved', null)).toBe('searching');
+    expect(derivePhase('Rejected', null)).toBe('cancelled');
+    // Driver has started towards the pickup; the ride begins once boarding is verified.
+    expect(derivePhase('Ongoing', 'En Route Pickup')).toBe('driver_en_route');
+    expect(derivePhase('Ongoing', 'Reached Pickup', true, false)).toBe('driver_arrived');
+    expect(derivePhase('Ongoing', 'Reached Pickup', true, true)).toBe('in_trip');
   });
   it('treats "Assigned" without a driver (vendor awarded) as partner-confirmed', () => {
     expect(derivePhase('Assigned', null, false)).toBe('partner_confirmed');
@@ -56,19 +44,12 @@ describe('status mapping', () => {
   });
 });
 
-describe('codes', () => {
-  it('generates 4-digit OTPs', () => {
-    for (const n of [0, 1, 8999, 9000, 123456789, 4294967295]) expect(generateOtp(() => n)).toMatch(/^\d{4}$/);
-  });
-  it('generates booking codes in the NTyymmdd-XXXXX format', () => {
-    expect(generateBookingCode(new Date(2026, 8, 28), () => 123456)).toMatch(/^NT260928-[A-HJ-NP-Z2-9]{5}$/);
-  });
-});
-
 describe('cancellation policy', () => {
   const now = Date.UTC(2026, 8, 28, 12, 0);
   it('is free before assignment', () => {
     expect(cancellationQuote(trip({ status: 'Pending' }), now)).toMatchObject({ allowed: true, fee: 0 });
+    expect(cancellationQuote(trip({ status: 'Approved' }), now)).toMatchObject({ allowed: true, fee: 0 });
+    expect(cancellationQuote(trip({ status: 'Rejected' }), now).allowed).toBe(false);
   });
   it('is free within 3 minutes of assignment, then charged', () => {
     expect(cancellationQuote(trip({ status: 'Assigned', assignedAt: new Date(now - 60000) }), now).fee).toBe(0);
@@ -98,30 +79,3 @@ describe('live ride detection', () => {
   });
 });
 
-describe('ride request payload', () => {
-  const category = DEFAULT_RIDE_CATEGORIES[1]!;
-  const route = { distanceKm: 120, durationMin: 150, path: [], estimated: false };
-  const fare = calculateFare({ category, route, tripType: 'One Way', pickupTime: new Date(2026, 8, 28, 12) });
-  const docs = buildRideRequestDocs(
-    { profile, pickup, drop, category, route, fare, tripType: 'One Way', paymentMethod: 'Cash', couponCode: '', notes: '  gate 2  ', scheduledAt: null },
-    'doc123',
-    new Date(2026, 8, 28, 12),
-    '4321',
-    'NT260928-ABCDE',
-  );
-
-  it('preserves the legacy booking shape for mapping compatibility', () => {
-    expect(docs.booking).toMatchObject({ customerId: 'cust1', status: 'Pending', payment: 'Pending', fare: fare.total, source: 'customer-app' });
-    expect(docs.booking).not.toHaveProperty('assignedDriverId');
-    expect(docs.booking).not.toHaveProperty('assignedVendorId');
-    expect(docs.booking.notes).toBe('gate 2');
-    expect(docs.booking.service).toBe('Airport');
-  });
-  it('keeps the OTP out of the booking and in the secret doc', () => {
-    expect(JSON.stringify(docs.booking)).not.toContain('4321');
-    expect(docs.secret).toMatchObject({ customerId: 'cust1', otp: '4321' });
-  });
-  it('publishes an Open marketplace offer at the partner share', () => {
-    expect(docs.marketplace).toMatchObject({ id: 'doc123', status: 'Open', offeredPayout: Math.round(fare.total * PARTNER_PAYOUT_SHARE) });
-  });
-});

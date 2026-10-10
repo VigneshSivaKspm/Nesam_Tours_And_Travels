@@ -18,6 +18,7 @@ import { RegistrationScreen } from './src/screens/RegistrationScreen';
 import { MainNavigator } from './src/navigation/MainNavigator';
 import { navigationRef } from './src/navigation/navigationRef';
 import { DriverDataProvider } from './src/context/DriverData';
+import { LegalGate } from './src/components/LegalGate';
 import { signOutUser, subscribeToAuthUser } from './src/services/authService';
 import { emptyRegistration, formatPhone, getDriverInvite, subscribeToDriverAccount, type DriverInvite } from './src/services/driverService';
 import type { DriverAccount } from './src/types/driver';
@@ -122,9 +123,11 @@ function Root() {
   if (status !== 'Approved') return <VerificationStatusScreen account={account} onSignOut={signOut} onResubmit={() => setResubmitting(true)} />;
 
   return (
-    <DriverDataProvider key={account.driver.id} account={account}>
-      <MainNavigator onSignOut={signOut} />
-    </DriverDataProvider>
+    <LegalGate key={account.driver.id} role="driver">
+      <DriverDataProvider account={account}>
+        <MainNavigator onSignOut={signOut} />
+      </DriverDataProvider>
+    </LegalGate>
   );
 }
 

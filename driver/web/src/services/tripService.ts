@@ -6,7 +6,7 @@
 import { callFunction, newId } from './callables';
 import { getFirebaseLocation, type Fix } from './location';
 
-export type TripStep = 'Trip Started' | 'Reached Pickup' | 'Trip Ended';
+export type TripStep = 'Reached Pickup' | 'Trip Started' | 'Trip Ended';
 
 export interface TollIn {
   id: string;

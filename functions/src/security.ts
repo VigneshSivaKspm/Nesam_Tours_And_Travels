@@ -149,7 +149,8 @@ async function decodeToken(packageName: string, token: string): Promise<Integrit
     deviceRecognitionVerdict: p.deviceIntegrity?.deviceRecognitionVerdict,
     appLicensingVerdict: p.accountDetails?.appLicensingVerdict,
     packageName: p.requestDetails?.requestPackageName,
-    nonce: p.requestDetails?.nonce,
+    // Classic requests carry a nonce, standard requests (the apps use these) a requestHash; both hold our one-time value.
+    nonce: p.requestDetails?.nonce ?? p.requestDetails?.requestHash,
   };
 }
 

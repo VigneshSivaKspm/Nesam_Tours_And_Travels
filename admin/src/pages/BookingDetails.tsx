@@ -102,9 +102,10 @@ export default function BookingDetails({ bookingId, onBack }: { bookingId: strin
       { label: "Booking created", time: stamp(b.createdAt), done: true },
       { label: "Approved by admin", time: stamp(b.approvedAt), done: !!b.approvedAt || !["Pending", "Rejected"].includes(b.status) },
       { label: "Driver assigned", time: stamp(b.assignedAt), done: !!b.assignedDriverId },
-      { label: "Trip started", time: stamp(b.tripStartedAt ?? b.startedAt), done: ["Trip Started", "Reached Pickup", "Trip Ended"].includes(sub) && b.status !== "Pending", where: mapLink(booking.tripStartedLocation?.lat, booking.tripStartedLocation?.lng) ?? undefined },
-      { label: "Reached pickup location", time: stamp(b.reachedPickupAt), done: ["Reached Pickup", "Trip Ended"].includes(sub), where: mapLink(booking.reachedPickupLocation?.lat, booking.reachedPickupLocation?.lng) ?? undefined },
-      { label: "Customer boarding verified", time: stamp(b.boardingVerifiedAt), done: !!b.boardingVerifiedAt },
+      // Driver steps: Reached Pickup Location → (boarding OTP) → Trip Started → Trip Ended.
+      { label: "Reached pickup location", time: stamp(b.reachedPickupAt), done: ["Reached Pickup", "Trip Started", "Trip Ended"].includes(sub), where: mapLink(booking.reachedPickupLocation?.lat, booking.reachedPickupLocation?.lng) ?? undefined },
+      { label: "Customer boarding OTP verified", time: stamp(b.boardingVerifiedAt), done: !!b.boardingVerifiedAt },
+      { label: "Trip started", time: stamp(b.tripStartedAt ?? b.startedAt), done: ["Trip Started", "Trip Ended"].includes(sub) && b.status !== "Pending", where: mapLink(booking.tripStartedLocation?.lat, booking.tripStartedLocation?.lng) ?? undefined },
       { label: "Trip ended", time: stamp(b.tripEndedAt ?? b.completedAt), done: booking.status === "Completed", where: mapLink(booking.tripEndedLocation?.lat, booking.tripEndedLocation?.lng) ?? undefined },
     ];
     // Steps an older booking passed without a stored time say so instead of guessing.

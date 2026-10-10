@@ -324,7 +324,7 @@ export default function Sidebar({
           <img
             src="/icons/logo.png"
             alt="Nesam Tours & Travels"
-            className="shrink-0 w-9 h-9 rounded-lg object-contain bg-white/10 p-1 shadow-sm"
+            className="shrink-0 w-9 h-9 rounded-lg object-contain bg-white p-0.5 shadow-sm"
           />
           {!collapsed && (
             <div className="overflow-hidden">

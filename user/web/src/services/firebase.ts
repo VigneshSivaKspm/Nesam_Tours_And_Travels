@@ -1,14 +1,16 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { initializeAppCheck, ReCaptchaEnterpriseProvider } from 'firebase/app-check';
-import { getAuth } from 'firebase/auth';
+import { connectAuthEmulator, getAuth, signInWithCustomToken } from 'firebase/auth';
 import {
+  connectFirestoreEmulator,
   getFirestore,
   initializeFirestore,
   persistentLocalCache,
   persistentMultipleTabManager,
   type Firestore,
 } from 'firebase/firestore';
-import { getStorage } from 'firebase/storage';
+import { connectFunctionsEmulator, getFunctions } from 'firebase/functions';
+import { connectStorageEmulator, getStorage } from 'firebase/storage';
 
 export const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyClCvf1FUnXb6na8UeZ_knRBTCakAVJCQs",
@@ -75,3 +77,16 @@ function createFirestore(): Firestore {
 
 export const db = createFirestore();
 export const storage = getStorage(app);
+
+// ── Local testing against the Firebase emulators ────────────────────────────
+// Only when VITE_USE_FIREBASE_EMULATORS=true (never set for a production build).
+// Run with VITE_FIREBASE_PROJECT_ID=demo-nesam so nothing can reach a real project.
+if (import.meta.env.VITE_USE_FIREBASE_EMULATORS === 'true') {
+  const host = import.meta.env.VITE_FIREBASE_EMULATOR_HOST || '127.0.0.1';
+  connectAuthEmulator(auth, `http://${host}:9099`, { disableWarnings: true });
+  connectFirestoreEmulator(db, host, 8080);
+  connectStorageEmulator(storage, host, Number(import.meta.env.VITE_STORAGE_EMULATOR_PORT || 9199));
+  connectFunctionsEmulator(getFunctions(app), host, 5001);
+  // Lets an automated browser test sign in with an emulator custom token.
+  (window as unknown as Record<string, unknown>).__nesamTestSignIn = (token: string) => signInWithCustomToken(auth, token);
+}

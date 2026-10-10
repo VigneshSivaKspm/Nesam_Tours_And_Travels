@@ -132,19 +132,21 @@ export const ActiveRideScreen: React.FC<ActiveRideScreenProps> = ({ bookingId, p
     }
   }, [driverPos]);
 
-  // Searching: slow / give-up handling for instant requests.
-  const searchingFor = trip?.createdAt ? now - trip.createdAt.getTime() : 0;
+  // Searching: slow / give-up handling for instant requests. The clock starts at
+  // NESAM's approval — a booking still under review is never withdrawn.
+  const searchStart = trip?.status === 'Approved' ? trip.approvedAt : null;
+  const searchingFor = searchStart ? now - searchStart.getTime() : 0;
   const slow = trip?.phase === 'searching' && !trip.isScheduled && searchingFor > SEARCH_SLOW_AFTER_MS;
   const gaveUp = useRef(false);
   useEffect(() => {
-    if (!trip || trip.phase !== 'searching' || trip.isScheduled || pending || gaveUp.current) return;
+    if (!trip || trip.phase !== 'searching' || !searchStart || trip.isScheduled || pending || gaveUp.current) return;
     if (searchingFor < SEARCH_GIVE_UP_AFTER_MS || !online) return;
     gaveUp.current = true;
     cancelRide(trip, profile.uid, 'No driver found').catch((e) => {
       gaveUp.current = false;
       setAutoCancelError(describeError(e, 'We couldn’t withdraw your request automatically.'));
     });
-  }, [searchingFor, trip, pending, online, profile.uid]);
+  }, [searchingFor, searchStart, trip, pending, online, profile.uid]);
 
   // ── Render helpers ───────────────────────────────────────────────────────
   if (loadError && !trip) {
@@ -236,7 +238,7 @@ export const ActiveRideScreen: React.FC<ActiveRideScreenProps> = ({ bookingId, p
         <div className="p-4 space-y-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <h2 className="text-lg font-black text-gray-900">{PHASE_TITLE[phase]}</h2>
+              <h2 className="text-lg font-black text-gray-900">{trip.status === 'Pending' ? 'Booking under review' : trip.status === 'Rejected' ? 'Booking not accepted' : PHASE_TITLE[phase]}</h2>
               <p className="text-[11px] text-gray-500">
                 Booking {trip.bookingId}
                 {pending && ' · sending…'}
@@ -257,7 +259,11 @@ export const ActiveRideScreen: React.FC<ActiveRideScreenProps> = ({ bookingId, p
                 </p>
               ) : (
                 <p className="text-sm text-gray-700">
-                  {pending ? 'Sending your request…' : 'Contacting drivers near your pickup. This usually takes under a minute.'}
+                  {pending
+                    ? 'Sending your request…'
+                    : trip.status === 'Pending'
+                      ? 'NESAM is reviewing your booking. You’ll be notified as soon as it’s approved.'
+                      : 'Approved — contacting drivers near your pickup.'}
                 </p>
               )}
               {slow && (
