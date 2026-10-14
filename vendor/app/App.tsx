@@ -11,9 +11,9 @@ import { RecaptchaProvider } from './src/components/RecaptchaVerifier';
 import { NetworkBanner } from './src/components/NetworkBanner';
 import { FullScreenLoader } from './src/components/ui';
 import { AuthScreen } from './src/screens/auth/AuthScreen';
-import { getAuthIntent } from './src/screens/auth/authIntent';
 import { AccountStatusScreen, LoadErrorScreen } from './src/screens/auth/AccountStatusScreen';
 import { OnboardingWizard } from './src/screens/onboarding/OnboardingWizard';
+import { RegistrationGate } from './src/screens/onboarding/RegistrationGate';
 import { MainNavigator } from './src/navigation/MainNavigator';
 import { navigationRef } from './src/navigation/navigationRef';
 import { VendorDataProvider } from './src/context/VendorData';
@@ -78,9 +78,10 @@ function Root() {
   if (vendor === undefined) return <FullScreenLoader label="Loading your account…" />;
 
   const phone = authUser.phoneNumber || vendor?.record.phone || '';
-  if (!vendor || status === 'INCOMPLETE' || status === 'CHANGES_REQUESTED' || (status === 'REJECTED' && reapplying)) {
-    const notice = !vendor && getAuthIntent() === 'login' ? `No vendor account is registered to ${phone} yet. Complete the steps below to apply.` : undefined;
-    return <OnboardingWizard key={authUser.uid} record={vendor?.record ?? null} phone={phone} notice={notice} onSignOut={signOut} />;
+  // No vendor account: registration is by one-time invitation (spec page 13).
+  if (!vendor) return <RegistrationGate key={authUser.uid} phone={phone} onSignOut={signOut} />;
+  if (status === 'INCOMPLETE' || status === 'CHANGES_REQUESTED' || (status === 'REJECTED' && reapplying)) {
+    return <OnboardingWizard key={authUser.uid} record={vendor.record} phone={phone} onSignOut={signOut} />;
   }
   if (status !== 'APPROVED') {
     return <AccountStatusScreen record={vendor.record} onSignOut={signOut} onReapply={status === 'REJECTED' ? () => setReapplying(true) : undefined} />;

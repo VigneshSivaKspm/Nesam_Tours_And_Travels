@@ -47,16 +47,17 @@ export function EditProfileScreen({ navigation }: Props) {
 
   const save = async () => {
     if (!isValidName(name)) return setError('Enter your full name (letters and spaces, 2–60 characters).');
-    if (!isValidEmail(email)) return setError('Enter a valid email address.');
-    if (!isValidIndianMobile(emergency)) return setError('Enter a 10-digit emergency contact number.');
-    if (emergency === localMobile(profile.phone)) return setError('Emergency contact must differ from your own number.');
+    // E-mail and the emergency contact are optional; a value that is typed must still be valid.
+    if (email.trim() && !isValidEmail(email)) return setError('Enter a valid email address, or leave it blank.');
+    if (emergency && !isValidIndianMobile(emergency)) return setError('Enter a 10-digit emergency contact number, or leave it blank.');
+    if (emergency && emergency === localMobile(profile.phone)) return setError('Emergency contact must differ from your own number.');
     setBusy(true);
     setError('');
     try {
       await updateCustomerProfile(profile.uid, {
         name,
         email: email.toLowerCase(),
-        emergencyContact: `+91 ${emergency}`,
+        emergencyContact: emergency ? `+91 ${emergency}` : '',
         language,
       });
       saved.current = true;
@@ -73,10 +74,9 @@ export function EditProfileScreen({ navigation }: Props) {
     <Screen edges={[]}>
       <TextField label="Mobile number" value={formatPhone(profile.phone)} editable={false} hint="Your login number can’t be changed here. Contact support to move your account." />
       <TextField label="Full name" required value={name} onChangeText={setName} autoComplete="name" />
-      <TextField label="Email" required value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" autoComplete="email" />
+      <TextField label="Email (optional)" value={email} onChangeText={setEmail} keyboardType="email-address" autoCapitalize="none" autoComplete="email" />
       <TextField
-        label="Emergency contact"
-        required
+        label="Emergency contact (optional)"
         prefix="+91"
         value={emergency}
         onChangeText={(v) => setEmergency(v.replace(/\D/g, '').slice(0, 10))}

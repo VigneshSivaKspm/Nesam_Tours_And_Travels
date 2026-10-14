@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Check, LogOut, MessageSquareWarning } from "lucide-react";
 import type { VendorRecord } from "../../types";
-import { ONBOARDING_STEPS, SECTION_LABELS } from "../../config/onboarding";
+import { ONBOARDING_STEPS, SECTION_LABELS, stepOfSection } from "../../config/onboarding";
 import {
   getVendorInvite,
   getVendorKyc,
@@ -14,10 +14,8 @@ import {
   OfflineBanner,
   RED,
 } from "../../components/onboarding/ui";
-import { BusinessStep } from "./BusinessStep";
-import { DocumentsStep } from "./DocumentsStep";
+import { BusinessAccountStep } from "./BusinessAccountStep";
 import { FleetStep } from "./FleetStep";
-import { PayoutStep } from "./PayoutStep";
 import { ReviewStep } from "./ReviewStep";
 
 export interface StepProps {
@@ -41,10 +39,7 @@ function initialStep(record: VendorRecord | null): number {
     (record.status === "CHANGES_REQUESTED" || record.status === "REJECTED") &&
     record.review?.flaggedSections.length
   ) {
-    const first = ONBOARDING_STEPS.findIndex(
-      (s) => s.key === record.review!.flaggedSections[0],
-    );
-    if (first >= 0) return first;
+    return stepOfSection(record.review.flaggedSections[0]);
   }
   return Math.min(record.onboardingStep, ONBOARDING_STEPS.length - 1);
 }
@@ -104,40 +99,12 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   const current = ONBOARDING_STEPS[step];
 
   const renderStep = () => {
-    if (step === 0) {
-      return (
-        <BusinessStep
-          record={record}
-          invite={invite}
-          phone={phone}
-          onNext={next}
-        />
-      );
-    }
     if (!record) return <FullScreenLoader label="Saving…" />;
     switch (step) {
+      case 0:
+        return <BusinessAccountStep record={record} kyc={kyc} onKycChange={setKyc} onNext={next} />;
       case 1:
-        return (
-          <DocumentsStep
-            record={record}
-            kyc={kyc}
-            onKycChange={setKyc}
-            onNext={next}
-            onBack={back}
-          />
-        );
-      case 2:
         return <FleetStep record={record} onNext={next} onBack={back} />;
-      case 3:
-        return (
-          <PayoutStep
-            record={record}
-            kyc={kyc}
-            onKycChange={setKyc}
-            onNext={next}
-            onBack={back}
-          />
-        );
       default:
         return (
           <ReviewStep
@@ -190,8 +157,8 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
           {ONBOARDING_STEPS.map((s, i) => {
             const done = i < step || (record?.onboardingStep ?? 0) > i;
             const active = i === step;
-            const flagged = correction?.review?.flaggedSections.includes(
-              s.key as never,
+            const flagged = correction?.review?.flaggedSections.some(
+              (f) => stepOfSection(f) === i,
             );
             return (
               <li key={s.key} className="flex-1 min-w-0">

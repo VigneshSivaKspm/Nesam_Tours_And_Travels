@@ -139,6 +139,12 @@ export function formatPhone(e164: string): string {
 const APPROVAL_VALUES: ApprovalStatus[] = ['Pending', 'Approved', 'Rejected', 'Suspended'];
 const DOC_VALUES: DocumentStatus[] = ['Pending', 'Approved', 'Rejected'];
 
+/** Shown until staff record the name from the driving licence: "Driver ••3210". */
+export function fallbackName(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  return digits.length >= 4 ? `Driver ••${digits.slice(-4)}` : 'NESAM Driver';
+}
+
 function mapDriverDoc(uid: string, data: Record<string, any>): DriverAccount {
   const approval = APPROVAL_VALUES.includes(data.status) ? data.status as ApprovalStatus : 'Pending';
   const docStatus = DOC_VALUES.includes(data.docStatus) ? data.docStatus as DocumentStatus : 'Pending';
@@ -148,7 +154,8 @@ function mapDriverDoc(uid: string, data: Record<string, any>): DriverAccount {
 
   const driver: DriverProfile = {
     id: uid,
-    name: str(data.name),
+    // Onboarding no longer asks for a name; staff record it from the licence at review.
+    name: str(data.name) || fallbackName(str(data.phone)),
     phone: str(data.phone),
     email: str(data.email),
     photoUrl: str(data.photoUrl),
@@ -200,6 +207,7 @@ function mapDriverDoc(uid: string, data: Record<string, any>): DriverAccount {
       ...pickStrings(vi, Object.keys(EMPTY_VEHICLE).filter((k) => k !== 'capacity')),
       vehicleType: (vi.vehicleType || 'Sedan') as VehicleCategory,
       capacity: typeof vi.capacity === 'number' ? vi.capacity : 4,
+      ...(vi.vahan && typeof vi.vahan === 'object' ? { vahan: vi.vahan } : {}),
     } as VehicleDetails,
     bank: { ...EMPTY_BANK, ...pickStrings(bank, Object.keys(EMPTY_BANK)) } as BankDetails,
   };
@@ -267,39 +275,32 @@ async function writeDriverProfile(uid: string, payload: Record<string, unknown>,
   }, { merge: true });
   await batch.commit();
 }
-/** Flattened fields kept alongside the nested records for the admin/vendor panels. */
-function registrationFields(data: RegistrationData) {
-  const p = data.profile;
+/**
+ * What onboarding writes (spec page 13): selfie, licence, and — for an owner
+ * driver — the vehicle with its RC, insurance, FC, permit and front photo.
+ * Nothing else is touched, so a resubmission never overwrites contact or payout
+ * details the driver saved later in the profile.
+ */
+export function registrationFields(data: RegistrationData, opts: { fleetDriver?: boolean } = {}) {
   const v = data.vehicle;
+  const plate = v.vehicleNumber.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  const licenceNo = data.license.number.trim().toUpperCase();
+  const label = [v.make, v.model].filter(Boolean).join(' ');
+  const vehicle = opts.fleetDriver || !plate
+    ? {}
+    : {
+        vehicleInfo: { ...v, vehicleNumber: plate, rcNumber: plate },
+        vehicleNumber: plate,
+        vehicleType: v.vehicleType,
+        vehicle: label ? `${label} • ${plate}` : plate,
+      };
   return {
-    name: p.name.trim(),
-    email: p.email.trim(),
-    photoUrl: p.photoUrl,
-    dob: p.dob,
-    gender: p.gender,
-    address: p.address.trim(),
-    city: p.city.trim(),
-    pincode: p.pincode.trim(),
-    emergencyContactName: p.emergencyContactName.trim(),
-    emergencyContact: p.emergencyContact.trim(),
-    identity: {
-      ...data.identity,
-      aadhaarNumber: data.identity.aadhaarNumber.replace(/\s/g, ''),
-      panNumber: data.identity.panNumber.trim().toUpperCase(),
-    },
-    licenseInfo: { ...data.license, number: data.license.number.trim().toUpperCase() },
-    vehicleInfo: {
-      ...v,
-      vehicleNumber: v.vehicleNumber.trim().toUpperCase(),
-      rcNumber: v.rcNumber.trim().toUpperCase(),
-    },
-    bank: { ...data.bank, ifsc: data.bank.ifsc.trim().toUpperCase() },
-    licenseNumber: data.license.number.trim().toUpperCase(),
+    photoUrl: data.profile.photoUrl,
+    licenseInfo: { ...data.license, number: licenceNo },
+    licenseNumber: licenceNo,
     licenseExpiry: data.license.expiryDate,
     license: 'Submitted',
-    vehicleNumber: v.vehicleNumber.trim().toUpperCase(),
-    vehicleType: v.vehicleType,
-    vehicle: `${v.make} ${v.model} • ${v.vehicleNumber.trim().toUpperCase()}`.trim(),
+    ...vehicle,
     docStatus: 'Pending',
     submittedAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
@@ -318,9 +319,11 @@ export async function registerDriver(data: RegistrationData): Promise<void> {
   const invite = await getDriverInvite(phoneE164);
 
   await writeDriverProfile(user.uid, {
-    ...registrationFields(data),
+    ...registrationFields(data, { fleetDriver: !!invite?.vendorId }),
     uid: user.uid,
     id: user.uid,
+    // An invitation may carry the name the vendor or NESAM entered; otherwise staff add it from the licence.
+    name: data.profile.name.trim(),
     phone: phoneE164 ? formatPhone(phoneE164) : data.profile.phone,
     phoneE164,
     role: 'driver',
@@ -342,9 +345,10 @@ export async function resubmitDriverDocuments(
   uid: string,
   data: RegistrationData,
   currentStatus: ApprovalStatus,
+  opts: { fleetDriver?: boolean } = {},
 ): Promise<void> {
   await writeDriverProfile(uid, {
-    ...registrationFields(data),
+    ...registrationFields(data, opts),
     ...(currentStatus === 'Rejected' ? { status: 'Pending', rejectionReason: '' } : {}),
   });
 }

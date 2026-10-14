@@ -18,14 +18,9 @@ import {
 } from "../services/authService";
 import { registerCustomerProfile } from "../services/userFirestoreService";
 import {
-  uploadProfilePhoto,
-  validateImageFile,
-} from "../services/storageService";
-import {
   isValidEmail,
   isValidIndianMobile,
   isValidName,
-  localMobile,
   formatPhone,
 } from "../utils/format";
 import { describeError } from "../utils/retry";
@@ -470,91 +465,43 @@ const PhoneLogin: React.FC = () => {
 
 // ── New customer profile ────────────────────────────────────────────────────
 
-const ProfileSetup: React.FC<{ uid: string; phone: string }> = ({
-  uid,
-  phone,
-}) => {
+/**
+ * Signup asks for the name and an optional e-mail only (spec page 20: customer
+ * name/mobile, optional e-mail). The mobile is the verified login number. The
+ * photo and emergency contact can be added later from the profile.
+ */
+const ProfileSetup: React.FC<{ uid: string; phone: string }> = () => {
   const intent = readIntent();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [emergency, setEmergency] = useState("");
-  const [photo, setPhoto] = useState<File | null>(null);
-  const [preview, setPreview] = useState("");
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState("");
-  const [photoFailed, setPhotoFailed] = useState(false);
 
-  useEffect(
-    () => () => {
-      if (preview) URL.revokeObjectURL(preview);
-    },
-    [preview],
-  );
-
-  const own = localMobile(phone);
   const errors = {
     name: !isValidName(name)
       ? "Enter your full name (letters and spaces, 2–60 characters)."
       : "",
-    email: !isValidEmail(email)
-      ? "Enter a valid email address — receipts are sent here."
-      : "",
-    emergency: !isValidIndianMobile(emergency)
-      ? "Enter a 10-digit mobile number for your emergency contact."
-      : emergency === own
-        ? "Your emergency contact must be a different number from yours."
+    // Optional: only a value that was typed has to be a real address.
+    email:
+      email.trim() && !isValidEmail(email)
+        ? "Enter a valid email address, or leave it blank."
         : "",
   };
-  const valid = !errors.name && !errors.email && !errors.emergency;
+  const valid = !errors.name && !errors.email;
 
-  const pickPhoto = (file: File | undefined) => {
-    if (!file) return;
-    const invalid = validateImageFile(file);
-    if (invalid) {
-      setError(invalid);
-      return;
-    }
-    setError("");
-    setPhotoFailed(false);
-    if (preview) URL.revokeObjectURL(preview);
-    setPhoto(file);
-    setPreview(URL.createObjectURL(file));
-  };
-
-  const save = async (skipPhoto = false) => {
+  const save = async () => {
     setTouched(true);
-    if (!valid) return;
+    if (!valid || saving) return;
     setSaving(true);
     setError("");
-    let photoUrl = "";
     try {
-      if (photo && !skipPhoto) {
-        try {
-          photoUrl = await uploadProfilePhoto(uid, photo, setProgress);
-        } catch (e) {
-          setPhotoFailed(true);
-          setError(
-            `${describeError(e, "Photo upload failed.")} You can retry, or continue without a photo and add one later.`,
-          );
-          setSaving(false);
-          setProgress(null);
-          return;
-        }
-      }
-      await registerCustomerProfile({
-        name,
-        email,
-        emergencyContact: `+91 ${emergency}`,
-        photoUrl,
-      });
+      await registerCustomerProfile({ name, email });
     } catch (e) {
       setError(
         describeError(e, "We couldn’t create your profile. Please try again."),
       );
       setSaving(false);
-      setProgress(null);
     }
   };
 
@@ -579,39 +526,6 @@ const ProfileSetup: React.FC<{ uid: string; phone: string }> = ({
           void save();
         }}
       >
-        <div className="flex items-center gap-4 mb-4">
-          <label className="relative w-16 h-16 rounded-2xl bg-[#F5F5F5] border-2 border-dashed border-[#E5E5E5] flex items-center justify-center overflow-hidden cursor-pointer hover:border-[#E21B23] shrink-0 transition-colors">
-            {preview ? (
-              <img
-                src={preview}
-                alt="Profile preview"
-                className="w-full h-full object-cover"
-              />
-            ) : (
-              <span className="text-[10px] font-bold text-[#888] text-center px-1">
-                Add photo
-              </span>
-            )}
-            <input
-              type="file"
-              accept="image/*"
-              className="sr-only"
-              onChange={(e) => pickPhoto(e.target.files?.[0])}
-            />
-          </label>
-          <div className="text-[12px] text-[#666]">
-            <p className="font-bold text-[#111]">Profile Photo</p>
-            <p className="text-[11px] text-[#999]">
-              Optional — helps your driver recognize you.
-            </p>
-            {progress != null && (
-              <p className="text-[#E21B23] font-bold mt-0.5">
-                Uploading… {progress}%
-              </p>
-            )}
-          </div>
-        </div>
-
         <label
           htmlFor="name"
           className="block text-[12px] font-semibold text-[#444] mb-1.5"
@@ -632,7 +546,7 @@ const ProfileSetup: React.FC<{ uid: string; phone: string }> = ({
           htmlFor="email"
           className="block text-[12px] font-semibold text-[#444] mb-1.5 mt-3"
         >
-          Email Address
+          Email Address (optional)
         </label>
         <input
           id="email"
@@ -644,34 +558,8 @@ const ProfileSetup: React.FC<{ uid: string; phone: string }> = ({
           placeholder="you@example.com"
         />
         {fieldErr("email")}
-
-        <label
-          htmlFor="emergency"
-          className="block text-[12px] font-semibold text-[#444] mb-1.5 mt-3"
-        >
-          Emergency Contact
-        </label>
-        <div className="flex items-center bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg px-3.5 py-2.5 focus-within:border-[#E21B23] focus-within:ring-1 focus-within:ring-[#E21B23]/20 transition-all">
-          <span className="text-[13px] font-bold text-[#E21B23] mr-2.5">
-            +91
-          </span>
-          <input
-            id="emergency"
-            type="tel"
-            inputMode="numeric"
-            maxLength={10}
-            value={emergency}
-            onChange={(e) =>
-              setEmergency(e.target.value.replace(/\D/g, "").slice(0, 10))
-            }
-            className="bg-transparent w-full text-[13px] font-semibold text-[#111] focus:outline-none placeholder-[#BBB]"
-            placeholder="Family member or friend"
-          />
-        </div>
-        {fieldErr("emergency")}
         <p className="text-[11px] text-[#999] mt-1.5">
-          We share your live trip with them only when you trigger SOS or share
-          trip.
+          Booking confirmations and receipts are sent here when you add one.
         </p>
 
         {error && (
@@ -687,22 +575,8 @@ const ProfileSetup: React.FC<{ uid: string; phone: string }> = ({
           style={{ background: "#E21B23" }}
         >
           {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-          {saving
-            ? "Saving…"
-            : photoFailed
-              ? "Retry Upload & Continue"
-              : "Save & Start Booking"}
+          {saving ? "Saving…" : "Save & Start Booking"}
         </button>
-
-        {photoFailed && !saving && (
-          <button
-            type="button"
-            onClick={() => void save(true)}
-            className="w-full mt-2 py-2 text-[12px] font-semibold text-[#666] bg-[#F5F5F5] hover:bg-[#EBEBEB] rounded-lg border border-[#E5E5E5] transition-colors"
-          >
-            Continue without photo
-          </button>
-        )}
 
         <button
           type="button"

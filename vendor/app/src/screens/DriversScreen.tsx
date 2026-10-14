@@ -114,11 +114,8 @@ export function DriversScreen() {
           <View key={i.phone} style={styles.invite}>
             <Ionicons name="mail-outline" size={18} color={colors.muted} />
             <View style={{ flex: 1 }}>
-              <Text style={type.body}>{i.name || 'Driver'}</Text>
-              <Text style={type.tiny}>
-                {formatPhone(i.phone)}
-                {i.vehicleAssignment ? ` · ${i.vehicleAssignment}` : ''}
-              </Text>
+              <Text style={type.body}>{formatPhone(i.phone)}</Text>
+              <Text style={type.tiny}>{i.vehicleAssignment ? `Vehicle ${i.vehicleAssignment}` : 'No vehicle suggested'}</Text>
             </View>
             <Pressable onPress={() => revoke(i.phone)} hitSlop={8} accessibilityRole="button" accessibilityLabel={`Revoke invite for ${i.phone}`}>
               <Text style={styles.revoke}>Revoke</Text>
@@ -169,7 +166,6 @@ function AssignSheet({ driver, onClose, onDone }: { driver: FleetDriver; onClose
 
 function InviteSheet({ onClose, onDone }: { onClose: () => void; onDone: (text: string) => void }) {
   const { identity, vehicles } = useVendorData();
-  const [name, setName] = useState('');
   const [mobile, setMobile] = useState('');
   const [vehicle, setVehicle] = useState('');
   const [busy, setBusy] = useState(false);
@@ -179,7 +175,7 @@ function InviteSheet({ onClose, onDone }: { onClose: () => void; onDone: (text: 
     setBusy(true);
     setError('');
     try {
-      await inviteDriver(identity, mobile, name, vehicle);
+      await inviteDriver(identity, mobile, vehicle);
       onDone(`Invite sent for ${formatPhone(mobile)}. Ask them to sign up in the NESAM Driver app with this number.`);
     } catch (e) {
       setError(e instanceof VendorActionError ? e.message : describeDataError(e));
@@ -194,7 +190,6 @@ function InviteSheet({ onClose, onDone }: { onClose: () => void; onDone: (text: 
         The driver signs up in the NESAM Driver app with this mobile number and is linked to your fleet automatically. NESAM still verifies their documents. Drivers who already have an account can’t be
         linked by invite — contact NESAM support.
       </Text>
-      <TextField label="Driver name" required value={name} onChangeText={setName} autoComplete="name" />
       <TextField label="Mobile number" required prefix="+91" value={mobile} onChangeText={(t) => setMobile(t.replace(/\D/g, '').slice(0, 10))} keyboardType="phone-pad" />
       {vehicles.length ? (
         <>

@@ -15,3 +15,20 @@ Only the three functions exported from `src/index.ts` belong to this deployment.
 `requestPartnerPayout` serializes requests per partner and checks verified, completed, paid non-cash trips. Fleet revenue belongs to the vendor, not both the vendor and driver. Cash already collected is not also payable by the platform. Toll reimbursements require admin `tollsApproved`. Legacy trips lacking `fareVerified` require explicit reconciliation. Rejected/cancelled requests release their reservation; Deferred requests continue to reserve it.
 
 Online gateway checkout and push are not enabled by this rollout. Existing UPI/cash handling needs administrator reconciliation of actual received money. Gateway credentials, FCM configuration and production signing remain external integrations. Signing was explicitly deferred by the owner.
+
+## Partner onboarding (spec page 13)
+
+Driver, vendor and vendor-employee onboarding collects only what page 13 lists. Ship these together:
+
+- Functions: `lookupVehicleByRegistration`, `requestVendorRegistration`, `issueVendorInvitation`, `revokeVendorInvitation`, `redeemVendorInvitation`.
+- Firestore rules: vendor accounts are created only by `redeemVendorInvitation`; `vehicle_lookups`, `vendor_requests`, `vendor_invitations` are server-written.
+- Clients: Driver app/web, Vendor app/web and the Admin panel. An old Vendor client that creates its own `vendors/{uid}` is refused by the new rules.
+
+**Vehicle auto-detection needs a data provider.** mParivahan / VAHAN has no public API for private companies, so the lookup is a provider adapter:
+set `VEHICLE_LOOKUP_PROVIDER`, `VEHICLE_LOOKUP_API_KEY` (and `VEHICLE_LOOKUP_API_URL` for a provider other than `surepass`) — see `.env.example`.
+Before go-live, run one real plate through the deployed function and confirm the provider's field names map (`src/domain/vehicleRegistry.ts`
+accepts the common spellings; an unfamiliar one yields a record without that field, never a wrong value). Without credentials the lookup answers
+`not_configured` and onboarding falls back to document upload with manual verification. Do not scrape the Parivahan site: it is captcha-protected
+and its terms forbid automated access.
+
+Set `VENDOR_PORTAL_URL` so the admin panel can build one-time invitation links.

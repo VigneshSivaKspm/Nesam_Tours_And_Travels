@@ -101,7 +101,7 @@ function Root() {
     if (!invite || invite.uid !== authUser.uid) return <FullScreenLoader label="Preparing registration…" />;
     const initial = emptyRegistration(formatPhone(phoneE164));
     if (invite.invite?.name) initial.profile.name = invite.invite.name;
-    return <RegistrationScreen key={`signup-${authUser.uid}`} uid={authUser.uid} mode="signup" initial={initial} vendorName={invite.invite?.vendorName} onSignOut={signOut} />;
+    return <RegistrationScreen key={`signup-${authUser.uid}`} uid={authUser.uid} mode="signup" initial={initial} vendorName={invite.invite?.vendorName} fleetDriver={!!invite.invite?.vendorId} onSignOut={signOut} />;
   }
 
   const status = account.driver.approvalStatus;
@@ -112,6 +112,7 @@ function Root() {
         uid={authUser.uid}
         mode="resubmit"
         initial={account}
+        fleetDriver={!!account.driver.vendorId}
         currentStatus={status}
         rejectionReason={account.driver.rejectionReason}
         onDone={() => setResubmitting(false)}

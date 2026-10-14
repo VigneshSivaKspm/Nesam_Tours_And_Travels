@@ -1,8 +1,11 @@
-// Six-step driver KYC validation. Copied from validateStep() in
-// driver/web/src/screens/RegistrationScreen.tsx and hardened with the
-// validators from vendor/web/src/utils/validation.ts (Aadhaar Verhoeff
-// checksum, stricter PAN / IFSC / UPI formats). Dates are compared as local
-// calendar days (the Web used UTC, which misjudged expiry before 05:30 IST).
+// Driver onboarding validation (spec page 13). The wizard collects only:
+//   step 1  selfie + driving licence
+//   step 2  vehicle: registration number (detected from the register), RC,
+//           insurance, FC, permit and the vehicle-front photo
+// Vendor employee drivers have step 1 only — their vehicle is assigned by the
+// vendor. Dates are compared as local calendar days (the Web used UTC, which
+// misjudged expiry before 05:30 IST). The format validators below are shared
+// with the profile screen.
 import type { RegistrationData } from '../types/driver';
 
 export type Errors = Record<string, string>;
@@ -52,85 +55,55 @@ export const IFSC_RE = /^[A-Z]{4}0[A-Z0-9]{6}$/;
 export const UPI_RE = /^[A-Za-z0-9.\-_]{2,256}@[A-Za-z][A-Za-z0-9]{1,63}$/;
 export const VEHICLE_NO_RE = /^[A-Z]{2}[\s-]?\d{1,2}[\s-]?[A-Z]{0,3}[\s-]?\d{1,4}$/;
 export const MOBILE_RE = /^[6-9]\d{9}$/;
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/;
 
-export function validateStep(step: number, d: RegistrationData, confirmAccount: string, today = localDateISO()): Errors {
+export interface ValidateOptions {
+  /** A vendor's employee: no vehicle step. */
+  fleetDriver?: boolean;
+  today?: string;
+}
+
+/** Plate as printed, with or without spaces/hyphens. */
+export const normalizePlate = (v: string) => v.toUpperCase().replace(/[^A-Z0-9]/g, '');
+export const isPlate = (v: string) => {
+  const n = normalizePlate(v);
+  return (n.length >= 6 && /^[A-Z]{2}\d{1,2}[A-Z]{0,3}\d{1,4}$/.test(n)) || /^\d{2}BH\d{4}[A-Z]{1,2}$/.test(n);
+};
+
+export function validateStep(step: number, d: RegistrationData, opts: ValidateOptions = {}): Errors {
+  const today = opts.today ?? localDateISO();
   const e: Errors = {};
   const req = (key: string, val: string, msg = 'Required') => {
     if (!val || !val.trim()) e[key] = msg;
   };
 
   if (step === 1) {
-    const p = d.profile;
-    req('photoUrl', p.photoUrl, 'Profile photo is required');
-    req('name', p.name);
-    if (p.name.trim() && (p.name.trim().length < 3 || !/^[A-Za-z][A-Za-z .'-]*$/.test(p.name.trim()))) e.name = 'Enter your full name as on your licence';
-    if (p.email.trim() && !EMAIL_RE.test(p.email.trim())) e.email = 'Invalid email';
-    req('dob', p.dob);
-    if (p.dob && ageOn(p.dob) < 18) e.dob = 'You must be at least 18 years old';
-    if (p.dob && ageOn(p.dob) > 75) e.dob = 'Please check your date of birth';
-    req('gender', p.gender);
-    req('address', p.address);
-    req('city', p.city);
-    if (!/^[1-9]\d{5}$/.test(p.pincode.trim())) e.pincode = 'Enter a 6-digit pincode';
-    req('emergencyContactName', p.emergencyContactName);
-    if (!MOBILE_RE.test(p.emergencyContact.replace(/\D/g, '').slice(-10))) e.emergencyContact = 'Enter a valid 10-digit mobile number';
-    else if (p.phone.replace(/\D/g, '').endsWith(p.emergencyContact.replace(/\D/g, '').slice(-10))) {
-      e.emergencyContact = 'Emergency contact must differ from your own number';
-    }
-  }
-
-  if (step === 2) {
-    const id = d.identity;
+    req('photoUrl', d.profile.photoUrl, 'A selfie is required');
     const l = d.license;
-    if (!isValidAadhaar(id.aadhaarNumber)) e.aadhaarNumber = 'Enter a valid 12-digit Aadhaar number';
-    req('aadhaarFrontUrl', id.aadhaarFrontUrl);
-    req('aadhaarBackUrl', id.aadhaarBackUrl);
-    if (id.panNumber.trim() && !PAN_RE.test(id.panNumber.trim().toUpperCase())) e.panNumber = 'Invalid PAN (e.g. ABCDE1234F)';
     if (l.number.replace(/[\s-]/g, '').length < 10 || !/^[A-Z]{2}/i.test(l.number.trim())) e.licenseNumber = 'Enter a valid driving licence number';
     req('licenseExpiry', l.expiryDate);
     if (l.expiryDate && !isFutureDate(l.expiryDate, today)) e.licenseExpiry = 'Licence has expired';
-    req('dlFront', l.frontPhotoUrl);
-    req('dlBack', l.backPhotoUrl);
+    req('dlFront', l.frontPhotoUrl, 'Licence front photo is required');
+    req('dlBack', l.backPhotoUrl, 'Licence back photo is required');
   }
 
-  if (step === 3) {
+  if (step === 2 && !opts.fleetDriver) {
     const v = d.vehicle;
-    if (!VEHICLE_NO_RE.test(v.vehicleNumber.trim().toUpperCase())) e.vehicleNumber = 'Enter a valid registration number (e.g. TN 01 AB 1234)';
-    req('make', v.make);
-    req('model', v.model);
-    const year = Number(v.year);
-    if (!year || year < 2000 || year > new Date().getFullYear()) e.year = 'Enter a valid year';
-    req('color', v.color);
-    if (!Number.isInteger(v.capacity) || v.capacity < 2 || v.capacity > 30) e.capacity = 'Enter seating capacity (2–30)';
-    req('vehFront', v.frontPhotoUrl);
-    req('vehRear', v.rearPhotoUrl);
-    req('vehSide', v.sidePhotoUrl);
-    req('vehInterior', v.interiorPhotoUrl);
-  }
-
-  if (step === 4) {
-    const v = d.vehicle;
-    req('rcNumber', v.rcNumber);
-    req('rcDocUrl', v.rcDocUrl);
-    req('insuranceNumber', v.insuranceNumber);
+    if (!isPlate(v.vehicleNumber)) e.vehicleNumber = 'Enter a valid registration number (e.g. TN 01 AB 1234)';
+    else if (!v.vahan || v.vahan.lookupId !== normalizePlate(v.vehicleNumber)) e.vehicleNumber = 'Check the vehicle first: tap "Detect vehicle".';
+    else if (v.vahan.status === 'not_found') e.vehicleNumber = 'This registration number was not found in the vehicle register. Check it and try again.';
+    else if (v.vahan.duplicate) e.vehicleNumber = 'This vehicle is already registered with another NESAM partner. Contact NESAM support.';
+    else if (v.vahan.status !== 'found' && !v.vahan.manualType) e.vehicleType = 'Choose your vehicle type.';
+    req('rcDocUrl', v.rcDocUrl, 'RC photo is required');
+    req('insuranceDocUrl', v.insuranceDocUrl, 'Insurance photo is required');
     req('insuranceExpiry', v.insuranceExpiry);
     if (v.insuranceExpiry && !isFutureDate(v.insuranceExpiry, today)) e.insuranceExpiry = 'Insurance has expired';
-    req('insuranceDocUrl', v.insuranceDocUrl);
+    req('fitnessDocUrl', v.fitnessDocUrl, 'FC photo is required');
+    req('fitnessExpiry', v.fitnessExpiry);
     if (v.fitnessExpiry && !isFutureDate(v.fitnessExpiry, today)) e.fitnessExpiry = 'Fitness certificate has expired';
-    req('statePermitNumber', v.statePermitNumber);
+    req('statePermitDocUrl', v.statePermitDocUrl, 'Permit photo is required');
     req('permitExpiry', v.permitExpiry);
     if (v.permitExpiry && !isFutureDate(v.permitExpiry, today)) e.permitExpiry = 'Permit has expired';
-    req('statePermitDocUrl', v.statePermitDocUrl);
-  }
-
-  if (step === 5) {
-    const b = d.bank;
-    req('accountHolder', b.accountHolder);
-    if (!/^\d{9,18}$/.test(b.accountNumber) || /^0+$/.test(b.accountNumber)) e.accountNumber = 'Enter a valid account number (9–18 digits)';
-    if (confirmAccount !== b.accountNumber) e.confirmAccount = 'Account numbers do not match';
-    if (!IFSC_RE.test(b.ifsc.trim().toUpperCase())) e.ifsc = 'Invalid IFSC (e.g. SBIN0001234)';
-    if (b.upiId.trim() && !UPI_RE.test(b.upiId.trim())) e.upiId = 'Invalid UPI ID';
+    req('frontPhotoUrl', v.frontPhotoUrl, 'Vehicle front photo is required');
   }
 
   return e;

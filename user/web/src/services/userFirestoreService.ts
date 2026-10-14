@@ -64,11 +64,10 @@ export function subscribeToCustomerProfile(
   );
 }
 
+/** Signup collects the name and an optional e-mail (spec page 20); photo and emergency contact are added later in the profile. */
 export interface NewCustomerProfile {
   name: string;
   email: string;
-  emergencyContact: string;
-  photoUrl: string;
 }
 
 /**
@@ -86,9 +85,9 @@ export async function registerCustomerProfile(p: NewCustomerProfile): Promise<vo
         phone: phone ? `+91 ${phone.slice(-10)}` : '',
         phoneE164: phone,
         email: p.email.trim().toLowerCase(),
-        photoUrl: p.photoUrl,
+        photoUrl: '',
         walletBalance: 0,
-        emergencyContact: p.emergencyContact,
+        emergencyContact: '',
         language: 'English',
         role: 'customer',
         status: 'Approved',

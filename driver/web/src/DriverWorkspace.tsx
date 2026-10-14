@@ -248,6 +248,7 @@ export const DriverWorkspace: React.FC<DriverWorkspaceProps> = ({ account, onSig
             uid={driver.id}
             mode="update"
             initial={account}
+            fleetDriver={!!driver.vendorId}
             currentStatus={driver.approvalStatus}
             onSubmitted={() => {
               setEditingDocs(false);

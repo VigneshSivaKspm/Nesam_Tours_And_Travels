@@ -1,118 +1,175 @@
-import { ageOn, isFutureDate, isValidAadhaar, localDateISO, maskAadhaar, maskAccount, validateStep } from '../src/validation/kyc';
-import { emptyRegistration } from '../src/services/driverService';
-import type { RegistrationData } from '../src/types/driver';
+import { ageOn, isFutureDate, isPlate, isValidAadhaar, localDateISO, maskAadhaar, maskAccount, normalizePlate, validateStep } from '../src/validation/kyc';
+import { buildNewDriverDoc, emptyRegistration, fallbackName, registrationFields } from '../src/services/driverService';
+import { snapshotFrom, vehiclePatchFrom } from '../src/services/vehicleLookup';
+import type { DetectedVehicle, RegistrationData, VehicleLookupResult } from '../src/types/driver';
 
-// 2345 6789 0124 passes the Verhoeff checksum (UIDAI test pattern).
-const VALID_AADHAAR = '234567890124';
+const TODAY = '2026-10-13';
 
+const found: DetectedVehicle = {
+  registrationNumber: 'TN01AB1234', make: 'Toyota', model: 'Innova Crysta', variant: '2.4 Gx', fuelType: 'Diesel', seatingCapacity: 8, passengerSeats: 7,
+  seatClass: '7+1', manufactureYear: '2021', colour: 'White', vehicleClass: 'LMV', usage: 'commercial', registrationStatus: 'ACTIVE', registrationActive: true,
+  registeredAt: 'Chennai', ownerNameMasked: 'R••• K•••', category: 'Premium SUV', specClass: 'Crysta',
+  validity: { fitnessUpto: '2027-06-30', insuranceUpto: '2026-12-31', permitUpto: '2027-03-31', taxUpto: '', pucUpto: '' },
+};
+const foundResult: VehicleLookupResult = { status: 'found', registrationNumber: 'TN01AB1234', vehicle: found, issues: [], duplicate: false, fetchedAtMs: 1, source: 'surepass' };
+
+/** A complete owner-driver application — exactly the spec page 13 inputs. */
 function filled(): RegistrationData {
   const d = emptyRegistration('+91 98765 43210');
-  d.profile = {
-    ...d.profile,
-    name: 'Murugan K',
-    photoUrl: 'https://x/p.jpg',
-    dob: '1990-05-10',
-    gender: 'Male',
-    address: '12 Main Rd',
-    city: 'Theni',
-    pincode: '625531',
-    emergencyContactName: 'Selvi',
-    emergencyContact: '9123456780',
-  };
-  d.identity = { aadhaarNumber: VALID_AADHAAR, aadhaarFrontUrl: 'u', aadhaarBackUrl: 'u', panNumber: 'ABCDE1234F', panPhotoUrl: '' };
+  d.profile = { ...d.profile, photoUrl: 'https://x/selfie.jpg' };
   d.license = { number: 'TN01 20190012345', expiryDate: '2099-01-01', frontPhotoUrl: 'u', backPhotoUrl: 'u' };
   d.vehicle = {
     ...d.vehicle,
     vehicleNumber: 'TN 01 AB 1234',
-    make: 'Maruti',
-    model: 'Dzire',
-    year: '2021',
-    color: 'White',
-    capacity: 4,
-    frontPhotoUrl: 'u',
-    rearPhotoUrl: 'u',
-    sidePhotoUrl: 'u',
-    interiorPhotoUrl: 'u',
     rcNumber: 'TN01AB1234',
     rcDocUrl: 'u',
-    insuranceNumber: 'POL1',
-    insuranceExpiry: '2099-01-01',
     insuranceDocUrl: 'u',
-    statePermitNumber: 'P1',
-    permitExpiry: '2099-01-01',
+    insuranceExpiry: '2099-01-01',
+    fitnessDocUrl: 'u',
+    fitnessExpiry: '2099-01-01',
     statePermitDocUrl: 'u',
+    permitExpiry: '2099-01-01',
+    frontPhotoUrl: 'u',
+    vahan: snapshotFrom(foundResult, false),
   };
-  d.bank = { accountHolder: 'Murugan K', accountNumber: '123456789012', ifsc: 'SBIN0001234', bankName: 'SBI', upiId: 'murugan@oksbi' };
   return d;
 }
 
-describe('KYC validation', () => {
-  it('accepts a complete application on every step', () => {
+describe('onboarding validation (spec page 13)', () => {
+  it('accepts a complete owner-driver application', () => {
     const d = filled();
-    for (let s = 1; s <= 5; s++) expect(validateStep(s, d, d.bank.accountNumber, '2026-09-28')).toEqual({});
+    expect(validateStep(1, d, { today: TODAY })).toEqual({});
+    expect(validateStep(2, d, { today: TODAY })).toEqual({});
   });
 
-  it('checks the Aadhaar Verhoeff checksum', () => {
-    expect(isValidAadhaar(VALID_AADHAAR)).toBe(true);
-    expect(isValidAadhaar('2345 6789 0124')).toBe(true);
-    expect(isValidAadhaar('234567890123')).toBe(false);
-    expect(isValidAadhaar('123456789012')).toBe(false);
-    expect(isValidAadhaar('23456789012')).toBe(false);
+  it('asks for nothing but the page-13 inputs', () => {
+    const d = emptyRegistration('+91 98765 43210');
+    expect(Object.keys(validateStep(1, d, { today: TODAY })).sort()).toEqual(['dlBack', 'dlFront', 'licenseExpiry', 'licenseNumber', 'photoUrl']);
+    // No name, date of birth, address, Aadhaar, PAN, emergency contact or bank is ever required.
+    const all = { ...validateStep(1, d, { today: TODAY }), ...validateStep(2, d, { today: TODAY }) };
+    for (const k of ['name', 'dob', 'gender', 'address', 'city', 'pincode', 'emergencyContact', 'aadhaarNumber', 'panNumber', 'accountNumber', 'ifsc', 'make', 'model', 'color', 'year', 'insuranceNumber', 'statePermitNumber']) {
+      expect(all).not.toHaveProperty(k);
+    }
   });
 
-  it('rejects invalid identity, licence and vehicle data', () => {
-    const d = filled();
-    d.identity.panNumber = 'ABC123';
-    d.license.expiryDate = '2020-01-01';
-    const e2 = validateStep(2, d, '', '2026-09-28');
-    expect(e2.panNumber).toBeTruthy();
-    expect(e2.licenseExpiry).toMatch(/expired/i);
-    d.vehicle.vehicleNumber = 'NOTAPLATE';
-    d.vehicle.capacity = 0;
-    const e3 = validateStep(3, d, '', '2026-09-28');
-    expect(e3.vehicleNumber).toBeTruthy();
-    expect(e3.capacity).toBeTruthy();
+  it('vendor employee drivers have no vehicle step', () => {
+    expect(validateStep(2, emptyRegistration('+91 98765 43210'), { fleetDriver: true, today: TODAY })).toEqual({});
   });
 
-  it('requires unexpired vehicle documents', () => {
+  it('a selfie, licence number, validity and both sides are required; an expired licence is refused', () => {
     const d = filled();
-    d.vehicle.insuranceExpiry = '2026-09-28';
-    d.vehicle.permitExpiry = '';
-    const e = validateStep(4, d, '', '2026-09-28');
+    d.license.expiryDate = '2026-10-12';
+    d.license.number = 'TN01';
+    d.profile.photoUrl = '';
+    const e = validateStep(1, d, { today: TODAY });
+    expect(e.licenseExpiry).toMatch(/expired/i);
+    expect(e.licenseNumber).toBeTruthy();
+    expect(e.photoUrl).toBeTruthy();
+  });
+
+  it('RC, insurance, FC and permit each need a document and an unexpired validity', () => {
+    const d = filled();
+    d.vehicle.insuranceExpiry = '2026-10-13';
+    d.vehicle.fitnessExpiry = '';
+    d.vehicle.permitExpiry = '2026-01-01';
+    d.vehicle.rcDocUrl = '';
+    d.vehicle.frontPhotoUrl = '';
+    const e = validateStep(2, d, { today: TODAY });
     expect(e.insuranceExpiry).toMatch(/expired/i);
-    expect(e.permitExpiry).toBeTruthy();
+    expect(e.fitnessExpiry).toBeTruthy();
+    expect(e.permitExpiry).toMatch(/expired/i);
+    expect(e.rcDocUrl).toBeTruthy();
+    expect(e.frontPhotoUrl).toBeTruthy();
   });
 
-  it('validates bank details and the confirmation', () => {
+  it('the vehicle must be detected before the application can continue', () => {
     const d = filled();
-    expect(validateStep(5, d, '999', '2026-09-28').confirmAccount).toBeTruthy();
-    d.bank.ifsc = 'SBIN1234567';
-    d.bank.upiId = 'no-at-sign';
-    d.bank.accountNumber = '000000000';
-    const e = validateStep(5, d, d.bank.accountNumber, '2026-09-28');
-    expect(e.ifsc).toBeTruthy();
-    expect(e.upiId).toBeTruthy();
-    expect(e.accountNumber).toBeTruthy();
+    d.vehicle.vahan = undefined;
+    expect(validateStep(2, d, { today: TODAY }).vehicleNumber).toMatch(/detect/i);
+    // A detection for a different plate does not count.
+    d.vehicle.vahan = snapshotFrom({ ...foundResult, registrationNumber: 'TN09ZZ0001' }, false);
+    expect(validateStep(2, d, { today: TODAY }).vehicleNumber).toMatch(/detect/i);
+    d.vehicle.vahan = snapshotFrom({ status: 'not_found', registrationNumber: 'TN01AB1234' }, false);
+    expect(validateStep(2, d, { today: TODAY }).vehicleNumber).toMatch(/not found/i);
+    d.vehicle.vahan = snapshotFrom({ ...foundResult, duplicate: true }, false);
+    expect(validateStep(2, d, { today: TODAY }).vehicleNumber).toMatch(/already registered/i);
   });
 
-  it('enforces age and a distinct emergency contact', () => {
+  it('when the register is unreachable the partner picks the type; otherwise the application is held', () => {
     const d = filled();
-    d.profile.dob = localDateISO(new Date(new Date().getFullYear() - 17, 0, 1));
-    d.profile.emergencyContact = '9876543210';
-    const e = validateStep(1, d, '', '2026-09-28');
-    expect(e.dob).toMatch(/18/);
-    expect(e.emergencyContact).toMatch(/differ/);
+    d.vehicle.vahan = snapshotFrom({ status: 'unavailable', registrationNumber: 'TN01AB1234' }, false);
+    expect(validateStep(2, d, { today: TODAY }).vehicleType).toBeTruthy();
+    d.vehicle.vahan = snapshotFrom({ status: 'not_configured', registrationNumber: 'TN01AB1234' }, true);
+    expect(validateStep(2, d, { today: TODAY })).toEqual({});
+  });
+
+  it('plates are compared without spaces or hyphens', () => {
+    expect(normalizePlate('tn 01-ab 1234')).toBe('TN01AB1234');
+    expect(isPlate('TN 01 AB 1234')).toBe(true);
+    expect(isPlate('22BH1234AA')).toBe(true);
+    expect(isPlate('NOTAPLATE')).toBe(false);
+    expect(isPlate('TN01')).toBe(false);
+  });
+});
+
+describe('vehicle detection mapping', () => {
+  it('fills the form from the register: seats exclude the driver', () => {
+    expect(vehiclePatchFrom(found)).toEqual({ make: 'Toyota', model: 'Innova Crysta 2.4 Gx', year: '2021', color: 'White', fuelType: 'Diesel', capacity: 7, vehicleType: 'Premium SUV' });
+  });
+
+  it('keeps what the app needs to resume, never the owner', () => {
+    const s = snapshotFrom(foundResult, false);
+    expect(s).toMatchObject({ status: 'found', lookupId: 'TN01AB1234', seatClass: '7+1', specClass: 'Crysta', duplicate: false });
+    expect(JSON.stringify(s)).not.toMatch(/R•••/);
+  });
+});
+
+describe('what onboarding writes', () => {
+  it('writes the licence, selfie and vehicle documents — and nothing else', () => {
+    const f = registrationFields(filled());
+    expect(Object.keys(f).sort()).toEqual(
+      ['docStatus', 'license', 'licenseExpiry', 'licenseInfo', 'licenseNumber', 'photoUrl', 'submittedAt', 'updatedAt', 'vehicle', 'vehicleInfo', 'vehicleNumber', 'vehicleType', 'updatedAt'].filter((k, i, a) => a.indexOf(k) === i).sort(),
+    );
+    expect(f).not.toHaveProperty('bank');
+    expect(f).not.toHaveProperty('identity');
+    expect(f).not.toHaveProperty('address');
+    expect(f.vehicleNumber).toBe('TN01AB1234');
+  });
+
+  it('a resubmission cannot wipe contact or payout details saved later', () => {
+    const f = registrationFields(filled());
+    for (const k of ['bank', 'identity', 'email', 'dob', 'gender', 'address', 'city', 'pincode', 'emergencyContact', 'emergencyContactName', 'name']) expect(f).not.toHaveProperty(k);
+  });
+
+  it("a vendor's employee is registered without a vehicle", () => {
+    const d = buildNewDriverDoc('drv1', '+919876543210', emptyRegistration('+91 98765 43210'), { vendorId: 'v1', vendorName: 'Fleet', preApproved: false });
+    expect(d).toMatchObject({ vendorId: 'v1', status: 'Pending', role: 'driver' });
+    expect(d).not.toHaveProperty('vehicleInfo');
+    expect(d).not.toHaveProperty('vehicleNumber');
+  });
+
+  it('shows a readable name until staff record it from the licence', () => {
+    expect(fallbackName('+91 98765 43210')).toBe('Driver ••3210');
+    expect(fallbackName('')).toBe('NESAM Driver');
+  });
+});
+
+describe('shared format helpers', () => {
+  it('checks the Aadhaar Verhoeff checksum', () => {
+    expect(isValidAadhaar('234567890124')).toBe(true);
+    expect(isValidAadhaar('234567890123')).toBe(false);
+  });
+
+  it('computes age and compares dates as local calendar days', () => {
     expect(ageOn('2000-09-29', new Date(2018, 8, 28))).toBe(17);
     expect(ageOn('2000-09-28', new Date(2018, 8, 28))).toBe(18);
-  });
-
-  it('compares dates as local calendar days', () => {
     expect(isFutureDate('2026-09-29', '2026-09-28')).toBe(true);
     expect(isFutureDate('2026-09-28', '2026-09-28')).toBe(false);
+    expect(localDateISO(new Date(2026, 0, 5))).toBe('2026-01-05');
   });
 
   it('masks sensitive numbers', () => {
-    expect(maskAadhaar(VALID_AADHAAR)).toBe('XXXX XXXX 0124');
+    expect(maskAadhaar('234567890124')).toBe('XXXX XXXX 0124');
     expect(maskAccount('123456789012')).toBe('••••••••9012');
   });
 });

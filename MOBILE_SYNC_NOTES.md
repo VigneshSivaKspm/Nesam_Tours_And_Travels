@@ -103,3 +103,16 @@ The server now owns every partner-money number. Reference implementations:
 - **Bid Review & Awarding Drawer**: Clear vendor bids listing with bid amount, counter-offers, notes, and distinct status badges (`Pending`, `Awarded`, `Rejected`). Includes direct `awardMarketplaceBid` and `rejectBid` callables.
 - **Independent Driver Assignment**: Seamless inline selector for eligible independent drivers (`status: Approved`, `presenceStatus: Online`, no `vendorId`).
 - **Responsive & Accessible**: Fully responsive desktop and mobile layouts with accessible contrast, feedback banners (`Notice`), toast alerts (`useToast`), and zero spurious red borders.
+
+## Partner onboarding, spec page 13 (13 Oct 2026)
+
+Driver and Vendor, app and web, collect only what page 13 lists; vehicles are auto-detected from the registration number.
+
+| Piece | Driver app | Driver web | Vendor app | Vendor web | Admin |
+|---|---|---|---|---|---|
+| Onboarding screens | `RegistrationScreen.tsx` (2 steps + review; employee: 1) | `RegistrationScreen.tsx` (same) | `OnboardingWizard.tsx` (business+account, fleet, review) | `BusinessAccountStep`, `FleetStep`, `ReviewStep` | — |
+| Validation | `validation/kyc.ts` | `utils/onboardingValidation.ts` | `utils/fleet.ts` | `utils/fleet.ts` | — |
+| Vehicle lookup | `services/vehicleLookup.ts` | `services/vehicleLookup.ts` | `services/vehicleLookup.ts` | `services/vehicleLookup.ts` | `components/VehicleRegisterCheck.tsx` |
+| Invitation gate | — | — | `RegistrationGate.tsx` (+ `nesamvendor://…?invite=` deep link) | `RegistrationGate.tsx` (`?invite=` in the URL) | Vendors page: requests + issue link |
+
+Server: `lookupVehicleByRegistration`, `requestVendorRegistration`, `issueVendorInvitation`, `revokeVendorInvitation`, `redeemVendorInvitation`. Rules: `vehicle_lookups`, `vendor_requests`, `vendor_invitations` are server-written; `vendors` cannot be created by the client. The validators and the lookup mapping are mirrored by hand in each app — change them together (tests: `driver/app/__tests__/kyc.test.ts`, `vendor/app/__tests__/fleet.test.ts`, `tests/domain/vehicleRegistry.test.mjs`).

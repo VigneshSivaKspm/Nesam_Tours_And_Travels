@@ -143,19 +143,29 @@ export const DocumentsVerificationScreen: React.FC<DocumentsVerificationScreenPr
       <div className="bg-white rounded-2xl border border-gray-200 p-6 shadow-sm space-y-4">
         <h2 className="text-base font-bold text-gray-900 border-b pb-2">Verified Documents</h2>
         <div className="grid md:grid-cols-2 gap-4">
-          <Info label={BUSINESS_REG_TYPES.find((t) => t.value === d?.businessRegistration.type)?.label ?? 'Business Registration'}>
-            <div className="font-mono mb-2">{d?.businessRegistration.number || '—'}</div>
-            <FileLinks files={d?.businessRegistration.files ?? []} />
-          </Info>
-          <Info label={IDENTITY_PROOF_TYPES.find((t) => t.value === d?.identityProof.type)?.label ?? 'Identity Proof'}>
-            <div className="font-mono mb-2">{d?.identityProof.maskedNumber || '—'}</div>
-            <FileLinks files={d?.identityProof.files ?? []} />
-          </Info>
+          {d && (
+            <Info label={BUSINESS_REG_TYPES.find((t) => t.value === d.businessRegistration.type)?.label ?? 'Business Registration'}>
+              <div className="font-mono mb-2">{d.businessRegistration.number || '—'}</div>
+              <FileLinks files={d.businessRegistration.files ?? []} />
+            </Info>
+          )}
+          {d && (
+            <Info label={IDENTITY_PROOF_TYPES.find((t) => t.value === d.identityProof.type)?.label ?? 'Identity Proof'}>
+              <div className="font-mono mb-2">{d.identityProof.maskedNumber || '—'}</div>
+              <FileLinks files={d.identityProof.files ?? []} />
+            </Info>
+          )}
           <Info label="Registration Certificates (RC)">
             <FileLinks files={f?.rcFiles ?? []} />
           </Info>
-          <Info label="Insurance / Fitness">
+          <Info label="Insurance">
             <FileLinks files={f?.insuranceFiles ?? []} />
+          </Info>
+          <Info label="Fitness Certificates (FC)">
+            <FileLinks files={f?.fcFiles ?? []} />
+          </Info>
+          <Info label="Permits">
+            <FileLinks files={f?.permitFiles ?? []} />
           </Info>
           <Info label="Fleet">
             {f ? `${f.fleetSize} vehicle(s) · ${f.vehicleTypes.join(', ')}` : '—'}

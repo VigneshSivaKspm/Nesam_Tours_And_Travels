@@ -3,7 +3,6 @@ import {
   getDoc,
   onSnapshot,
   serverTimestamp,
-  setDoc,
   updateDoc,
   writeBatch,
   type DocumentData,
@@ -17,12 +16,13 @@ import type {
   OnboardingSection,
   PayoutDetails,
   PayoutSummary,
-  VendorDocuments,
   VendorProfile,
   VendorRecord,
   VendorStatus,
 } from '../types';
 import { withRetry, withTimeout } from '../utils/retry';
+import { fleetIsComplete } from '../utils/fleet';
+import { callFunction } from './callables';
 
 const VENDORS = 'vendors';
 
@@ -203,71 +203,50 @@ export async function getVendorKyc(): Promise<VendorKyc> {
 const nextStep = (record: VendorRecord | null, completedIndex: number) =>
   Math.max(record?.onboardingStep ?? 0, completedIndex + 1);
 
+/** Contact fields onboarding no longer asks for; kept as empty values so the profile screens that edit them still work. */
+const EMPTY_ADDRESS = { line1: '', line2: '', city: '', state: '', pincode: '' };
+
 /**
- * Step 1. Creates vendors/{uid} (status INCOMPLETE) on first save so the
- * wizard can be resumed from any device; later saves merge.
+ * Step 1 (spec page 13: "business/account details"). The vendors/{uid} draft
+ * already exists — redeemVendorInvitation created it — so this only updates it.
+ * Full bank details go to vendor_kyc; the vendor document keeps the masked summary.
  */
-export async function saveBusinessStep(record: VendorRecord | null, business: BusinessInfo): Promise<void> {
+export async function saveBusinessAccountStep(
+  record: VendorRecord | null,
+  business: Pick<BusinessInfo, 'vendorName' | 'businessName'>,
+  payout: PayoutDetails,
+): Promise<void> {
   const uid = requireUid();
-  const summary = {
-    business,
+  if (!record) throw new Error('Your invitation has not been applied to this account yet. Open your invitation link again.');
+  const summary: PayoutSummary = {
+    accountHolderName: payout.accountHolderName,
+    bankLast4: payout.accountNumber.slice(-4),
+    ifsc: payout.ifsc,
+    upiId: payout.upiId,
+  };
+  const prev = record.business;
+  const batch = writeBatch(db);
+  batch.set(doc(db, VENDOR_KYC_COLLECTION, uid), { payout, updatedAt: serverTimestamp() }, { merge: true });
+  batch.update(doc(db, VENDORS, uid), {
+    business: {
+      vendorName: business.vendorName,
+      businessName: business.businessName,
+      email: prev?.email ?? '',
+      altPhone: prev?.altPhone ?? '',
+      address: prev?.address ?? EMPTY_ADDRESS,
+    },
     companyName: business.businessName,
     name: business.businessName,
     contactPerson: business.vendorName,
     owner: business.vendorName,
-    email: business.email,
-    city: business.address.city,
+    payoutSummary: summary,
     onboardingStep: nextStep(record, 0),
     updatedAt: serverTimestamp(),
-  };
-  const ref = doc(db, VENDORS, uid);
-  if (!record) {
-    await withTimeout(
-      setDoc(ref, {
-        ...summary,
-        uid,
-        role: 'vendor',
-        phone: auth.currentUser?.phoneNumber || '',
-        status: 'INCOMPLETE',
-        createdAt: serverTimestamp(),
-      }),
-    );
-  } else {
-    await withTimeout(updateDoc(ref, summary));
-  }
-}
-
-/** Step 2. Public doc keeps file paths + masked ID; full ID number goes to vendor_kyc. */
-export async function saveDocumentsStep(
-  record: VendorRecord,
-  documents: VendorDocuments,
-  identityNumber: string,
-): Promise<void> {
-  const uid = requireUid();
-  const batch = writeBatch(db);
-  batch.update(doc(db, VENDORS, uid), {
-    documents,
-    gstin: documents.businessRegistration.type === 'GST' ? documents.businessRegistration.number : '',
-    panNumber: documents.identityProof.type === 'PAN' ? documents.identityProof.maskedNumber : '',
-    onboardingStep: nextStep(record, 1),
-    updatedAt: serverTimestamp(),
   });
-  // Aadhaar: store only the masked form (UIDAI guidance); PAN/passport in full.
-  batch.set(
-    doc(db, VENDOR_KYC_COLLECTION, uid),
-    {
-      identityProof: {
-        type: documents.identityProof.type,
-        number: documents.identityProof.type === 'AADHAAR' ? documents.identityProof.maskedNumber : identityNumber,
-      },
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true },
-  );
   await withTimeout(batch.commit());
 }
 
-/** Step 3. */
+/** Step 2 (spec page 13: "fleet documentation"). */
 export async function saveFleetStep(record: VendorRecord, fleet: FleetDetails): Promise<void> {
   const uid = requireUid();
   await withTimeout(
@@ -275,43 +254,45 @@ export async function saveFleetStep(record: VendorRecord, fleet: FleetDetails): 
       fleet,
       fleetSize: fleet.fleetSize,
       totalFleetSize: fleet.fleetSize,
-      onboardingStep: nextStep(record, 2),
+      onboardingStep: nextStep(record, 1),
       updatedAt: serverTimestamp(),
     }),
   );
-}
-
-/** Step 4. Full bank details → vendor_kyc; masked summary → vendors doc. */
-export async function savePayoutStep(record: VendorRecord, payout: PayoutDetails): Promise<void> {
-  const uid = requireUid();
-  const summary: PayoutSummary = {
-    accountHolderName: payout.accountHolderName,
-    bankLast4: payout.accountNumber.slice(-4),
-    ifsc: payout.ifsc,
-    upiId: payout.upiId,
-  };
-  const batch = writeBatch(db);
-  batch.set(doc(db, VENDOR_KYC_COLLECTION, uid), { payout, updatedAt: serverTimestamp() }, { merge: true });
-  batch.update(doc(db, VENDORS, uid), {
-    payoutSummary: summary,
-    onboardingStep: nextStep(record, 3),
-    updatedAt: serverTimestamp(),
-  });
-  await withTimeout(batch.commit());
 }
 
 /** Returns the sections that are still missing required data. */
 export function missingSections(record: VendorRecord): OnboardingSection[] {
   const missing: OnboardingSection[] = [];
   if (!record.business?.businessName || !record.business?.vendorName) missing.push('business');
-  const d = record.documents;
-  if (!d || !d.businessRegistration?.files?.length || !d.identityProof?.files?.length) missing.push('documents');
-  const f = record.fleet;
-  if (!f || !f.vehicleTypes?.length || !f.rcFiles?.length || !f.vehiclePhotos?.length || !f.insuranceFiles?.length) {
-    missing.push('fleet');
-  }
   if (!record.payoutSummary?.bankLast4) missing.push('payout');
+  if (!fleetIsComplete(record.fleet)) missing.push('fleet');
   return missing;
+}
+
+// ── Registration request → one-time invitation ──────────────────────────────
+
+export type RegistrationState = 'requested' | 'invited' | 'registered';
+
+/** Asks NESAM to open a vendor account for the signed-in, phone-verified user. */
+export async function requestVendorRegistration(): Promise<RegistrationState> {
+  const r = await callFunction<Record<string, never>, { status: RegistrationState }>('requestVendorRegistration', {});
+  return r.status;
+}
+
+/** Uses a one-time invitation (link or code) to create this phone's vendor application. */
+export async function redeemVendorInvitation(tokenOrLink: string): Promise<void> {
+  await callFunction<{ token: string }, { ok: true }>('redeemVendorInvitation', { token: tokenOrLink.trim() });
+}
+
+/** The request this user already made, if any (read-only; written by the server). */
+export async function getRegistrationRequest(): Promise<{ status: string } | null> {
+  const uid = requireUid();
+  try {
+    const snap = await getDoc(doc(db, 'vendor_requests', uid));
+    return snap.exists() ? { status: String(snap.data().status ?? 'Requested') } : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

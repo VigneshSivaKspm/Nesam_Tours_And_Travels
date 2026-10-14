@@ -19,6 +19,7 @@ export function PhotoField({
   required,
   showError,
   onBusyChange,
+  cameraOnly,
 }: {
   label: string;
   hint?: string;
@@ -29,6 +30,8 @@ export function PhotoField({
   required?: boolean;
   showError?: boolean;
   onBusyChange?: (busy: boolean) => void;
+  /** Selfies: the live camera only, no gallery. */
+  cameraOnly?: boolean;
 }) {
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState('');
@@ -36,7 +39,7 @@ export function PhotoField({
 
   const pick = async () => {
     if (uploading) return;
-    const source = await choosePhotoSource(label);
+    const source = cameraOnly ? 'camera' : await choosePhotoSource(label);
     if (!source) return;
     setError('');
     try {
@@ -78,7 +81,7 @@ export function PhotoField({
         ) : (
           <View style={{ alignItems: 'center' }}>
             <Ionicons name="camera-outline" size={26} color={colors.faint} />
-            <Text style={type.tiny}>Tap to capture or choose</Text>
+            <Text style={type.tiny}>{cameraOnly ? 'Tap to take a photo' : 'Tap to capture or choose'}</Text>
           </View>
         )}
         {uploading ? (

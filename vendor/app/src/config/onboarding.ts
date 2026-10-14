@@ -42,20 +42,29 @@ export const INDIAN_STATES = [
   'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal',
 ];
 
-/** Wizard order. Index == onboardingStep stored on the vendor doc. */
+/**
+ * Wizard order (spec page 13): business + account details, then fleet
+ * documentation, then review. Index == onboardingStep stored on the vendor doc.
+ * Admin-flagged 'payout' maps to the first step and legacy 'documents' too.
+ */
 export const ONBOARDING_STEPS: { key: OnboardingSection | 'review'; title: string; short: string }[] = [
-  { key: 'business', title: 'Personal & Business Info', short: 'Business' },
-  { key: 'documents', title: 'Document Uploads', short: 'Documents' },
-  { key: 'fleet', title: 'Fleet & Vehicle Details', short: 'Fleet' },
-  { key: 'payout', title: 'Payout & Banking', short: 'Payout' },
+  { key: 'business', title: 'Business & account details', short: 'Business' },
+  { key: 'fleet', title: 'Fleet documentation', short: 'Fleet' },
   { key: 'review', title: 'Review & Submit', short: 'Submit' },
 ];
 
+/** The wizard step an admin-flagged section belongs to. */
+export function stepOfSection(section: OnboardingSection | 'review'): number {
+  if (section === 'fleet') return 1;
+  if (section === 'review') return 2;
+  return 0;
+}
+
 export const SECTION_LABELS: Record<OnboardingSection, string> = {
-  business: 'Personal & Business Info',
+  business: 'Business details',
   documents: 'Documents',
-  fleet: 'Fleet & Vehicles',
-  payout: 'Payout & Banking',
+  fleet: 'Fleet documentation',
+  payout: 'Account details',
 };
 
 /** Storage sub-folders under vendors/{uid}/onboarding/. */
@@ -64,4 +73,6 @@ export type UploadCategory =
   | 'identity_proof'
   | 'vehicle_rc'
   | 'vehicle_photos'
-  | 'vehicle_insurance';
+  | 'vehicle_insurance'
+  | 'vehicle_fc'
+  | 'vehicle_permit';

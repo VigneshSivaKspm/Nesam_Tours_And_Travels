@@ -351,13 +351,39 @@ test('driver: payout requests are Pending-only and self-scoped', async () => {
 
 // ── Vendor app ──────────────────────────────────────────────────────────────
 
-test('vendor: onboarding starts INCOMPLETE and is bound to the verified phone', async () => {
-  const base = { uid: 'newVen', role: 'vendor', phone: '+919822222222', onboardingStep: 1 };
+test('vendor: an account exists only through a redeemed invitation (spec p.13)', async () => {
+  const base = { uid: 'newVen', role: 'vendor', phone: '+919822222222', onboardingStep: 0 };
+  // No client — not even the verified owner — can create the vendor document.
+  await assertFails(setDoc(doc(ctx.newVendor, 'vendors/newVen'), { ...base, status: 'INCOMPLETE', createdAt: serverTimestamp() }));
   await assertFails(setDoc(doc(ctx.newVendor, 'vendors/newVen'), { ...base, status: 'APPROVED' }));
-  await assertFails(setDoc(doc(ctx.newVendor, 'vendors/newVen'), { ...base, phone: '+910000000000', status: 'INCOMPLETE' }));
-  await assertSucceeds(setDoc(doc(ctx.newVendor, 'vendors/newVen'), { ...base, status: 'INCOMPLETE', createdAt: serverTimestamp() }));
-  await assertFails(updateDoc(doc(ctx.newVendor, 'vendors/newVen'), { status: 'PENDING_APPROVAL', submittedAt: serverTimestamp() }));
+  // redeemVendorInvitation (Admin SDK) creates the INCOMPLETE draft.
+  await env.withSecurityRulesDisabled((c) => setDoc(doc(c.firestore(), 'vendors/newVen'), { ...base, status: 'INCOMPLETE', invitationId: 'h', createdAt: new Date() }));
+  const vehicle = { registrationNumber: 'TN01AB1234', source: 'vahan' };
+  const submit = { status: 'PENDING_APPROVAL', submittedAt: serverTimestamp(), updatedAt: serverTimestamp() };
+  // Submitting without business, account details or a vehicle is refused.
+  await assertFails(updateDoc(doc(ctx.newVendor, 'vendors/newVen'), submit));
+  await assertSucceeds(updateDoc(doc(ctx.newVendor, 'vendors/newVen'), {
+    business: { vendorName: 'Ravi', businessName: 'Sri Balaji Travels' }, payoutSummary: { accountHolderName: 'Ravi', bankLast4: '9012', ifsc: 'SBIN0001234', upiId: '' },
+    fleet: { vehicles: [], fleetSize: 0 }, onboardingStep: 2, updatedAt: serverTimestamp(),
+  }));
   await assertSucceeds(setDoc(doc(ctx.newVendor, 'vendor_kyc/newVen'), { payout: { accountNumber: '123456789012' }, updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(doc(ctx.newVendor, 'vendors/newVen'), submit)); // empty fleet
+  await assertSucceeds(updateDoc(doc(ctx.newVendor, 'vendors/newVen'), { fleet: { vehicles: [vehicle], fleetSize: 1 }, updatedAt: serverTimestamp() }));
+  await assertFails(updateDoc(doc(ctx.newVendor, 'vendors/newVen'), { ...submit, status: 'APPROVED' })); // no self-approval
+  await assertSucceeds(updateDoc(doc(ctx.newVendor, 'vendors/newVen'), submit));
+  // The invitation, request and register-lookup collections are server-only.
+  await assertFails(setDoc(doc(ctx.newVendor, 'vendor_invitations/' + 'a'.repeat(64)), { phone: '+919822222222', status: 'Issued' }));
+  await assertFails(getDoc(doc(ctx.newVendor, 'vendor_invitations/' + 'a'.repeat(64))));
+  await assertFails(setDoc(doc(ctx.newVendor, 'vendor_requests/newVen'), { uid: 'newVen', status: 'Requested' }));
+  await assertFails(setDoc(doc(ctx.newVendor, 'vehicle_lookups/TN01AB1234'), { status: 'found' }));
+  await assertFails(getDoc(doc(ctx.newVendor, 'vehicle_lookups/TN01AB1234')));
+  await assertFails(getDoc(doc(ctx.newVendor, 'vehicle_lookup_quota/newVen')));
+  // A requester may read only their own registration request.
+  await env.withSecurityRulesDisabled((c) => setDoc(doc(c.firestore(), 'vendor_requests/newVen'), { uid: 'newVen', status: 'Requested' }));
+  await assertSucceeds(getDoc(doc(ctx.newVendor, 'vendor_requests/newVen')));
+  await assertFails(getDoc(doc(ctx.v1, 'vendor_requests/newVen')));
+  // Account details are writable while the application is editable, locked once submitted.
+  await assertFails(setDoc(doc(ctx.newVendor, 'vendor_kyc/newVen'), { payout: { accountNumber: '123456789012' }, updatedAt: serverTimestamp() }));
   // Unapproved vendors see no marketplace.
   await assertFails(getDocs(query(collection(ctx.newVendor, 'marketplace_trips'), where('status', '==', 'Open'))));
 });

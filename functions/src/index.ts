@@ -18,3 +18,5 @@ export { saveCommissionPolicy } from './commission';
 export { awardMarketplaceBid, postBookingToMarketplace, assignIndependentDriver } from './marketplace';
 export { requestPartnerPayout, rebuildPartnerLedger, onBookingFinanceChange, onPayoutRequestWritten } from './ledger';
 export { sendNotification } from './broadcast';
+export { lookupVehicleByRegistration } from './vehicleLookup';
+export { requestVendorRegistration, issueVendorInvitation, revokeVendorInvitation, redeemVendorInvitation } from './vendorOnboarding';

@@ -3,13 +3,16 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { subscribeToCollection, COLLECTIONS } from "../services/adminFirestoreService";
 import {
   createVendorInvite,
+  issueVendorInvitation,
   describeAdminError,
   getVendorKyc,
   resolveStorageUrl,
   reviewVendor,
+  type IssuedInvitation,
   type ReviewAction,
   type VendorKycView,
 } from "../services/vendorReviewService";
+import { VehicleRegisterCheck } from "../components/VehicleRegisterCheck";
 import {
   normalizeVendorStatus,
   SECTION_LABELS,
@@ -25,6 +28,36 @@ interface StoredFile {
   name: string;
   contentType: string;
   size: number;
+}
+
+/** One vehicle of the application (vendor onboarding, spec page 13). */
+interface FleetVehicleDoc {
+  registrationNumber: string;
+  source: "vahan" | "manual";
+  category: string;
+  make: string;
+  model: string;
+  fuelType: string;
+  passengerSeats: number;
+  seatClass: string;
+  year: string;
+  issues: string[];
+  insuranceUpto: string;
+  fitnessUpto: string;
+  permitUpto: string;
+  rcFiles: StoredFile[];
+  insuranceFiles: StoredFile[];
+  fitnessFiles: StoredFile[];
+  permitFiles: StoredFile[];
+  frontPhotoFiles: StoredFile[];
+}
+
+/** vendor_requests/{uid}: a verified mobile asking for an account. */
+interface VendorRequest {
+  id: string;
+  phone?: string;
+  status?: "Requested" | "Invited" | "Registered";
+  createdAt?: any;
 }
 
 interface VendorDoc {
@@ -54,6 +87,9 @@ interface VendorDoc {
     rcFiles: StoredFile[];
     vehiclePhotos: StoredFile[];
     insuranceFiles: StoredFile[];
+    fcFiles?: StoredFile[];
+    permitFiles?: StoredFile[];
+    vehicles?: FleetVehicleDoc[];
   };
   payoutSummary?: { accountHolderName: string; bankLast4: string; ifsc: string; upiId: string };
   review?: { action?: string; note?: string; flaggedSections?: OnboardingSection[]; reviewedAt?: any; reviewedByEmail?: string };
@@ -103,7 +139,12 @@ export default function Vendors() {
   const [tab, setTab] = useState<TabKey>("PENDING_APPROVAL");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [showInvite, setShowInvite] = useState(false);
+  const [showInvite, setShowInvite] = useState<null | { phone10?: string; requestId?: string }>(null);
+  const [requests, setRequests] = useState<VendorRequest[]>([]);
+
+  useEffect(() => {
+    return subscribeToCollection<VendorRequest>("vendor_requests", (data) => setRequests(data));
+  }, []);
 
   useEffect(() => {
     return subscribeToCollection<any>(COLLECTIONS.VENDORS, (data) => {
@@ -111,6 +152,11 @@ export default function Vendors() {
       setLoading(false);
     });
   }, []);
+
+  const openRequests = useMemo(
+    () => requests.filter((r) => r.status === "Requested" || r.status === "Invited").sort((a, b) => (toDate(a.createdAt)?.getTime() ?? 0) - (toDate(b.createdAt)?.getTime() ?? 0)),
+    [requests],
+  );
 
   const counts = useMemo(() => {
     const c: Record<string, number> = { ALL: vendors.length };
@@ -165,6 +211,27 @@ export default function Vendors() {
         </div>
       )}
 
+      {openRequests.length > 0 && (
+        <div className="bg-white border border-[#E5E5E5] rounded-xl shadow-sm p-4 space-y-2" data-testid="registration-requests">
+          <div className="text-[13px] font-bold text-[#111]">Registration requests ({openRequests.length})</div>
+          <p className="text-[11px] text-[#999]">A verified mobile asked to register as a vendor. Issue a one-time invitation link to let them continue.</p>
+          {openRequests.map((r) => (
+            <div key={r.id} className="flex items-center gap-3 text-[12px] border-t border-[#F0F0F0] pt-2">
+              <span className="font-semibold text-[#111]">{r.phone}</span>
+              <span className="text-[#999]">requested {fmtDate(r.createdAt)}</span>
+              {r.status === "Invited" && <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200">Invitation issued</span>}
+              <button
+                onClick={() => setShowInvite({ phone10: (r.phone ?? "").replace(/^\+91/, ""), requestId: r.id })}
+                className="ml-auto px-3 py-1.5 text-[11px] font-semibold text-white rounded-lg hover:opacity-90"
+                style={{ background: "#E21B23" }}
+              >
+                {r.status === "Invited" ? "Issue a new link" : "Issue invitation"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="flex flex-wrap gap-1 bg-white rounded-xl border border-[#E5E5E5] p-1 w-fit shadow-sm">
         {TABS.map((t) => (
@@ -187,7 +254,7 @@ export default function Vendors() {
           placeholder="Search business, owner, phone, email…"
           className="flex-1 min-w-48 px-4 py-2 text-[13px] bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg focus:outline-none focus:border-[#E21B23] placeholder-[#999]"
         />
-        <button onClick={() => setShowInvite(true)} className="ml-auto px-4 py-2 text-[12px] font-semibold text-white rounded-lg hover:opacity-90" style={{ background: "#E21B23" }}>
+        <button onClick={() => setShowInvite({})} className="ml-auto px-4 py-2 text-[12px] font-semibold text-white rounded-lg hover:opacity-90" style={{ background: "#E21B23" }}>
           + Invite Vendor
         </button>
       </div>
@@ -257,7 +324,7 @@ export default function Vendors() {
           That vendor no longer exists.
         </div>
       )}
-      {showInvite && <InviteVendorModal onClose={() => setShowInvite(false)} />}
+      {showInvite && <InviteVendorModal initial={showInvite} onClose={() => setShowInvite(null)} />}
     </div>
   );
 }
@@ -385,7 +452,9 @@ function VendorReviewDrawer({ vendor, onClose }: { vendor: VendorDoc; onClose: (
   const d = vendor.documents;
   const f = vendor.fleet;
   const p = vendor.payoutSummary;
-  const incomplete = !b || !d || !f || !p;
+  // Spec page 13: business details, account details and fleet documentation. Applications made
+  // before that onboarding also carry `documents`; it is no longer required.
+  const incomplete = !b || !f || !p || !(f.vehicles?.length || f.rcFiles?.length);
 
   const act = async (action: ReviewAction) => {
     if ((action === "request_changes" || action === "reject" || action === "suspend") && note.trim().length < 5) {
@@ -467,38 +536,69 @@ function VendorReviewDrawer({ vendor, onClose }: { vendor: VendorDoc; onClose: (
             </div>
           )}
 
-          <Card title="Personal & Business" section="business" flagged={vendor.review?.flaggedSections}>
-            <Row label="Vendor name" value={b?.vendorName ?? ownerName(vendor)} />
+          <Card title="Business details" section="business" flagged={vendor.review?.flaggedSections}>
+            <Row label="Owner name" value={b?.vendorName ?? ownerName(vendor)} />
             <Row label="Business name" value={b?.businessName ?? displayName(vendor)} />
-            <Row label="Email" value={b?.email ?? vendor.email} />
             <Row label="Login phone" value={vendor.phone} />
-            <Row label="Alternate phone" value={b?.altPhone ? `+91 ${b.altPhone}` : ""} />
-            <Row label="Address" value={b ? [b.address.line1, b.address.line2, b.address.city, b.address.state, b.address.pincode].filter(Boolean).join(", ") : vendor.city} />
+            {(b?.email || vendor.email) && <Row label="Email" value={b?.email ?? vendor.email} />}
+            {b?.altPhone && <Row label="Alternate phone" value={`+91 ${b.altPhone}`} />}
+            {b?.address?.line1 && <Row label="Address" value={[b.address.line1, b.address.line2, b.address.city, b.address.state, b.address.pincode].filter(Boolean).join(", ")} />}
           </Card>
 
-          <Card title="Documents" section="documents" flagged={vendor.review?.flaggedSections}>
-            <Row label={DOC_TYPE_LABEL[d?.businessRegistration.type ?? ""] ?? "Registration"} value={d?.businessRegistration.number} />
-            <Row
-              label={`${DOC_TYPE_LABEL[d?.identityProof.type ?? ""] ?? "ID"} number`}
-              value={kycState === "ok" && kyc?.identityNumber ? kyc.identityNumber : d?.identityProof.maskedNumber}
-            />
-            <div className="grid gap-3 mt-3">
-              <FileGroup label="Business registration" files={d?.businessRegistration.files} />
-              <FileGroup label="Identity proof" files={d?.identityProof.files} />
-            </div>
+          {d && (
+            <Card title="Documents (earlier application)" section="documents" flagged={vendor.review?.flaggedSections}>
+              <Row label={DOC_TYPE_LABEL[d.businessRegistration.type ?? ""] ?? "Registration"} value={d.businessRegistration.number} />
+              <Row
+                label={`${DOC_TYPE_LABEL[d.identityProof.type ?? ""] ?? "ID"} number`}
+                value={kycState === "ok" && kyc?.identityNumber ? kyc.identityNumber : d.identityProof.maskedNumber}
+              />
+              <div className="grid gap-3 mt-3">
+                <FileGroup label="Business registration" files={d.businessRegistration.files} />
+                <FileGroup label="Identity proof" files={d.identityProof.files} />
+              </div>
+            </Card>
+          )}
+
+          <Card title="Fleet documentation" section="fleet" flagged={vendor.review?.flaggedSections}>
+            <Row label="Vehicles" value={f ? `${f.vehicles?.length ?? f.fleetSize}` : ""} />
+            {f?.vehicles?.length ? (
+              <div className="space-y-3 mt-3">
+                {f.vehicles.map((v) => (
+                  <div key={v.registrationNumber} className="rounded-lg border border-[#E5E5E5] bg-white p-3 space-y-2" data-testid="fleet-vehicle">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[13px] font-bold font-mono text-[#111]">{v.registrationNumber}</span>
+                      <span className="text-[11px] text-[#666]">{[v.make, v.model].filter(Boolean).join(" ") || v.category}</span>
+                      <span className={`ml-auto text-[10px] font-bold px-2 py-0.5 rounded ${v.source === "vahan" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                        {v.source === "vahan" ? "Register verified" : "Manual check"}
+                      </span>
+                    </div>
+                    <VehicleRegisterCheck declared={{ plate: v.registrationNumber, category: v.category, insuranceUpto: v.insuranceUpto, fitnessUpto: v.fitnessUpto, permitUpto: v.permitUpto }} />
+                    <Row label="Insurance valid till" value={v.insuranceUpto} />
+                    <Row label="FC valid till" value={v.fitnessUpto} />
+                    <Row label="Permit valid till" value={v.permitUpto} />
+                    <div className="grid gap-3">
+                      <FileGroup label="RC" files={v.rcFiles} />
+                      <FileGroup label="Insurance" files={v.insuranceFiles} />
+                      <FileGroup label="FC" files={v.fitnessFiles} />
+                      <FileGroup label="Permit" files={v.permitFiles} />
+                      <FileGroup label="Vehicle front" files={v.frontPhotoFiles} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <>
+                <Row label="Vehicle types" value={f?.vehicleTypes.join(", ")} />
+                <div className="grid gap-3 mt-3">
+                  <FileGroup label="Registration certificates (RC)" files={f?.rcFiles} />
+                  <FileGroup label="Vehicle photos" files={f?.vehiclePhotos} />
+                  <FileGroup label="Insurance / fitness" files={f?.insuranceFiles} />
+                </div>
+              </>
+            )}
           </Card>
 
-          <Card title="Fleet" section="fleet" flagged={vendor.review?.flaggedSections}>
-            <Row label="Vehicle types" value={f?.vehicleTypes.join(", ")} />
-            <Row label="Initial fleet size" value={f ? `${f.fleetSize}` : ""} />
-            <div className="grid gap-3 mt-3">
-              <FileGroup label="Registration certificates (RC)" files={f?.rcFiles} />
-              <FileGroup label="Vehicle photos" files={f?.vehiclePhotos} />
-              <FileGroup label="Insurance / fitness" files={f?.insuranceFiles} />
-            </div>
-          </Card>
-
-          <Card title="Payout & Banking" section="payout" flagged={vendor.review?.flaggedSections}>
+          <Card title="Account details" section="payout" flagged={vendor.review?.flaggedSections}>
             {kycState === "loading" && <div className="text-[12px] text-[#999]">Loading private bank details…</div>}
             {kycState === "error" && (
               <div className="text-[12px] text-[#E21B23]">
@@ -609,21 +709,29 @@ function VendorReviewDrawer({ vendor, onClose }: { vendor: VendorDoc; onClose: (
 
 // ─── Invite modal ───────────────────────────────────────────────────────────
 
-function InviteVendorModal({ onClose }: { onClose: () => void }) {
-  const [form, setForm] = useState({ phone10: "", companyName: "", contactPerson: "", email: "", city: "", preApproved: false });
+/**
+ * Issues a one-time invitation link (spec page 13). The link is shown once —
+ * only its hash is stored — and works for this mobile number, once.
+ * "Pre-approve" additionally records the number so the first submission goes
+ * live without manual review (the vendor still completes every step).
+ */
+function InviteVendorModal({ initial, onClose }: { initial: { phone10?: string; requestId?: string }; onClose: () => void }) {
+  const [phone10, setPhone10] = useState(initial.phone10 ?? "");
+  const [preApproved, setPreApproved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [done, setDone] = useState(false);
+  const [issued, setIssued] = useState<IssuedInvitation | null>(null);
+  const [copied, setCopied] = useState("");
 
   const submit = async () => {
-    if (!/^[6-9]\d{9}$/.test(form.phone10)) return setError("Enter a valid 10-digit mobile number.");
-    if (form.companyName.trim().length < 2) return setError("Enter the business name.");
-    if (form.email && !/^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(form.email.trim())) return setError("Enter a valid email or leave it blank.");
+    if (!/^[6-9]\d{9}$/.test(phone10)) return setError("Enter a valid 10-digit mobile number.");
     setSaving(true);
     setError("");
     try {
-      await createVendorInvite(form);
-      setDone(true);
+      if (preApproved) {
+        await createVendorInvite({ phone10, companyName: "", contactPerson: "", email: "", city: "", preApproved: true });
+      }
+      setIssued(await issueVendorInvitation({ phone10, requestId: initial.requestId }));
     } catch (err) {
       setError(describeAdminError(err));
     } finally {
@@ -631,42 +739,90 @@ function InviteVendorModal({ onClose }: { onClose: () => void }) {
     }
   };
 
-  const input = "w-full px-3 py-2 border border-[#E5E5E5] rounded-lg text-[12px] focus:outline-none focus:border-[#E21B23]";
+  const copy = async (what: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(what);
+      setTimeout(() => setCopied(""), 1500);
+    } catch {
+      setError("Couldn't copy. Select the text and copy it manually.");
+    }
+  };
+
+  const share = issued?.link || issued?.token || "";
+  const message = issued
+    ? `NESAM Tours & Travels fleet partner invitation: ${issued.link || `open the NESAM Vendor app and paste this code: ${issued.token}`}\nThis link works once, for ${issued.phone}, until ${new Date(issued.expiresAtMs).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}.`
+    : "";
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl p-6 max-w-sm w-full space-y-4 shadow-2xl">
+      <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
         <div className="flex items-center justify-between border-b pb-3">
-          <h3 className="text-[15px] font-bold text-[#111]">Invite Vendor</h3>
+          <h3 className="text-[15px] font-bold text-[#111]">Issue vendor invitation</h3>
           <button onClick={onClose} className="text-[#999] hover:text-[#111]">✕</button>
         </div>
-        {done ? (
-          <div className="space-y-3">
+        {issued ? (
+          <div className="space-y-3" data-testid="issued-invitation">
             <p className="text-[13px] text-[#444]">
-              Invite saved for <span className="font-semibold">+91 {form.phone10}</span>. Ask the vendor to open the Fleet Partner
-              portal and choose <span className="font-semibold">Sign Up</span> with this number — their details will be prefilled.
+              Invitation issued for <span className="font-semibold">{issued.phone}</span>. It works <span className="font-semibold">once</span> and expires{" "}
+              {new Date(issued.expiresAtMs).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}. Send it to the vendor now — it
+              cannot be shown again.
             </p>
+            {issued.link ? (
+              <div className="space-y-1">
+                <div className="text-[11px] font-semibold text-[#666]">Invitation link</div>
+                <div className="text-[12px] font-mono break-all bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg p-2">{issued.link}</div>
+              </div>
+            ) : (
+              <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                No vendor portal address is configured on the server (VENDOR_PORTAL_URL), so only the code is shown. The vendor pastes it into the Vendor app or portal.
+              </div>
+            )}
+            <div className="space-y-1">
+              <div className="text-[11px] font-semibold text-[#666]">Code</div>
+              <div className="text-[12px] font-mono break-all bg-[#F5F5F5] border border-[#E5E5E5] rounded-lg p-2">{issued.token}</div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {issued.link && (
+                <button onClick={() => copy("link", share)} className="px-3 py-2 text-[12px] font-semibold border border-[#E5E5E5] rounded-lg hover:bg-[#F5F5F5]">
+                  {copied === "link" ? "Copied ✓" : "Copy link"}
+                </button>
+              )}
+              <button onClick={() => copy("code", issued.token)} className="px-3 py-2 text-[12px] font-semibold border border-[#E5E5E5] rounded-lg hover:bg-[#F5F5F5]">
+                {copied === "code" ? "Copied ✓" : "Copy code"}
+              </button>
+              <a
+                href={`https://wa.me/${issued.phone.replace(/\D/g, "")}?text=${encodeURIComponent(message)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-2 text-[12px] font-semibold border border-[#E5E5E5] rounded-lg hover:bg-[#F5F5F5]"
+              >
+                Send on WhatsApp
+              </a>
+            </div>
+            {error && <div className="text-[12px] text-[#E21B23] bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>}
             <button onClick={onClose} className="w-full py-2.5 text-white text-[12px] font-bold rounded-lg" style={{ background: "#E21B23" }}>Done</button>
           </div>
         ) : (
           <div className="space-y-3">
+            <p className="text-[12px] text-[#666]">
+              The vendor signs in to the Vendor app or portal with this number and opens the link. They then enter business and account details and
+              document each vehicle; you review the application before approval.
+            </p>
             <div className="flex items-center border border-[#E5E5E5] rounded-lg px-3 focus-within:border-[#E21B23]">
               <span className="text-[12px] font-bold text-[#E21B23] mr-2">+91</span>
               <input
-                placeholder="Mobile number *"
+                placeholder="Vendor mobile number *"
                 inputMode="numeric"
                 maxLength={10}
-                value={form.phone10}
-                onChange={(e) => setForm({ ...form, phone10: e.target.value.replace(/\D/g, "") })}
+                value={phone10}
+                onChange={(e) => setPhone10(e.target.value.replace(/\D/g, ""))}
                 className="w-full py-2 text-[12px] focus:outline-none"
+                readOnly={!!initial.requestId}
               />
             </div>
-            <input placeholder="Business name *" className={input} value={form.companyName} onChange={(e) => setForm({ ...form, companyName: e.target.value })} />
-            <input placeholder="Owner / contact person" className={input} value={form.contactPerson} onChange={(e) => setForm({ ...form, contactPerson: e.target.value })} />
-            <input placeholder="Email" type="email" className={input} value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
-            <input placeholder="City" className={input} value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} />
             <label className="flex items-start gap-2 text-[12px] text-[#444]">
-              <input type="checkbox" className="mt-0.5 accent-[#E21B23]" checked={form.preApproved} onChange={(e) => setForm({ ...form, preApproved: e.target.checked })} />
+              <input type="checkbox" className="mt-0.5 accent-[#E21B23]" checked={preApproved} onChange={(e) => setPreApproved(e.target.checked)} />
               <span>
                 Pre-approve — skip manual review when this vendor submits.
                 <span className="block text-[11px] text-[#999]">They must still complete every onboarding step.</span>
@@ -674,7 +830,7 @@ function InviteVendorModal({ onClose }: { onClose: () => void }) {
             </label>
             {error && <div className="text-[12px] text-[#E21B23] bg-red-50 border border-red-200 rounded-lg px-3 py-2">{error}</div>}
             <button onClick={submit} disabled={saving} className="w-full py-2.5 text-white text-[12px] font-bold rounded-lg disabled:opacity-60" style={{ background: "#E21B23" }}>
-              {saving ? "Saving…" : "Send Invite"}
+              {saving ? "Issuing…" : "Issue invitation link"}
             </button>
           </div>
         )}

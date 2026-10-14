@@ -14,6 +14,7 @@ export function UpdateDocumentsScreen({ navigation }: Props) {
       uid={account.driver.id}
       mode="update"
       initial={account}
+      fleetDriver={!!account.driver.vendorId}
       currentStatus={account.driver.approvalStatus}
       onDone={() => navigation.goBack()}
       onCancel={() => navigation.goBack()}

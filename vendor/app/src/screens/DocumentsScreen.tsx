@@ -93,12 +93,14 @@ export function DocumentsScreen() {
         ))
       )}
 
-      <Text style={[type.h3, styles.section]}>Company documents</Text>
-      {group(BUSINESS_REG_TYPES.find((t) => t.value === d?.businessRegistration.type)?.label ?? 'Business registration', d?.businessRegistration.files, d?.businessRegistration.number)}
-      {group(IDENTITY_PROOF_TYPES.find((t) => t.value === d?.identityProof.type)?.label ?? 'Identity proof', d?.identityProof.files, d?.identityProof.maskedNumber)}
+      <Text style={[type.h3, styles.section]}>Application documents</Text>
+      {d ? group(BUSINESS_REG_TYPES.find((t) => t.value === d.businessRegistration.type)?.label ?? 'Business registration', d.businessRegistration.files, d.businessRegistration.number) : null}
+      {d ? group(IDENTITY_PROOF_TYPES.find((t) => t.value === d.identityProof.type)?.label ?? 'Identity proof', d.identityProof.files, d.identityProof.maskedNumber) : null}
       {group('Vehicle RCs (onboarding)', f?.rcFiles)}
+      {group('Insurance (onboarding)', f?.insuranceFiles)}
+      {group('Fitness certificates (onboarding)', f?.fcFiles)}
+      {group('Permits (onboarding)', f?.permitFiles)}
       {group('Vehicle photos (onboarding)', f?.vehiclePhotos)}
-      {group('Insurance / fitness (onboarding)', f?.insuranceFiles)}
     </Screen>
   );
 }

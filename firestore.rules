@@ -201,6 +201,31 @@ service cloud.firestore {
       allow write: if can('people');
     }
 
+    // ── Vendor registration: request → one-time invitation → account ────────
+    // All three are written only by the callables in vendorOnboarding.ts. The
+    // invitation id is the SHA-256 of the token, so reading the document does
+    // not let anyone redeem it.
+    match /vendor_requests/{uid} {
+      allow read: if isOwner(uid) || can('people');
+      allow write: if false;
+    }
+    match /vendor_invitations/{id} {
+      allow read: if can('people');
+      allow write: if false;
+    }
+
+    // ── Vehicle register lookups (functions/src/vehicleLookup.ts) ───────────
+    // Cached VAHAN records, keyed by the plate. Staff reviewing a driver or a
+    // fleet read them; no client can write one, so "verified from the register"
+    // cannot be forged from an app.
+    match /vehicle_lookups/{registration} {
+      allow read: if can('people') || can('fleet');
+      allow write: if false;
+    }
+    match /vehicle_lookup_quota/{uid} {
+      allow read, write: if false;
+    }
+
     // ── Vendors ─────────────────────────────────────────────────────────────
     // Statuses in which the vendor may edit and (re)submit the application.
     // 'Pending' / 'Needs Correction' / 'Rejected' are legacy spellings.
@@ -222,36 +247,27 @@ service cloud.firestore {
              && exists(docPath('vendor_invites', authPhone()))
              && get(docPath('vendor_invites', authPhone())).data.get('preApproved', false) == true;
     }
-    // Submission: every section present, stamped with server time. Goes to
+    // Submission (spec page 13): business + account details and at least one
+    // vehicle with its documents, stamped with server time. Goes to
     // PENDING_APPROVAL, or straight to APPROVED for an admin pre-approved
     // phone number on a first submission.
     function vendorSubmitOk() {
       let d = request.resource.data;
       return d.submittedAt == request.time
-             && d.business is map && d.fleet is map && d.payoutSummary is map
-             && d.documents is map
-             && d.documents.businessRegistration.files.size() > 0
-             && d.documents.identityProof.files.size() > 0
-             && d.fleet.vehicleTypes.size() > 0
-             && d.fleet.rcFiles.size() > 0
-             && d.fleet.vehiclePhotos.size() > 0
-             && d.fleet.insuranceFiles.size() > 0
+             && d.business is map && d.payoutSummary is map && d.fleet is map
+             && d.fleet.vehicles is list
+             && d.fleet.vehicles.size() > 0
+             && d.fleet.vehicles.size() <= 100
              && (d.status == 'PENDING_APPROVAL'
                  || (d.status == 'APPROVED'
                      && resource.data.status in ['INCOMPLETE', 'Pending']
                      && vendorInvitePreApproved()));
     }
     match /vendors/{id} {
-      // Self-signup always starts as an INCOMPLETE draft bound to the
-      // verified phone number of the signed-in user.
-      allow create: if can('people') || (
-                       isOwner(id)
-                       && request.resource.data.keys().hasOnly(vendorOwnerKeys())
-                       && request.resource.data.role == 'vendor'
-                       && request.resource.data.uid == id
-                       && request.resource.data.phone == authPhone()
-                       && request.resource.data.status == 'INCOMPLETE'
-                     );
+      // A vendor account exists only after staff issued a one-time invitation
+      // and its owner redeemed it (redeemVendorInvitation creates the INCOMPLETE
+      // draft). Clients can no longer create one themselves.
+      allow create: if can('people');
       // Only the vendor itself, admins, and drivers attached to this vendor.
       // (Bank/ID numbers are not here — see vendor_kyc.)
       allow read: if isOwner(id) || isAdmin()

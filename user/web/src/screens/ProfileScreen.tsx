@@ -120,16 +120,17 @@ const EditProfileModal: React.FC<{ open: boolean; user: UserProfile; onClose: ()
 
   const save = async () => {
     if (!isValidName(name)) return setError('Enter your full name (letters and spaces, 2–60 characters).');
-    if (!isValidEmail(email)) return setError('Enter a valid email address.');
-    if (!isValidIndianMobile(emergency)) return setError('Enter a 10-digit emergency contact number.');
-    if (emergency === localMobile(user.phone)) return setError('Emergency contact must differ from your own number.');
+    // E-mail and the emergency contact are optional; a value that is typed must still be valid.
+    if (email.trim() && !isValidEmail(email)) return setError('Enter a valid email address, or leave it blank.');
+    if (emergency && !isValidIndianMobile(emergency)) return setError('Enter a 10-digit emergency contact number, or leave it blank.');
+    if (emergency && emergency === localMobile(user.phone)) return setError('Emergency contact must differ from your own number.');
     setBusy(true);
     setError('');
     try {
       const allowedFields = {
         name,
         email: email.trim().toLowerCase(),
-        emergencyContact: `+91 ${emergency}`,
+        emergencyContact: emergency ? `+91 ${emergency}` : '',
       };
       await updateCustomerProfile(user.uid, allowedFields);
       onClose();
@@ -151,13 +152,13 @@ const EditProfileModal: React.FC<{ open: boolean; user: UserProfile; onClose: ()
         </div>
         <div>
           <label htmlFor="ep-email" className={labelCls}>
-            Email
+            Email (optional)
           </label>
           <input id="ep-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} className={inputCls} />
         </div>
         <div>
           <label htmlFor="ep-em" className={labelCls}>
-            Emergency contact (+91)
+            Emergency contact (+91, optional)
           </label>
           <input
             id="ep-em"

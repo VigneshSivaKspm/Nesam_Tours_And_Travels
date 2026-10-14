@@ -482,15 +482,13 @@ export function subscribeToInvites(vendorId: string, cb: (i: DriverInviteRecord[
 }
 
 /** Pre-registers a driver by phone (doc id = +91XXXXXXXXXX). Never pre-approved. */
-export async function inviteDriver(vendor: VendorIdentity, mobile10: string, name: string, vehicleNumber: string): Promise<void> {
+export async function inviteDriver(vendor: VendorIdentity, mobile10: string, vehicleNumber: string): Promise<void> {
   if (!/^[6-9]\d{9}$/.test(mobile10)) throw new VendorActionError('invalid-phone', 'Enter a valid 10-digit mobile number.');
-  if (name.trim().length < 2) throw new VendorActionError('invalid-name', 'Enter the driver’s name.');
   const phone = `+91${mobile10}`;
   try {
     await withTimeout(
       setDoc(doc(db, 'driver_invites', phone), {
         phone,
-        name: name.trim(),
         vendorId: vendor.id,
         vendorName: vendor.companyName,
         vehicleAssignment: vehicleNumber.trim().toUpperCase() || null,

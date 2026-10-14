@@ -70,11 +70,10 @@ export function subscribeToCustomerProfile(
   );
 }
 
+/** Signup collects the name and an optional e-mail (spec page 20); photo and emergency contact are added later in the profile. */
 export interface NewCustomerProfile {
   name: string;
   email: string;
-  emergencyContact: string;
-  photoUrl: string;
 }
 
 /** The customers/{uid} document firestore.rules accepts from a new customer. */
@@ -85,9 +84,9 @@ export function buildNewCustomerDoc(uid: string, phoneE164: string, p: NewCustom
     phone: phoneE164 ? `+91 ${phoneE164.slice(-10)}` : '',
     phoneE164,
     email: p.email.trim().toLowerCase(),
-    photoUrl: p.photoUrl,
+    photoUrl: '',
     walletBalance: 0,
-    emergencyContact: p.emergencyContact,
+    emergencyContact: '',
     language: 'English',
     role: 'customer',
     status: 'Approved',

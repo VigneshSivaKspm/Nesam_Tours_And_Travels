@@ -28,11 +28,13 @@ const Shell: React.FC<{ children: React.ReactNode; onSignOut: () => void }> = ({
 );
 
 const Checklist: React.FC<{ account: DriverAccount }> = ({ account }) => {
+  // Spec page 13: selfie, licence and — for an owner-driver — the vehicle documents.
   const items = [
-    { icon: FileText, label: 'Personal details & photo', done: !!account.profile.photoUrl },
+    { icon: FileText, label: 'Selfie', done: !!account.profile.photoUrl },
     { icon: CreditCard, label: `Driving licence ${account.license.number}`, done: !!account.license.frontPhotoUrl },
-    { icon: Car, label: `Vehicle ${account.vehicle.vehicleNumber}`, done: !!account.vehicle.rcDocUrl },
-    { icon: Landmark, label: 'Bank account for payouts', done: !!account.bank.accountNumber },
+    ...(account.driver.vendorId
+      ? []
+      : [{ icon: Car, label: `Vehicle ${account.vehicle.vehicleNumber}`, done: !!account.vehicle.rcDocUrl && !!account.vehicle.insuranceDocUrl && !!account.vehicle.statePermitDocUrl }]),
   ];
   return (
     <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-2.5">

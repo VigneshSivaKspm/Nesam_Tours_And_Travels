@@ -138,6 +138,8 @@ export function App() {
         uid={authUser.uid}
         mode="signup"
         initial={signupInitial!}
+        vendorName={invite?.vendorName}
+        fleetDriver={!!invite?.vendorId}
         onSubmitted={() => { /* live subscription picks up the new doc */ }}
         onSignOut={handleSignOut}
       />
@@ -154,6 +156,7 @@ export function App() {
         uid={authUser.uid}
         mode="resubmit"
         initial={account}
+        fleetDriver={!!account.driver.vendorId}
         currentStatus={status}
         rejectionReason={account.driver.rejectionReason}
         onSubmitted={() => setResubmitting(false)}

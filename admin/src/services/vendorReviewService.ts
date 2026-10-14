@@ -1,6 +1,7 @@
 import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
 import { getDownloadURL, ref } from "firebase/storage";
 import { auth, db, storage } from "./firebase";
+import { callFunction } from "./callables";
 import type { OnboardingSection, VendorStatus } from "../utils/vendorStatus";
 
 export type ReviewAction = "approve" | "request_changes" | "reject" | "suspend" | "reinstate";
@@ -102,4 +103,68 @@ export function describeAdminError(error: unknown): string {
   if (code.includes("not-found")) return "This vendor no longer exists.";
   if (code.includes("unavailable")) return "Firestore is unreachable. Check your connection and retry.";
   return (error as { message?: string })?.message || "Something went wrong. Please try again.";
+}
+
+// ── One-time invitation links (spec page 13) ────────────────────────────────
+
+export interface IssuedInvitation {
+  /** Shown once: only its hash is stored, so it cannot be read back later. */
+  token: string;
+  invitationId: string;
+  phone: string;
+  expiresAtMs: number;
+  /** Full link when the deployment knows the vendor portal address (VENDOR_PORTAL_URL); empty otherwise. */
+  link: string;
+}
+
+/** Issues a link for a verified request (requestId) or a typed mobile number. A new link retires the previous one. */
+export async function issueVendorInvitation(input: { phone10?: string; requestId?: string; validHours?: number }): Promise<IssuedInvitation> {
+  return callFunction<{ phone?: string; requestId?: string; validHours?: number }, IssuedInvitation>("issueVendorInvitation", {
+    ...(input.phone10 ? { phone: `+91${input.phone10}` } : {}),
+    ...(input.requestId ? { requestId: input.requestId } : {}),
+    ...(input.validHours ? { validHours: input.validHours } : {}),
+  });
+}
+
+/** What the vehicle register returned for a plate (server-written vehicle_lookups/{plate}; staff read-only). */
+export interface VehicleLookupView {
+  status: string;
+  provider: string;
+  fetchedAtMs: number;
+  record: {
+    make: string;
+    model: string;
+    variant: string;
+    fuelType: string;
+    seatingCapacity: number;
+    passengerSeats: number;
+    seatClass: string;
+    manufactureYear: string;
+    vehicleClass: string;
+    usage: string;
+    registrationStatus: string;
+    registrationActive: boolean | null;
+    ownerNameMasked: string;
+    category: string;
+    specClass: string;
+    validity: { fitnessUpto: string; insuranceUpto: string; permitUpto: string; taxUpto: string; pucUpto: string };
+  };
+}
+
+const lookupCache = new Map<string, Promise<VehicleLookupView | null>>();
+export function getVehicleLookup(plate: string): Promise<VehicleLookupView | null> {
+  const id = plate.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!id) return Promise.resolve(null);
+  let p = lookupCache.get(id);
+  if (!p) {
+    p = getDoc(doc(db, "vehicle_lookups", id)).then((snap) => {
+      const d = snap.data();
+      if (!snap.exists() || !d?.record) return null;
+      const ms = typeof d.fetchedAt?.toMillis === "function" ? d.fetchedAt.toMillis() : 0;
+      return { status: String(d.status ?? ""), provider: String(d.provider ?? ""), fetchedAtMs: ms, record: d.record } as VehicleLookupView;
+    });
+    p.catch(() => lookupCache.delete(id));
+    lookupCache.set(id, p);
+  }
+  return p;
 }

@@ -1,33 +1,43 @@
-// Six-step driver KYC wizard (native port of driver/web RegistrationScreen.tsx).
-// Modes: 'signup' (new driver), 'resubmit' (after rejection), 'update'
-// (approved driver refreshing documents). The signup draft survives an app
-// restart (AsyncStorage; the Web used localStorage).
-import React, { useEffect, useRef, useState } from 'react';
-import { Alert, BackHandler, Image, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+// Driver onboarding wizard (spec page 13). An owner-driver provides exactly:
+//   verified mobile → selfie + driving licence → vehicle (registration number,
+//   RC, insurance, FC, permit, vehicle-front photo) → Admin review.
+// The vehicle's make, model, seats and fuel are not typed: they are detected
+// from the registration number (lookupVehicleByRegistration → VAHAN).
+// A vendor's employee driver has the licence step only — the vendor assigns the
+// vehicle. Modes: 'signup', 'resubmit' (after rejection), 'update' (approved
+// driver refreshing documents). The signup draft survives an app restart.
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, BackHandler, Image, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
-import type { ApprovalStatus, RegistrationData, VehicleCategory } from '../types/driver';
-import { Button, Card, Notice, Row, TextField } from '../components/ui';
+import type { ApprovalStatus, DetectedVehicle, RegistrationData, VehicleCategory, VehicleLookupResult } from '../types/driver';
+import { Badge, Button, Card, Notice, Row, TextField } from '../components/ui';
 import { DateField, OptionChips, PhotoField, displayDate } from '../components/forms';
 import { registerDriver, resubmitDriverDocuments } from '../services/driverService';
-import { localDateISO, maskAadhaar, maskAccount, validateStep, type Errors } from '../validation/kyc';
+import { lookupVehicle, snapshotFrom, vehiclePatchFrom } from '../services/vehicleLookup';
+import { isPlate, localDateISO, normalizePlate, validateStep, type Errors } from '../validation/kyc';
 import { describeError } from '../utils/retry';
 import { colors, radius, space, type } from '../theme';
 
 export type RegistrationMode = 'signup' | 'resubmit' | 'update';
 
-const STEPS = ['Personal', 'ID & Licence', 'Vehicle', 'Vehicle docs', 'Bank', 'Review'];
-
 const VEHICLE_TYPES: { value: VehicleCategory; label: string; seats: number }[] = [
   { value: 'Hatchback', label: 'Hatchback', seats: 4 },
   { value: 'Sedan', label: 'Sedan', seats: 4 },
-  { value: 'SUV', label: 'SUV', seats: 6 },
-  { value: 'Premium SUV', label: 'Premium SUV', seats: 7 },
+  { value: 'SUV', label: 'SUV (6+1 / 7+1)', seats: 6 },
+  { value: 'Premium SUV', label: 'Innova Crysta', seats: 7 },
   { value: 'Tempo Traveller', label: 'Tempo Traveller', seats: 12 },
 ];
 
 const draftKey = (uid: string) => `nesam-driver-signup-draft-${uid}`;
+const DETECT_DELAY_MS = 800;
+
+type Detection =
+  | { state: 'idle' }
+  | { state: 'loading' }
+  | { state: 'done'; result: VehicleLookupResult }
+  | { state: 'error'; message: string };
 
 interface Props {
   uid: string;
@@ -36,24 +46,30 @@ interface Props {
   currentStatus?: ApprovalStatus;
   rejectionReason?: string;
   vendorName?: string;
+  /** A vendor's employee: licence and selfie only, the vendor assigns the vehicle. */
+  fleetDriver?: boolean;
   onDone?: () => void;
   onCancel?: () => void;
   onSignOut?: () => void;
 }
 
-export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectionReason, vendorName, onDone, onCancel, onSignOut }: Props) {
+export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectionReason, vendorName, fleetDriver = false, onDone, onCancel, onSignOut }: Props) {
+  const steps = fleetDriver ? ['Selfie & licence', 'Review'] : ['Selfie & licence', 'Vehicle', 'Review'];
+  const lastStep = steps.length;
   const [data, setData] = useState<RegistrationData>(initial);
   const [step, setStep] = useState(1);
   const [draftLoaded, setDraftLoaded] = useState(mode !== 'signup');
-  const [confirmAccount, setConfirmAccount] = useState(initial.bank.accountNumber);
   const [errors, setErrors] = useState<Errors>({});
   const [showPhotoErrors, setShowPhotoErrors] = useState(false);
   const [consent, setConsent] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [uploads, setUploads] = useState(0);
+  const [detection, setDetection] = useState<Detection>({ state: 'idle' });
+  const [detected, setDetected] = useState<DetectedVehicle | null>(null);
   const scrollRef = useRef<ScrollView>(null);
   const submittingRef = useRef(false);
+  const detectSeq = useRef(0);
 
   // Restore a signup draft (the verified phone always comes from auth).
   useEffect(() => {
@@ -64,9 +80,8 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
         if (!alive || !raw) return;
         const draft = JSON.parse(raw) as { data: RegistrationData; step: number };
         if (draft?.data?.profile) {
-          setData({ ...draft.data, profile: { ...draft.data.profile, phone: initial.profile.phone } });
-          setConfirmAccount(draft.data.bank?.accountNumber ?? '');
-          setStep(Math.min(Math.max(1, draft.step || 1), STEPS.length));
+          setData({ ...initial, ...draft.data, profile: { ...initial.profile, ...draft.data.profile, phone: initial.profile.phone } });
+          setStep(Math.min(Math.max(1, draft.step || 1), lastStep));
         }
       })
       .catch(() => undefined)
@@ -74,7 +89,8 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
     return () => {
       alive = false;
     };
-  }, [mode, uid, initial.profile.phone]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, uid]);
 
   useEffect(() => {
     if (mode !== 'signup' || !draftLoaded) return;
@@ -104,21 +120,81 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
   }, [step, submitting, onCancel]);
 
   const setProfile = (patch: Partial<RegistrationData['profile']>) => setData((d) => ({ ...d, profile: { ...d.profile, ...patch } }));
-  const setIdentity = (patch: Partial<RegistrationData['identity']>) => setData((d) => ({ ...d, identity: { ...d.identity, ...patch } }));
   const setLicense = (patch: Partial<RegistrationData['license']>) => setData((d) => ({ ...d, license: { ...d.license, ...patch } }));
   const setVehicle = (patch: Partial<RegistrationData['vehicle']>) => setData((d) => ({ ...d, vehicle: { ...d.vehicle, ...patch } }));
-  const setBank = (patch: Partial<RegistrationData['bank']>) => setData((d) => ({ ...d, bank: { ...d.bank, ...patch } }));
   const onBusy = (busy: boolean) => setUploads((n) => Math.max(0, n + (busy ? 1 : -1)));
+
+  const v = data.vehicle;
+  const plate = normalizePlate(v.vehicleNumber);
+
+  /** Asks the server to identify the vehicle and fills the form from the register. */
+  const detect = useCallback(async (raw: string) => {
+    const wanted = normalizePlate(raw);
+    if (!isPlate(wanted)) return;
+    const seq = ++detectSeq.current;
+    setDetection({ state: 'loading' });
+    try {
+      const result = await lookupVehicle(wanted);
+      if (seq !== detectSeq.current) return;
+      setDetection({ state: 'done', result });
+      if (result.status === 'found') {
+        const today = localDateISO();
+        const usable = (iso: string) => (iso && iso > today ? iso : '');
+        setDetected(result.vehicle);
+        setData((d) => ({
+          ...d,
+          vehicle: {
+            ...d.vehicle,
+            ...vehiclePatchFrom(result.vehicle),
+            vehicleNumber: raw.trim().toUpperCase(),
+            rcNumber: wanted,
+            // Prefill from the register; the driver can still correct them from the document in hand.
+            insuranceExpiry: usable(result.vehicle.validity.insuranceUpto) || d.vehicle.insuranceExpiry,
+            fitnessExpiry: usable(result.vehicle.validity.fitnessUpto) || d.vehicle.fitnessExpiry,
+            permitExpiry: usable(result.vehicle.validity.permitUpto) || d.vehicle.permitExpiry,
+            vahan: snapshotFrom(result, false),
+          },
+        }));
+      } else {
+        setDetected(null);
+        setData((d) => ({ ...d, vehicle: { ...d.vehicle, rcNumber: wanted, vahan: snapshotFrom(result, d.vehicle.vahan?.manualType ?? false) } }));
+      }
+    } catch (err) {
+      if (seq !== detectSeq.current) return;
+      setDetection({ state: 'error', message: describeError(err, 'We could not check the vehicle right now. Please try again.') });
+    }
+  }, []);
+
+  // Detect on its own once a full plate is typed.
+  useEffect(() => {
+    if (fleetDriver || step !== 2) return undefined;
+    // Only from idle: after an error the partner retries with the button, so a failing provider is not hammered.
+    if (!isPlate(v.vehicleNumber) || v.vahan?.lookupId === plate || detection.state !== 'idle') return undefined;
+    const t = setTimeout(() => void detect(v.vehicleNumber), DETECT_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [fleetDriver, step, v.vehicleNumber, v.vahan?.lookupId, plate, detection.state, detect]);
+
+  const onPlateChange = (text: string) => {
+    const upper = text.toUpperCase();
+    if (normalizePlate(upper) !== plate) {
+      detectSeq.current++;
+      setDetection({ state: 'idle' });
+      setDetected(null);
+      setVehicle({ vehicleNumber: upper, rcNumber: '', vahan: undefined });
+    } else setVehicle({ vehicleNumber: upper });
+  };
+
+  const validate = (s: number) => validateStep(s, data, { fleetDriver });
 
   const goNext = () => {
     if (uploads > 0) return setSubmitError('Please wait for uploads to finish.');
-    const errs = validateStep(step, data, confirmAccount);
+    const errs = validate(step);
     setErrors(errs);
     setShowPhotoErrors(true);
     setSubmitError('');
     if (Object.keys(errs).length > 0) return undefined;
     setShowPhotoErrors(false);
-    setStep((s) => Math.min(s + 1, STEPS.length));
+    setStep((s) => Math.min(s + 1, lastStep));
     return undefined;
   };
 
@@ -129,7 +205,7 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
       return;
     }
     for (let s = step; s < target; s++) {
-      const errs = validateStep(s, data, confirmAccount);
+      const errs = validate(s);
       if (Object.keys(errs).length) {
         setStep(s);
         setErrors(errs);
@@ -142,8 +218,8 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
 
   const submit = async () => {
     if (submittingRef.current) return;
-    for (let s = 1; s <= 5; s++) {
-      const errs = validateStep(s, data, confirmAccount);
+    for (let s = 1; s < lastStep; s++) {
+      const errs = validate(s);
       if (Object.keys(errs).length) {
         setStep(s);
         setErrors(errs);
@@ -163,7 +239,7 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
         await registerDriver(data);
         await AsyncStorage.removeItem(draftKey(uid)).catch(() => undefined);
       } else {
-        await resubmitDriverDocuments(uid, data, currentStatus ?? 'Pending');
+        await resubmitDriverDocuments(uid, data, currentStatus ?? 'Pending', { fleetDriver });
       }
       onDone?.();
     } catch (err) {
@@ -183,13 +259,12 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
   };
 
   const title = mode === 'signup' ? 'Driver Partner Registration' : mode === 'resubmit' ? 'Update & Resubmit' : 'Update Documents';
-  const p = data.profile;
-  const id = data.identity;
   const l = data.license;
-  const v = data.vehicle;
-  const b = data.bank;
   const today = localDateISO();
-  const dobMax = new Date(new Date().getFullYear() - 18, new Date().getMonth(), new Date().getDate());
+  const reviewStep = lastStep;
+  const vehicleStep = fleetDriver ? 0 : 2;
+  const result = detection.state === 'done' ? detection.result : null;
+  const manual = result != null && (result.status === 'unavailable' || result.status === 'not_configured');
 
   if (!draftLoaded) return null;
 
@@ -200,19 +275,19 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
           <View style={styles.header}>
             <View style={{ flex: 1 }}>
               <Text style={type.h2}>{title}</Text>
-              <Text style={type.small}>Verified mobile: {p.phone}</Text>
+              <Text style={type.small}>Verified mobile: {data.profile.phone}</Text>
             </View>
             {onCancel ? <Button small variant="secondary" title="Back" onPress={confirmLeave} /> : null}
             {onSignOut ? <Button small variant="ghost" title="Sign out" onPress={onSignOut} /> : null}
           </View>
         ) : null}
 
-        {vendorName && mode === 'signup' ? <Notice tone="info" message={`You were invited by ${vendorName}. Your account will be linked to this fleet.`} /> : null}
+        {vendorName && mode === 'signup' ? <Notice tone="info" message={`You were invited by ${vendorName}. Your account will be linked to this fleet and your vehicle will be assigned by them.`} /> : null}
         {mode === 'resubmit' && rejectionReason ? <Notice message={`Reason for rejection: ${rejectionReason}`} /> : null}
         {mode === 'update' ? <Notice tone="warning" message="Updated documents are re-verified by the NESAM team. You can keep taking trips meanwhile." /> : null}
 
         <View style={styles.stepper}>
-          {STEPS.map((label, i) => {
+          {steps.map((label, i) => {
             const n = i + 1;
             const active = step === n;
             const done = step > n;
@@ -232,75 +307,19 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
         <Card>
           {step === 1 ? (
             <>
-              <Text style={styles.sectionTitle}>Personal details</Text>
+              <Text style={styles.sectionTitle}>Selfie</Text>
               <PhotoField
-                label="Profile photo"
-                hint="Clear front-facing photo, no sunglasses"
-                value={p.photoUrl}
+                label="Selfie"
+                hint="Clear, front-facing, no sunglasses. Taken with the camera."
+                value={data.profile.photoUrl}
                 folder="kyc"
-                name="profile"
+                name="selfie"
                 required
+                cameraOnly
                 showError={showPhotoErrors}
                 onBusyChange={onBusy}
                 onChange={(url) => setProfile({ photoUrl: url })}
               />
-              <TextField label="Full name (as on licence)" required value={p.name} onChangeText={(t) => setProfile({ name: t })} error={errors.name} autoComplete="name" />
-              <DateField label="Date of birth" required value={p.dob} onChange={(d) => setProfile({ dob: d })} maximumDate={dobMax} error={errors.dob} />
-              <OptionChips
-                label="Gender"
-                required
-                options={[
-                  { value: 'Male', label: 'Male' },
-                  { value: 'Female', label: 'Female' },
-                  { value: 'Other', label: 'Other' },
-                ]}
-                value={p.gender as 'Male' | 'Female' | 'Other' | ''}
-                onChange={(g) => setProfile({ gender: g })}
-                error={errors.gender}
-              />
-              <TextField label="Email (optional)" value={p.email} onChangeText={(t) => setProfile({ email: t })} keyboardType="email-address" autoCapitalize="none" error={errors.email} />
-              <TextField label="Residential address" required value={p.address} onChangeText={(t) => setProfile({ address: t })} multiline error={errors.address} />
-              <TextField label="City" required value={p.city} onChangeText={(t) => setProfile({ city: t })} error={errors.city} />
-              <TextField label="Pincode" required value={p.pincode} onChangeText={(t) => setProfile({ pincode: t.replace(/\D/g, '').slice(0, 6) })} keyboardType="number-pad" maxLength={6} error={errors.pincode} />
-              <TextField label="Emergency contact name" required value={p.emergencyContactName} onChangeText={(t) => setProfile({ emergencyContactName: t })} error={errors.emergencyContactName} />
-              <TextField
-                label="Emergency contact mobile"
-                required
-                prefix="+91"
-                value={p.emergencyContact}
-                onChangeText={(t) => setProfile({ emergencyContact: t.replace(/\D/g, '').slice(0, 10) })}
-                keyboardType="phone-pad"
-                maxLength={10}
-                error={errors.emergencyContact}
-              />
-            </>
-          ) : null}
-
-          {step === 2 ? (
-            <>
-              <Text style={styles.sectionTitle}>Identity proof</Text>
-              <TextField
-                label="Aadhaar number"
-                required
-                value={id.aadhaarNumber}
-                onChangeText={(t) => setIdentity({ aadhaarNumber: t.replace(/\D/g, '').slice(0, 12).replace(/(\d{4})(?=\d)/g, '$1 ') })}
-                keyboardType="number-pad"
-                maxLength={14}
-                placeholder="1234 5678 9012"
-                error={errors.aadhaarNumber}
-              />
-              <PhotoField label="Aadhaar front" value={id.aadhaarFrontUrl} folder="kyc" name="aadhaar-front" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setIdentity({ aadhaarFrontUrl: url })} />
-              <PhotoField label="Aadhaar back" value={id.aadhaarBackUrl} folder="kyc" name="aadhaar-back" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setIdentity({ aadhaarBackUrl: url })} />
-              <TextField
-                label="PAN number (optional)"
-                value={id.panNumber}
-                onChangeText={(t) => setIdentity({ panNumber: t.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10) })}
-                autoCapitalize="characters"
-                maxLength={10}
-                placeholder="ABCDE1234F"
-                error={errors.panNumber}
-              />
-              <PhotoField label="PAN card" hint="Optional" value={id.panPhotoUrl} folder="kyc" name="pan" onBusyChange={onBusy} onChange={(url) => setIdentity({ panPhotoUrl: url })} />
               <Text style={[styles.sectionTitle, { marginTop: space.md }]}>Driving licence</Text>
               <TextField
                 label="Driving licence number"
@@ -317,156 +336,95 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
             </>
           ) : null}
 
-          {step === 3 ? (
+          {step === vehicleStep ? (
             <>
-              <Text style={styles.sectionTitle}>Vehicle details</Text>
+              <Text style={styles.sectionTitle}>Your vehicle</Text>
               <TextField
                 label="Registration number"
                 required
                 value={v.vehicleNumber}
-                onChangeText={(t) => setVehicle({ vehicleNumber: t.toUpperCase() })}
+                onChangeText={onPlateChange}
                 autoCapitalize="characters"
                 placeholder="TN 01 AB 1234"
                 error={errors.vehicleNumber}
               />
-              <OptionChips
-                label="Vehicle category"
-                required
-                options={VEHICLE_TYPES.map((t) => ({ value: t.value, label: `${t.label} (${t.seats})` }))}
-                value={v.vehicleType}
-                onChange={(val) => {
-                  const t = VEHICLE_TYPES.find((x) => x.value === val)!;
-                  setVehicle({ vehicleType: t.value, capacity: t.seats });
-                }}
+              <Text style={[type.tiny, { marginBottom: space.sm }]}>Make, model, seats and fuel type are filled in automatically from the vehicle register.</Text>
+              <Button
+                title={detection.state === 'loading' ? 'Checking…' : v.vahan?.lookupId === plate ? 'Check again' : 'Detect vehicle'}
+                variant="secondary"
+                loading={detection.state === 'loading'}
+                disabled={!isPlate(v.vehicleNumber) || detection.state === 'loading'}
+                onPress={() => void detect(v.vehicleNumber)}
+                style={{ marginBottom: space.md }}
               />
-              <TextField label="Make / brand" required value={v.make} onChangeText={(t) => setVehicle({ make: t })} placeholder="Maruti Suzuki" error={errors.make} />
-              <TextField label="Model" required value={v.model} onChangeText={(t) => setVehicle({ model: t })} placeholder="Dzire" error={errors.model} />
-              <TextField label="Manufacturing year" required value={v.year} onChangeText={(t) => setVehicle({ year: t.replace(/\D/g, '').slice(0, 4) })} keyboardType="number-pad" maxLength={4} error={errors.year} />
-              <TextField label="Colour" required value={v.color} onChangeText={(t) => setVehicle({ color: t })} placeholder="White" error={errors.color} />
-              <TextField
-                label="Seating capacity (excl. driver)"
-                required
-                value={v.capacity ? String(v.capacity) : ''}
-                onChangeText={(t) => setVehicle({ capacity: Number(t.replace(/\D/g, '').slice(0, 2)) || 0 })}
-                keyboardType="number-pad"
-                maxLength={2}
-                error={errors.capacity}
-              />
-              <OptionChips
-                label="Fuel type"
-                required
-                options={['Diesel', 'Petrol', 'CNG', 'Electric'].map((f) => ({ value: f, label: f }))}
-                value={v.fuelType}
-                onChange={(f) => setVehicle({ fuelType: f })}
-              />
-              <Text style={[styles.sectionTitle, { marginTop: space.sm }]}>Vehicle photos</Text>
-              <PhotoField label="Front (with plate)" value={v.frontPhotoUrl} folder="vehicle" name="front" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ frontPhotoUrl: url })} />
-              <PhotoField label="Rear (with plate)" value={v.rearPhotoUrl} folder="vehicle" name="rear" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ rearPhotoUrl: url })} />
-              <PhotoField label="Side view" value={v.sidePhotoUrl} folder="vehicle" name="side" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ sidePhotoUrl: url })} />
-              <PhotoField label="Interior" value={v.interiorPhotoUrl} folder="vehicle" name="interior" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ interiorPhotoUrl: url })} />
-            </>
-          ) : null}
 
-          {step === 4 ? (
-            <>
-              <Text style={styles.sectionTitle}>Registration certificate (RC)</Text>
-              <TextField label="RC number" required value={v.rcNumber} onChangeText={(t) => setVehicle({ rcNumber: t.toUpperCase() })} autoCapitalize="characters" error={errors.rcNumber} />
-              <PhotoField label="RC photo" value={v.rcDocUrl} folder="vehicle" name="rc" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ rcDocUrl: url })} />
-              <Text style={styles.sectionTitle}>Commercial insurance</Text>
-              <TextField label="Policy number" required value={v.insuranceNumber} onChangeText={(t) => setVehicle({ insuranceNumber: t })} error={errors.insuranceNumber} />
+              {detection.state === 'loading' ? (
+                <View style={styles.detecting}>
+                  <ActivityIndicator color={colors.primary} />
+                  <Text style={type.small}>Looking up {v.vehicleNumber} in the vehicle register…</Text>
+                </View>
+              ) : null}
+              {detection.state === 'error' ? <Notice message={detection.message} /> : null}
+              {result?.status === 'not_found' ? <Notice message="This registration number was not found in the vehicle register. Check the number on the plate and try again." /> : null}
+              {result?.status === 'found' && result.duplicate ? (
+                <Notice message="This vehicle is already registered with another NESAM partner. Please contact NESAM support." />
+              ) : null}
+              {detected && result?.status === 'found' ? <DetectedCard vehicle={detected} issues={result.issues.map((i) => i.message)} /> : null}
+              {manual ? (
+                <>
+                  <Notice tone="warning" message="Automatic vehicle detection is unavailable right now. Choose your vehicle type — NESAM will verify the vehicle from your documents." />
+                  <OptionChips
+                    label="Vehicle type"
+                    required
+                    options={VEHICLE_TYPES.map((t) => ({ value: t.value, label: t.label }))}
+                    value={v.vahan?.manualType ? v.vehicleType : ''}
+                    onChange={(val) => {
+                      const t = VEHICLE_TYPES.find((x) => x.value === val)!;
+                      setVehicle({ vehicleType: t.value, capacity: t.seats, vahan: v.vahan ? { ...v.vahan, manualType: true } : undefined });
+                    }}
+                    error={errors.vehicleType}
+                  />
+                </>
+              ) : null}
+
+              <Text style={[styles.sectionTitle, { marginTop: space.md }]}>Vehicle documents</Text>
+              <PhotoField label="RC (registration certificate)" value={v.rcDocUrl} folder="vehicle" name="rc" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ rcDocUrl: url })} />
+              <PhotoField label="Insurance" value={v.insuranceDocUrl} folder="vehicle" name="insurance" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ insuranceDocUrl: url })} />
               <DateField label="Insurance valid till" required value={v.insuranceExpiry} onChange={(d) => setVehicle({ insuranceExpiry: d })} minimumDate={new Date()} error={errors.insuranceExpiry} />
-              <PhotoField label="Insurance policy" value={v.insuranceDocUrl} folder="vehicle" name="insurance" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ insuranceDocUrl: url })} />
-              <Text style={styles.sectionTitle}>Taxi / tourist permit</Text>
-              <TextField label="Permit number" required value={v.statePermitNumber} onChangeText={(t) => setVehicle({ statePermitNumber: t })} error={errors.statePermitNumber} />
+              <PhotoField label="FC (fitness certificate)" value={v.fitnessDocUrl} folder="vehicle" name="fitness" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ fitnessDocUrl: url })} />
+              <DateField label="FC valid till" required value={v.fitnessExpiry} onChange={(d) => setVehicle({ fitnessExpiry: d })} minimumDate={new Date()} error={errors.fitnessExpiry} />
+              <PhotoField label="Permit" value={v.statePermitDocUrl} folder="vehicle" name="permit" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ statePermitDocUrl: url })} />
               <DateField label="Permit valid till" required value={v.permitExpiry} onChange={(d) => setVehicle({ permitExpiry: d })} minimumDate={new Date()} error={errors.permitExpiry} />
-              <PhotoField label="Permit document" value={v.statePermitDocUrl} folder="vehicle" name="permit" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ statePermitDocUrl: url })} />
-              <Text style={styles.sectionTitle}>Fitness certificate (FC) — if applicable</Text>
-              <DateField label="FC valid till" value={v.fitnessExpiry} onChange={(d) => setVehicle({ fitnessExpiry: d })} minimumDate={new Date()} error={errors.fitnessExpiry} />
-              <PhotoField label="FC document" value={v.fitnessDocUrl} folder="vehicle" name="fitness" onBusyChange={onBusy} onChange={(url) => setVehicle({ fitnessDocUrl: url })} />
-              <Text style={styles.sectionTitle}>Pollution (PUC)</Text>
-              <Text style={type.small}>Carry a valid PUC certificate in the vehicle; NESAM operations may ask for it during audits.</Text>
+              <PhotoField label="Vehicle front (with plate)" value={v.frontPhotoUrl} folder="vehicle" name="front" required showError={showPhotoErrors} onBusyChange={onBusy} onChange={(url) => setVehicle({ frontPhotoUrl: url })} />
             </>
           ) : null}
 
-          {step === 5 ? (
-            <>
-              <Text style={styles.sectionTitle}>Payout bank account</Text>
-              <Text style={[type.small, { marginBottom: space.md }]}>Your trip earnings are paid to this account.</Text>
-              <TextField label="Account holder name" required value={b.accountHolder} onChangeText={(t) => setBank({ accountHolder: t })} error={errors.accountHolder} />
-              <TextField
-                label="Account number"
-                required
-                value={b.accountNumber}
-                onChangeText={(t) => setBank({ accountNumber: t.replace(/\D/g, '').slice(0, 18) })}
-                keyboardType="number-pad"
-                secureTextEntry
-                autoComplete="off"
-                error={errors.accountNumber}
-              />
-              <TextField
-                label="Confirm account number"
-                required
-                value={confirmAccount}
-                onChangeText={(t) => setConfirmAccount(t.replace(/\D/g, '').slice(0, 18))}
-                keyboardType="number-pad"
-                autoComplete="off"
-                contextMenuHidden
-                error={errors.confirmAccount}
-              />
-              <TextField
-                label="IFSC code"
-                required
-                value={b.ifsc}
-                onChangeText={(t) => setBank({ ifsc: t.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 11) })}
-                autoCapitalize="characters"
-                maxLength={11}
-                placeholder="SBIN0001234"
-                error={errors.ifsc}
-              />
-              <TextField label="Bank name" value={b.bankName} onChangeText={(t) => setBank({ bankName: t })} />
-              <TextField label="UPI ID (optional)" value={b.upiId} onChangeText={(t) => setBank({ upiId: t.trim() })} autoCapitalize="none" placeholder="name@okaxis" error={errors.upiId} />
-            </>
-          ) : null}
-
-          {step === 6 ? (
+          {step === reviewStep ? (
             <>
               <Text style={styles.sectionTitle}>Review & submit</Text>
               <View style={styles.reviewHead}>
-                {p.photoUrl ? <Image source={{ uri: p.photoUrl }} style={styles.reviewPhoto} /> : null}
+                {data.profile.photoUrl ? <Image source={{ uri: data.profile.photoUrl }} style={styles.reviewPhoto} /> : null}
                 <View style={{ flex: 1 }}>
-                  <Text style={type.h3}>{p.name}</Text>
-                  <Text style={type.small}>{p.phone}</Text>
+                  <Text style={type.h3}>{data.profile.name || 'New driver partner'}</Text>
+                  <Text style={type.small}>{data.profile.phone}</Text>
                 </View>
               </View>
-              <ReviewSection title="Personal" onEdit={() => setStep(1)}>
-                <Row label="Date of birth" value={displayDate(p.dob)} />
-                <Row label="Gender" value={p.gender} />
-                <Row label="Email" value={p.email || '—'} />
-                <Row label="Address" value={`${p.address}, ${p.city} - ${p.pincode}`} />
-                <Row label="Emergency" value={`${p.emergencyContactName} (${p.emergencyContact})`} />
-              </ReviewSection>
-              <ReviewSection title="Identity & licence" onEdit={() => setStep(2)}>
-                <Row label="Aadhaar" value={maskAadhaar(id.aadhaarNumber)} />
-                <Row label="PAN" value={id.panNumber || '—'} />
+              <ReviewSection title="Licence" onEdit={() => setStep(1)}>
                 <Row label="Licence no." value={l.number} />
-                <Row label="Licence valid till" value={displayDate(l.expiryDate)} />
+                <Row label="Valid till" value={displayDate(l.expiryDate)} />
               </ReviewSection>
-              <ReviewSection title="Vehicle" onEdit={() => setStep(3)}>
-                <Row label="Registration" value={v.vehicleNumber} />
-                <Row label="Vehicle" value={`${v.make} ${v.model} (${v.year}) • ${v.color}`} />
-                <Row label="Category" value={`${v.vehicleType} • ${v.capacity} seats • ${v.fuelType}`} />
-                <Row label="RC no." value={v.rcNumber} />
-                <Row label="Insurance till" value={displayDate(v.insuranceExpiry)} />
-                <Row label="Permit till" value={displayDate(v.permitExpiry)} />
-                <Row label="FC till" value={v.fitnessExpiry ? displayDate(v.fitnessExpiry) : '—'} />
-              </ReviewSection>
-              <ReviewSection title="Bank" onEdit={() => setStep(5)}>
-                <Row label="Account holder" value={b.accountHolder} />
-                <Row label="Account no." value={maskAccount(b.accountNumber)} />
-                <Row label="IFSC" value={b.ifsc} />
-                <Row label="UPI" value={b.upiId || '—'} />
-              </ReviewSection>
-              {[v.insuranceExpiry, v.permitExpiry, l.expiryDate].some((d) => d && d <= today) ? (
+              {!fleetDriver ? (
+                <ReviewSection title="Vehicle" onEdit={() => setStep(vehicleStep)}>
+                  <Row label="Registration" value={v.vehicleNumber} />
+                  <Row label="Vehicle" value={[v.make, v.model].filter(Boolean).join(' ') || v.vehicleType} />
+                  <Row label="Category" value={`${v.vehicleType}${v.capacity ? ` • ${v.capacity}+1 seats` : ''}${v.fuelType ? ` • ${v.fuelType}` : ''}`} />
+                  <Row label="Insurance till" value={displayDate(v.insuranceExpiry)} />
+                  <Row label="FC till" value={displayDate(v.fitnessExpiry)} />
+                  <Row label="Permit till" value={displayDate(v.permitExpiry)} />
+                  <Row label="Register check" value={v.vahan?.status === 'found' ? 'Verified from vehicle register' : 'Manual verification by NESAM'} />
+                </ReviewSection>
+              ) : null}
+              {[l.expiryDate, ...(fleetDriver ? [] : [v.insuranceExpiry, v.fitnessExpiry, v.permitExpiry])].some((d) => d && d <= today) ? (
                 <Notice message="A document above has expired. Go back and update it before submitting." />
               ) : null}
               <Pressable style={styles.consent} onPress={() => setConsent((c) => !c)} accessibilityRole="checkbox" accessibilityState={{ checked: consent }}>
@@ -492,7 +450,7 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
               }}
               style={{ flex: 1 }}
             />
-            {step < STEPS.length ? (
+            {step < lastStep ? (
               <Button title={uploads > 0 ? 'Uploading…' : 'Save & continue'} disabled={uploads > 0} onPress={goNext} style={{ flex: 2 }} />
             ) : (
               <Button
@@ -507,6 +465,31 @@ export function RegistrationScreen({ uid, mode, initial, currentStatus, rejectio
         </Card>
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+/** The vehicle as the register describes it, so the driver can confirm it is theirs. */
+function DetectedCard({ vehicle, issues }: { vehicle: DetectedVehicle; issues: string[] }) {
+  const name = [vehicle.make, vehicle.model, vehicle.variant].filter(Boolean).join(' ');
+  return (
+    <View style={styles.detected}>
+      <View style={styles.detectedHead}>
+        <Ionicons name="checkmark-circle" size={20} color={colors.success} />
+        <Text style={[type.h3, { flex: 1 }]}>Vehicle found</Text>
+        <Badge label={vehicle.category === 'Premium SUV' ? 'Innova Crysta' : vehicle.category} tone="brand" />
+      </View>
+      <Text style={type.body}>{name || vehicle.registrationNumber}</Text>
+      <Text style={type.small}>
+        {[vehicle.fuelType, vehicle.seatClass ? `${vehicle.seatClass} seats` : '', vehicle.manufactureYear, vehicle.colour].filter(Boolean).join(' • ')}
+      </Text>
+      <Text style={[type.tiny, { marginTop: 4 }]}>Registered to {vehicle.ownerNameMasked || 'the owner on record'}. If this is not your vehicle, correct the number above.</Text>
+      {issues.map((m) => (
+        <View key={m} style={styles.issue}>
+          <Ionicons name="alert-circle" size={14} color={colors.warning} />
+          <Text style={[type.tiny, { flex: 1 }]}>{m} Enter the dates from your current document below.</Text>
+        </View>
+      ))}
+    </View>
   );
 }
 
@@ -534,8 +517,12 @@ const styles = StyleSheet.create({
   stepDotActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   stepDotDone: { backgroundColor: colors.success, borderColor: colors.success },
   stepNum: { fontSize: 12, fontWeight: '800', color: colors.muted },
-  stepLabel: { fontSize: 9, fontWeight: '700', color: colors.muted },
+  stepLabel: { fontSize: 10, fontWeight: '700', color: colors.muted },
   sectionTitle: { ...type.h3, marginBottom: space.md },
+  detecting: { flexDirection: 'row', alignItems: 'center', gap: space.sm, marginBottom: space.md },
+  detected: { borderWidth: 1, borderColor: colors.success, backgroundColor: colors.successSoft, borderRadius: radius.md, padding: space.md, marginBottom: space.md },
+  detectedHead: { flexDirection: 'row', alignItems: 'center', gap: space.sm, marginBottom: 4 },
+  issue: { flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginTop: space.sm },
   reviewHead: { flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md },
   reviewPhoto: { width: 52, height: 52, borderRadius: 12 },
   reviewSection: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: space.md, marginBottom: space.md },

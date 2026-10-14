@@ -202,12 +202,52 @@ export interface VendorDocuments {
   };
 }
 
+/**
+ * One vehicle in the application's fleet documentation (spec page 13): the
+ * registration number, what the vehicle register says about it, and its RC,
+ * insurance, FC, permit and front photo. The register copy is a snapshot; the
+ * authoritative record is the server-written vehicle_lookups/{plate}.
+ */
+export interface FleetVehicleDoc {
+  /** Normalised plate, e.g. TN01AB1234. */
+  registrationNumber: string;
+  /** Where the vehicle's identity came from. */
+  source: 'vahan' | 'manual';
+  /** Suggested NESAM category (Sedan, SUV, Premium SUV, …). */
+  category: string;
+  make: string;
+  model: string;
+  fuelType: string;
+  /** Passenger seats, excluding the driver. */
+  passengerSeats: number;
+  seatClass: string;
+  year: string;
+  /** Register problems the server reported, as codes; shown to the reviewer. */
+  issues: string[];
+  /** Validity from the documents (ISO dates). */
+  insuranceUpto: string;
+  fitnessUpto: string;
+  permitUpto: string;
+  rcFiles: StoredFile[];
+  insuranceFiles: StoredFile[];
+  fitnessFiles: StoredFile[];
+  permitFiles: StoredFile[];
+  frontPhotoFiles: StoredFile[];
+}
+
 export interface FleetDetails {
   vehicleTypes: string[];
   fleetSize: number;
+  /** Aggregates of the per-vehicle files, kept for the document viewers. */
   rcFiles: StoredFile[];
   vehiclePhotos: StoredFile[];
   insuranceFiles: StoredFile[];
+  fcFiles?: StoredFile[];
+  permitFiles?: StoredFile[];
+  /** Normalised plates of `vehicles`, so another partner's duplicate check can query them. */
+  plates?: string[];
+  /** Per-vehicle documentation; absent on applications made before page-13 onboarding. */
+  vehicles?: FleetVehicleDoc[];
 }
 
 /** Private payout details — vendor_kyc/{uid}, readable by owner + admin only. */

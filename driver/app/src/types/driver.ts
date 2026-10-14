@@ -54,6 +54,70 @@ export interface DrivingLicense {
   backPhotoUrl: string;
 }
 
+/** Spec page 14 classes a vehicle is eligible for (suggested from the register, confirmed by an admin). */
+export type SpecVehicleClass = 'Sedan' | 'SUV' | 'Innova' | 'Crysta' | 'Tempo Traveller';
+
+export interface VehicleValidity {
+  fitnessUpto: string;
+  insuranceUpto: string;
+  permitUpto: string;
+  taxUpto: string;
+  pucUpto: string;
+}
+
+/** A vehicle as the national register (VAHAN) describes it — returned by the lookupVehicleByRegistration function. */
+export interface DetectedVehicle {
+  registrationNumber: string;
+  make: string;
+  model: string;
+  variant: string;
+  fuelType: string;
+  /** RC seating capacity; includes the driver's seat. */
+  seatingCapacity: number;
+  passengerSeats: number;
+  seatClass: string;
+  manufactureYear: string;
+  colour: string;
+  vehicleClass: string;
+  usage: 'commercial' | 'private' | 'unknown';
+  registrationStatus: string;
+  registrationActive: boolean | null;
+  registeredAt: string;
+  ownerNameMasked: string;
+  category: VehicleCategory;
+  specClass: SpecVehicleClass;
+  validity: VehicleValidity;
+}
+
+export interface VehicleIssue {
+  code: string;
+  message: string;
+}
+
+export type VehicleLookupResult =
+  | { status: 'found'; registrationNumber: string; vehicle: DetectedVehicle; issues: VehicleIssue[]; duplicate: boolean; fetchedAtMs: number; source: string }
+  | { status: 'not_found' | 'not_configured' | 'unavailable'; registrationNumber: string };
+
+/**
+ * What the onboarding keeps about the automatic detection. The authoritative
+ * record is the server-written vehicle_lookups/{plate}; this is the copy the
+ * app needs to resume a draft and show the review screen.
+ */
+export interface VahanSnapshot {
+  status: 'found' | 'not_found' | 'not_configured' | 'unavailable';
+  /** vehicle_lookups document id (the normalised plate). */
+  lookupId: string;
+  fetchedAtMs: number;
+  duplicate: boolean;
+  issues: string[];
+  seatClass: string;
+  specClass: SpecVehicleClass | '';
+  usage: string;
+  /** The partner chose the vehicle type by hand because the register was unreachable. */
+  manualType: boolean;
+  validity: VehicleValidity;
+}
+
 export interface VehicleDetails {
   vehicleNumber: string;
   vehicleType: VehicleCategory;
@@ -77,6 +141,8 @@ export interface VehicleDetails {
   rearPhotoUrl: string;
   sidePhotoUrl: string;
   interiorPhotoUrl: string;
+  /** Automatic detection result; absent until the vehicle was checked. */
+  vahan?: VahanSnapshot;
 }
 
 export interface BankDetails {

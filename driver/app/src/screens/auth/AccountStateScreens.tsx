@@ -62,11 +62,11 @@ export function VerificationStatusScreen({ account, onSignOut, onResubmit }: { a
     );
   }
 
+  // Spec page 13: selfie, licence and — for an owner-driver — the vehicle documents.
   const checklist = [
-    { label: 'Personal details & photo', done: !!account.profile.photoUrl },
+    { label: 'Selfie', done: !!account.profile.photoUrl },
     { label: `Driving licence ${account.license.number}`, done: !!account.license.frontPhotoUrl },
-    { label: `Vehicle ${account.vehicle.vehicleNumber}`, done: !!account.vehicle.rcDocUrl },
-    { label: 'Bank account for payouts', done: !!account.bank.accountNumber },
+    ...(driver.vendorId ? [] : [{ label: `Vehicle ${account.vehicle.vehicleNumber}`, done: !!account.vehicle.rcDocUrl && !!account.vehicle.insuranceDocUrl && !!account.vehicle.statePermitDocUrl }]),
   ];
   return (
     <Shell onSignOut={onSignOut}>

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { AlertTriangle, Pencil } from 'lucide-react';
 import type { OnboardingSection, VendorRecord } from '../../types';
-import { BUSINESS_REG_TYPES, IDENTITY_PROOF_TYPES, ONBOARDING_STEPS, SECTION_LABELS } from '../../config/onboarding';
+import { SECTION_LABELS, stepOfSection } from '../../config/onboarding';
 import { missingSections, submitForReview } from '../../services/onboardingService';
 import { useOnlineStatus } from '../../hooks/useOnlineStatus';
 import { describeDataError } from '../../utils/retry';
@@ -27,7 +27,7 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ record, preApproved, onE
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const missing = missingSections(record);
-  const { business: b, documents: d, fleet: f, payoutSummary: p } = record;
+  const { business: b, fleet: f, payoutSummary: p } = record;
   const isResubmission = record.status !== 'INCOMPLETE';
 
   const Section: React.FC<{ id: OnboardingSection; children: React.ReactNode }> = ({ id, children }) => {
@@ -42,7 +42,7 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ record, preApproved, onE
           </h3>
           <button
             type="button"
-            onClick={() => onEdit(ONBOARDING_STEPS.findIndex((s) => s.key === id))}
+            onClick={() => onEdit(stepOfSection(id))}
             className="text-[12px] font-semibold text-[#E21B23] flex items-center gap-1 hover:underline"
           >
             <Pencil className="w-3.5 h-3.5" /> Edit
@@ -69,33 +69,8 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ record, preApproved, onE
   return (
     <div className="space-y-4">
       <Section id="business">
-        <Row label="Vendor name" value={b?.vendorName} />
+        <Row label="Owner name" value={b?.vendorName} />
         <Row label="Business name" value={b?.businessName} />
-        <Row label="Email" value={b?.email} />
-        <Row label="Alternate number" value={b?.altPhone ? `+91 ${b.altPhone}` : ''} />
-        <Row
-          label="Address"
-          value={b ? [b.address.line1, b.address.line2, b.address.city, `${b.address.state} ${b.address.pincode}`].filter(Boolean).join(', ') : ''}
-        />
-      </Section>
-
-      <Section id="documents">
-        <Row
-          label={BUSINESS_REG_TYPES.find((t) => t.value === d?.businessRegistration.type)?.label ?? 'Registration'}
-          value={d ? `${d.businessRegistration.number} · ${d.businessRegistration.files.length} file(s)` : ''}
-        />
-        <Row
-          label={IDENTITY_PROOF_TYPES.find((t) => t.value === d?.identityProof.type)?.label ?? 'Identity proof'}
-          value={d ? `${d.identityProof.maskedNumber} · ${d.identityProof.files.length} file(s)` : ''}
-        />
-      </Section>
-
-      <Section id="fleet">
-        <Row label="Vehicle types" value={f?.vehicleTypes.join(', ')} />
-        <Row label="Fleet size" value={f ? `${f.fleetSize} vehicle(s)` : ''} />
-        <Row label="RC documents" value={f ? `${f.rcFiles.length} file(s)` : ''} />
-        <Row label="Vehicle photos" value={f ? `${f.vehiclePhotos.length} file(s)` : ''} />
-        <Row label="Insurance / fitness" value={f ? `${f.insuranceFiles.length} file(s)` : ''} />
       </Section>
 
       <Section id="payout">
@@ -103,6 +78,17 @@ export const ReviewStep: React.FC<ReviewStepProps> = ({ record, preApproved, onE
         <Row label="Account number" value={p ? `••••${p.bankLast4}` : ''} />
         <Row label="IFSC" value={p?.ifsc} />
         <Row label="UPI ID" value={p?.upiId} />
+      </Section>
+
+      <Section id="fleet">
+        <Row label="Vehicles" value={f?.vehicles?.length ? String(f.vehicles.length) : ''} />
+        {(f?.vehicles ?? []).map((v) => (
+          <Row
+            key={v.registrationNumber}
+            label={v.registrationNumber}
+            value={`${[v.make, v.model].filter(Boolean).join(' ') || v.category} · ${v.source === 'vahan' ? 'register verified' : 'manual check'}`}
+          />
+        ))}
       </Section>
 
       <label className="flex items-start gap-2.5 text-[12px] text-[#444] cursor-pointer select-none pt-1">

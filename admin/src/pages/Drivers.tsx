@@ -1,3 +1,4 @@
+import { VehicleRegisterCheck } from "../components/VehicleRegisterCheck";
 import { formatDateTime12, formatShortDateTime12, formatHourLabel } from "../utils/time";
 import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../services/firebase';
@@ -121,11 +122,13 @@ export default function Drivers() {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<DriverDoc | null>(null);
   const [reason, setReason] = useState("");
+  // Onboarding no longer asks the driver for a name: the reviewer records it from the licence.
+  const [nameDraft, setNameDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState("");
 
   const [showInvite, setShowInvite] = useState(false);
-  const [invite, setInvite] = useState({ name: "", phone: "", preApproved: false });
+  const [invite, setInvite] = useState({ phone: "", preApproved: false });
   const [inviteMsg, setInviteMsg] = useState("");
 
   useEffect(() => subscribeToCollection<DriverDoc>(COLLECTIONS.DRIVERS, setDrivers), []);
@@ -181,6 +184,7 @@ export default function Drivers() {
 
   const openReview = (d: DriverDoc) => {
     setSelected(d);
+    setNameDraft(d.name || "");
     setReason(d.rejectionReason || "");
     setActionError("");
   };
@@ -197,9 +201,15 @@ export default function Drivers() {
     if (close) setSelected(null);
   };
 
-  const approve = (d: DriverDoc) =>
-    act(async () => {
+  const approve = (d: DriverDoc) => {
+    const name = nameDraft.trim();
+    if (name.length < 3) {
+      setActionError("Enter the driver's name as printed on the driving licence before approving.");
+      return;
+    }
+    return act(async () => {
       const ok = await updateFirestoreDocument(COLLECTIONS.DRIVERS, d.id, {
+        name,
         status: "Approved",
         docStatus: "Approved",
         verified: true,
@@ -217,6 +227,7 @@ export default function Drivers() {
       }
       return ok;
     });
+  };
 
   const reject = (d: DriverDoc) => {
     if (!reason.trim()) {
@@ -271,13 +282,12 @@ export default function Drivers() {
 
   const createInvite = async () => {
     const digits = invite.phone.replace(/\D/g, "").slice(-10);
-    if (!invite.name.trim() || !/^[6-9]\d{9}$/.test(digits)) {
-      setInviteMsg("Enter the driver's name and a valid 10-digit mobile number.");
+    if (!/^[6-9]\d{9}$/.test(digits)) {
+      setInviteMsg("Enter a valid 10-digit mobile number.");
       return;
     }
     const e164 = `+91${digits}`;
     const ok = await setFirestoreDocument("driver_invites", e164, {
-      name: invite.name.trim(),
       phone: e164,
       preApproved: invite.preApproved,
       invitedBy: "admin",
@@ -285,7 +295,7 @@ export default function Drivers() {
     });
     if (ok) {
       setInviteMsg(`Invite saved. Ask the driver to sign up in the Driver app with ${e164}.`);
-      setInvite({ name: "", phone: "", preApproved: false });
+      setInvite({ phone: "", preApproved: false });
     } else {
       setInviteMsg("Could not save the invite.");
     }
@@ -439,7 +449,7 @@ export default function Drivers() {
                   </a>
                 )}
                 <div>
-                  <h3 className="text-base font-bold text-[#111]">{d.name}</h3>
+                  <h3 className="text-base font-bold text-[#111]">{d.name || "Name not recorded yet"}</h3>
                   <p className="text-[11px] text-[#999]">
                     {d.phone} • Submitted {fmtDate(d.submittedAt || d.createdAt)}
                   </p>
@@ -459,61 +469,79 @@ export default function Drivers() {
             <div className="overflow-y-auto px-6 py-5 space-y-5">
               <div className="grid md:grid-cols-3 gap-5">
                 <div>
-                  <p className="text-[12px] font-bold text-[#111] mb-1">Personal</p>
-                  <Detail label="DOB" value={d.dob} />
-                  <Detail label="Gender" value={d.gender} />
-                  <Detail label="Email" value={d.email} />
-                  <Detail label="Address" value={[d.address, d.city, d.pincode].filter(Boolean).join(", ")} />
-                  <Detail label="Emergency" value={d.emergencyContact ? `${d.emergencyContactName} (${d.emergencyContact})` : ""} />
+                  <p className="text-[12px] font-bold text-[#111] mb-1">Driver</p>
+                  <label className="text-[11px] text-[#999] block mt-1">Name as on licence {d.name ? "" : "(required to approve)"}</label>
+                  <input
+                    value={nameDraft}
+                    onChange={(e) => setNameDraft(e.target.value)}
+                    placeholder="Full name"
+                    className="w-full p-2 border border-[#E5E5E5] rounded-lg text-[12px] mb-1"
+                  />
+                  <Detail label="Mobile" value={d.phone} />
                   <Detail label="Vendor" value={d.vendorName || "Independent"} />
+                  {d.email && <Detail label="Email" value={d.email} />}
+                  {d.dob && <Detail label="DOB" value={d.dob} />}
+                  {d.address && <Detail label="Address" value={[d.address, d.city, d.pincode].filter(Boolean).join(", ")} />}
+                  {d.emergencyContact && <Detail label="Emergency" value={`${d.emergencyContactName} (${d.emergencyContact})`} />}
                 </div>
                 <div>
-                  <p className="text-[12px] font-bold text-[#111] mb-1">Identity &amp; Licence</p>
-                  <Detail label="Aadhaar" value={idn.aadhaarNumber} />
-                  <Detail label="PAN" value={idn.panNumber} />
+                  <p className="text-[12px] font-bold text-[#111] mb-1">Driving licence</p>
                   <Detail label="Licence no." value={li.number || d.licenseNumber} />
-                  <Detail label="Licence valid till" value={li.expiryDate || d.licenseExpiry} />
-                  <p className="text-[12px] font-bold text-[#111] mt-3 mb-1">Bank</p>
-                  <Detail label="Holder" value={bank.accountHolder} />
-                  <Detail label="Account" value={bank.accountNumber} />
-                  <Detail label="IFSC" value={bank.ifsc} />
-                  <Detail label="UPI" value={bank.upiId} />
+                  <Detail label="Valid till" value={li.expiryDate || d.licenseExpiry} />
+                  {(idn.aadhaarNumber || idn.panNumber) && (
+                    <>
+                      <p className="text-[12px] font-bold text-[#111] mt-3 mb-1">Identity (earlier application)</p>
+                      <Detail label="Aadhaar" value={idn.aadhaarNumber} />
+                      <Detail label="PAN" value={idn.panNumber} />
+                    </>
+                  )}
+                  {bank.accountNumber && (
+                    <>
+                      <p className="text-[12px] font-bold text-[#111] mt-3 mb-1">Payout account</p>
+                      <Detail label="Holder" value={bank.accountHolder} />
+                      <Detail label="Account" value={bank.accountNumber} />
+                      <Detail label="IFSC" value={bank.ifsc} />
+                      <Detail label="UPI" value={bank.upiId} />
+                    </>
+                  )}
                 </div>
                 <div>
                   <p className="text-[12px] font-bold text-[#111] mb-1">Vehicle</p>
-                  <Detail label="Registration" value={vi.vehicleNumber || d.vehicleNumber} />
-                  <Detail label="Vehicle" value={[vi.make, vi.model, vi.year && `(${vi.year})`].filter(Boolean).join(" ")} />
-                  <Detail label="Category" value={vi.vehicleType} />
-                  <Detail label="Seats / Fuel" value={vi.capacity ? `${vi.capacity} • ${vi.fuelType || ""}` : ""} />
-                  <Detail label="Colour" value={vi.color} />
-                  <Detail label="RC no." value={vi.rcNumber} />
-                  <Detail label="Insurance" value={vi.insuranceNumber} />
-                  <Detail label="Permit" value={vi.statePermitNumber} />
+                  {d.vendorName && !(vi.vehicleNumber || d.vehicleNumber) ? (
+                    <p className="text-[11px] text-[#999]">Fleet driver — the vehicle is assigned by {d.vendorName}.</p>
+                  ) : (
+                    <>
+                      <Detail label="Registration" value={vi.vehicleNumber || d.vehicleNumber} />
+                      <Detail label="Category" value={vi.vehicleType === "Premium SUV" ? "Innova Crysta" : vi.vehicleType} />
+                      <Detail label="Vehicle" value={[vi.make, vi.model, vi.year && `(${vi.year})`].filter(Boolean).join(" ")} />
+                      <Detail label="Seats / Fuel" value={vi.capacity ? `${vi.capacity}+1 • ${vi.fuelType || ""}` : ""} />
+                      <Detail label="Insurance till" value={vi.insuranceExpiry} />
+                      <Detail label="FC till" value={vi.fitnessExpiry} />
+                      <Detail label="Permit till" value={vi.permitExpiry} />
+                      <div className="mt-2">
+                        <VehicleRegisterCheck
+                          declared={{ plate: vi.vehicleNumber || d.vehicleNumber || "", category: vi.vehicleType, insuranceUpto: vi.insuranceExpiry, fitnessUpto: vi.fitnessExpiry, permitUpto: vi.permitExpiry }}
+                        />
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
 
               <div>
                 <p className="text-[12px] font-bold text-[#111] mb-2">Documents</p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <DocImage label="Selfie" url={d.photoUrl} />
                   <DocImage label="Licence front" url={li.frontPhotoUrl} expiry={li.expiryDate} />
                   <DocImage label="Licence back" url={li.backPhotoUrl} />
-                  <DocImage label="Aadhaar front" url={idn.aadhaarFrontUrl} />
-                  <DocImage label="Aadhaar back" url={idn.aadhaarBackUrl} />
-                  <DocImage label="PAN" url={idn.panPhotoUrl} />
                   <DocImage label="RC" url={vi.rcDocUrl} />
                   <DocImage label="Insurance" url={vi.insuranceDocUrl} expiry={vi.insuranceExpiry} />
-                  <DocImage label="Permit" url={vi.statePermitDocUrl} expiry={vi.permitExpiry} />
                   <DocImage label="Fitness (FC)" url={vi.fitnessDocUrl} expiry={vi.fitnessExpiry} />
-                </div>
-              </div>
-
-              <div>
-                <p className="text-[12px] font-bold text-[#111] mb-2">Vehicle Photos</p>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                  <DocImage label="Front" url={vi.frontPhotoUrl} />
-                  <DocImage label="Rear" url={vi.rearPhotoUrl} />
-                  <DocImage label="Side" url={vi.sidePhotoUrl} />
-                  <DocImage label="Interior" url={vi.interiorPhotoUrl} />
+                  <DocImage label="Permit" url={vi.statePermitDocUrl} expiry={vi.permitExpiry} />
+                  <DocImage label="Vehicle front" url={vi.frontPhotoUrl} />
+                  {idn.aadhaarFrontUrl && <DocImage label="Aadhaar front" url={idn.aadhaarFrontUrl} />}
+                  {idn.aadhaarBackUrl && <DocImage label="Aadhaar back" url={idn.aadhaarBackUrl} />}
+                  {idn.panPhotoUrl && <DocImage label="PAN" url={idn.panPhotoUrl} />}
                 </div>
               </div>
 
@@ -571,7 +599,6 @@ export default function Drivers() {
             <p className="text-[12px] text-[#666]">
               The driver signs up in the Driver app with this mobile number. Their name is pre-filled.
             </p>
-            <input value={invite.name} placeholder="Driver name *" className="w-full p-2 border rounded text-xs" onChange={(e) => setInvite({ ...invite, name: e.target.value })} />
             <input value={invite.phone} placeholder="Mobile number (10 digits) *" type="tel" className="w-full p-2 border rounded text-xs" onChange={(e) => setInvite({ ...invite, phone: e.target.value })} />
             <label className="flex items-start gap-2 text-[12px] text-[#444]">
               <input type="checkbox" checked={invite.preApproved} onChange={(e) => setInvite({ ...invite, preApproved: e.target.checked })} className="mt-0.5" />

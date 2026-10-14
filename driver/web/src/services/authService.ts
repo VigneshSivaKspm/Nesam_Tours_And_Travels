@@ -107,8 +107,13 @@ export function describePhoneAuthError(error: unknown): string {
     case "auth/unauthorized-domain":
       return "This domain is not authorised in Firebase Authentication settings.";
     case "auth/captcha-check-failed":
-    case "auth/invalid-app-credential":
-      return "reCAPTCHA security check failed. Please refresh the page and try again.";
+    case "auth/invalid-app-credential": {
+      // The SDK hides the server's reason; log it so the real cause is visible in the console.
+      const server = (error as { customData?: { _serverResponse?: unknown } })?.customData?._serverResponse;
+      if (server) console.error("[Firebase Phone Auth] server response:", JSON.stringify(server));
+      const host = typeof window !== "undefined" ? window.location.host : "";
+      return `Security check failed on ${host || "this address"}. Open this panel at http://localhost:<port> (not an IP address or a new deployment URL) — the address must be in Firebase Console › Authentication › Settings › Authorized domains. Then refresh and try again.`;
+    }
     case "auth/billing-not-enabled":
       return "SMS verification requires Firebase Blaze plan. Please contact admin.";
     default:

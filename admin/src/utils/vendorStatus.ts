@@ -15,10 +15,10 @@ export type VendorStatus =
 export type OnboardingSection = "business" | "documents" | "fleet" | "payout";
 
 export const SECTION_LABELS: Record<OnboardingSection, string> = {
-  business: "Personal & Business Info",
-  documents: "Documents",
-  fleet: "Fleet & Vehicles",
-  payout: "Payout & Banking",
+  business: "Business details",
+  documents: "Documents (earlier applications)",
+  fleet: "Fleet documentation",
+  payout: "Account details",
 };
 
 export function normalizeVendorStatus(v: {

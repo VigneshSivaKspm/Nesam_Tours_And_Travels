@@ -89,7 +89,6 @@ import type { User } from "firebase/auth";
 import {
   subscribeToAuthUser,
   signOutUser,
-  getAuthIntent,
   setAuthIntent,
   resetRecaptchaVerifier,
 } from "./services/authService";
@@ -99,6 +98,7 @@ import {
 } from "./services/onboardingService";
 import { describeDataError } from "./utils/retry";
 import { OnboardingWizard } from "./screens/onboarding/OnboardingWizard";
+import { RegistrationGate, captureInviteFromUrl } from "./screens/onboarding/RegistrationGate";
 import { AccountStatusScreen } from "./screens/AccountStatusScreen";
 import { Button, FullScreenLoader } from "./components/onboarding/ui";
 
@@ -128,6 +128,11 @@ export function App() {
   const [vendorError, setVendorError] = useState("");
   const [listenerKey, setListenerKey] = useState(0);
   const [reapplying, setReapplying] = useState(false);
+
+  // An invitation link (…/?invite=CODE) is remembered for this tab before the phone sign-in.
+  useEffect(() => {
+    captureInviteFromUrl();
+  }, []);
 
   useEffect(() => {
     return subscribeToAuthUser((fbUser) => {
@@ -189,22 +194,21 @@ export function App() {
 
   const phone = user.phoneNumber || vendor?.record.phone || "";
 
+  // No vendor account: registration is by one-time invitation (spec page 13).
+  if (!vendor) {
+    return <RegistrationGate key={user.uid} phone={phone} onSignOut={handleSignOut} />;
+  }
+
   if (
-    !vendor ||
     status === "INCOMPLETE" ||
     status === "CHANGES_REQUESTED" ||
     (status === "REJECTED" && reapplying)
   ) {
-    const notice =
-      !vendor && getAuthIntent() === "login"
-        ? `No vendor account is registered to ${phone} yet. Complete the steps below to apply.`
-        : undefined;
     return (
       <OnboardingWizard
         key={user.uid}
-        record={vendor?.record ?? null}
+        record={vendor.record}
         phone={phone}
-        notice={notice}
         onSignOut={handleSignOut}
       />
     );
